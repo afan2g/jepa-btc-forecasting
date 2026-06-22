@@ -1,0 +1,16 @@
+# secrets
+.env
+
+# python / venv
+.venv/
+__pycache__/
+*.pyc
+
+# caches
+.lake_cache/
+.coinapi_cache/
+
+# raw data archives (parquet / csv.gz) — keep out of git
+*.csv.gz
+*.parquet
+data/raw/
