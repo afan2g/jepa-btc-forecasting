@@ -5,12 +5,12 @@ import os, sys, datetime as dt
 import boto3, pandas as pd, lakeapi
 sys.path.insert(0, os.path.dirname(__file__))
 from _common import load_env  # noqa
-from verify_lake import lake_session  # noqa
+from verify_lake import lake_session, END  # noqa  (END from $END env, default 2026-06-22)
 
 def hr(t): print("\n" + "=" * 74 + f"\n{t}\n" + "=" * 74)
 
 def present_dates(sess, table, exchange, symbol, days):
-    end = dt.datetime(2026, 6, 22); start = end - dt.timedelta(days=days)
+    end = dt.datetime.combine(END, dt.time()); start = end - dt.timedelta(days=days)
     objs = lakeapi.list_data(table=table, start=start, end=end, exchanges=[exchange],
                              symbols=[symbol], boto3_session=sess)
     return sorted({dt.date.fromisoformat(o["dt"]) for o in objs}), start.date(), end.date()

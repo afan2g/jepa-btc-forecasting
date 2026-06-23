@@ -20,6 +20,9 @@ from _common import load_env  # noqa: E402
 
 BIN_FUT = "BINANCE_FUTURES"
 PERP = "BTC-USDT-PERP"
+# Anchor "today" for coverage windows. Defaults to the original verification snapshot;
+# override to refresh, e.g. END=2026-09-01 python ingest/verify_lake.py
+END = dt.date.fromisoformat(os.environ.get("END", "2026-06-22"))
 
 
 def hr(t): print("\n" + "=" * 74 + f"\n{t}\n" + "=" * 74)
@@ -36,7 +39,7 @@ def lake_session():
 
 def coverage(sess, table, exchange, symbol, days=120):
     """Day-level coverage/gaps from metadata listing (no parquet download)."""
-    end = dt.datetime(2026, 6, 22)
+    end = dt.datetime.combine(END, dt.time())
     start = end - dt.timedelta(days=days)
     objs = lakeapi.list_data(table=table, start=start, end=end,
                              exchanges=[exchange], symbols=[symbol], boto3_session=sess)
@@ -85,8 +88,10 @@ def main():
 
     hr("3. spec §4 #1 — is origin_time POPULATED in Binance book_delta_v2? (1-day download)")
     table = "book_delta_v2"
-    start = dt.datetime(2026, 6, 1)
-    end = dt.datetime(2026, 6, 2)
+    # a day ~80d before the anchor (consolidated region); may land on a gap —
+    # verify_lake2.py picks a guaranteed-present date instead.
+    start = dt.datetime.combine(END - dt.timedelta(days=82), dt.time())
+    end = start + dt.timedelta(days=1)
     df = None
     for cols in (["origin_time", "received_time"], ["timestamp", "receipt_timestamp"], None):
         try:

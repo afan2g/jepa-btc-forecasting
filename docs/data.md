@@ -19,8 +19,10 @@ information source (spec §1). Data needed:
 | Signal (secondary) | Binance **BTC-USDT** (spot) | Crypto Lake | `book_delta_v2`, `trades` |
 | Target / label venue | Coinbase **BTC-USD** (spot) | Crypto Lake + CoinAPI (hybrid) | `book_delta_v2`, `trades` |
 
-History span: **12–24 months** for SSL pretrain; recent 3–6 mo for head finetune; clean recent
-~1 mo held out (spec §4). Planning figures below use **18 months** (547 days) unless noted.
+History span: **12–24 months** for SSL pretrain; recent 3–6 mo for head finetune; clean held-out OOS
+~1 mo (spec §4). **The OOS month must be chosen from the usable all-feed calendar (§5b), not simply
+"most recent"** — recent May–June 2026 has Binance gaps; the most-recent usable run ends 2026-05-05
+(OOS ≈ April 2026). Planning figures below use **18 months** (547 days) unless noted.
 
 ---
 
@@ -81,11 +83,13 @@ CoinAPI has **no mid-tier L2 product** — only L3 `limitbook_full` (2.27 GB/day
 ## 4. Schemas
 
 ### 4.1 Crypto Lake `book_delta_v2` (incremental L2)
-Raw parquet columns: `timestamp`, `receipt_timestamp`, `sequence_number`, `side`, `price`, `size`
-(+ partition `exchange`/`symbol`/`dt`). `lakeapi` renames `timestamp→origin_time`,
-`receipt_timestamp→received_time` (datetime64[ns]) on load. **To column-project in `load_data`,
-pass the RAW names.** `book` (snapshot) variant is 2×20 levels (85 cols). `trades` has
-`origin_time`, `received_time`, `price`, `quantity`, `side`, `id`.
+Raw parquet columns: `timestamp`, `receipt_timestamp`, `sequence_number`, **`side_is_bid` (bool)**,
+`price`, `size` (+ partition `exchange`/`symbol`/`dt`). `lakeapi` renames `timestamp→origin_time`,
+`receipt_timestamp→received_time` (datetime64[ns]) on load. **To column-project in `load_data`, pass
+the RAW names.** Update semantics: **`size` is the absolute size at that price; `size==0` removes the
+level.** There is **no per-day snapshot block** — the daily file starts mid-stream (see §5a-Recon).
+`book` (snapshot) variant is 2×20 levels (85 cols) — *not used in production* (see §5a). `trades` has
+`origin_time`, `received_time`, `price`, `quantity`, `side`∈{buy,sell}, `trade_id` (int64).
 
 ### 4.2 CoinAPI Flat Files `limitbook_full` (L3, order-by-order)
 **Semicolon-delimited** CSV.gz: `time_exchange;time_coinapi;update_type;is_buy;entry_px;entry_sx;order_id`.
@@ -109,7 +113,15 @@ assumption** (that's recon's job):
 | `entry_px`, `entry_sx` | float64 | price, size |
 | `order_id` | string | UUID (L3) |
 
-ZSTD compression, dictionary on `update_type`. Recon combines partition `dt` + `*_ns`.
+ZSTD compression, dictionary on `update_type`.
+
+**Reconstruction ordering rule (mandatory).** Replay strictly in **`seq` order** (file/row order), *not*
+by a reconstructed timestamp. The opening `SNAPSHOT` block (lowest `seq`) is the **initial book state for
+the partition day and is applied before all non-snapshot events**, even though its `time_exchange`
+carries the *prior-day close* time (e.g. 23:59:59.999). Do **not** build a wall-clock timestamp as
+`dt + time_exchange_ns` for ordering — that would sort the opening snapshot to the end of the day.
+Use `dt + time_exchange_ns` only as a *display/label* time for non-snapshot events (and clamp the
+snapshot block to the partition-day open). `seq` is the canonical order; there is no `sequence_number`.
 
 ---
 
@@ -139,28 +151,85 @@ through T+1; double-timestamped (`time_exchange`+`time_coinapi`), `taker_side` p
 
 ---
 
-## 5a. Vendor stitching (Coinbase gap-fill) — validated 2026-06-22
+## 5b. Trade-feed validation & usable all-feed calendar
 
-The hybrid plan needs CoinAPI to fill Crypto Lake's Coinbase holes seamlessly. Both conditions hold:
+**Trades drive the bar clock (§5.1), so validated directly** (Crypto Lake, 2025-06-01):
 
-- **Coverage:** CoinAPI has **12/12 sampled gap days** (entire 33-day hole + the Nov gap + singletons),
-  each with substantial `limitbook_full` (0.9–3.5 GB) and `quotes`. CoinAPI can fill every gap.
-- **Agreement (clean overlap day 2025-06-01, exchange-time 1 s grid):** Crypto Lake `book` vs CoinAPI
-  `quotes` mid — **median |Δmid| = $0.000 (0.000 bps)**, correlation **0.999982**, 89% of seconds
-  within $1, 96% within $5. No systematic offset or unit mismatch → **the stitch is seamless.**
-  (Rare transient spikes to ~$249 at isolated seconds = momentary one-sided/stale top-of-book during
-  fast moves; they wash out in bars — QC at the recon layer.)
+| Venue | rows | origin/recv empty | recv−origin lag (median/p95) | `side` | `trade_id` | file order |
+|---|---|---|---|---|---|---|
+| Binance perp | 812,701 | 0% / 0% | 57 ms / 200 ms | buy/sell | int64, **unique**, monotonic | **sorted by origin_time** |
+| Binance spot | 645,930 | 0% / 0% | 5 ms / 63 ms | buy/sell | int64, **unique**, monotonic | **sorted by origin_time** |
+| Coinbase | 274,489 | 0% / 0% | 164 ms / 238 ms | buy/sell | int64, **unique**, *not* monotonic | **NOT sorted by origin_time** |
 
-**Two caveats surfaced while validating:**
-1. **`book_delta_v2` needs continuous reconstruction.** The daily file has **no snapshot seed** and uses
-   absolute-size / `0`=remove updates. You **cannot** reconstruct one day in isolation — recon must carry
-   book state across day boundaries from a cold-start snapshot. (A naive per-day replay-from-empty looks
-   ~99% crossed; that's the method, not the data.)
-2. **The derived `book` (20-level snapshot) product is intermittently crossed on some days**
-   (e.g. 2026-04-01: 31.75% crossed, spreads to −$1188; 2025-06-01: 0%). We don't use this product in
-   production (we reconstruct from `book_delta_v2`), so it likely doesn't affect us — **confirm once recon
-   exists** by checking the reconstructed book is uncrossed on a 2026-04-01-type day. If `book_delta_v2`
-   itself proves degraded on some present days, those days also get CoinAPI fill (treat like gaps).
+- `side` = taker/aggressor side (drives CVD / aggressor imbalance, §6). Lag is always ≥0 (0% negative).
+- **Coinbase trades are not stored in `origin_time` order and `trade_id` is not monotonic** — the clock
+  **must sort Coinbase trades by `origin_time`** (Binance feeds are already ordered). One day, one
+  symbol each — extend to multi-day before relying on it.
+
+**Usable all-feed calendar (730 d to 2026-06-22)** — OOS/usable spans must be the *intersection* of all
+required feeds after gaps. Binance is the binding constraint (no backfill vendor); Coinbase gaps are
+CoinAPI-fillable:
+
+| feed | days | | feed | days |
+|---|---|---|---|---|
+| Binance perp `book_delta_v2` | 704/730 | | Coinbase `book_delta_v2` | 678/730 |
+| Binance perp `trades` | 729/730 | | Coinbase `trades` | 674/730 |
+| Binance spot `book`/`trades` | 730/730 | | `funding` / `open_interest` | 730 / 729 |
+
+- **Binance-side intersection = 704/730**; **usable with Coinbase backfill = 704/730 (96.4%)**;
+  Lake-only all-feed intersection (no backfill) = 652/730.
+- **52 Coinbase days need CoinAPI fill** within the usable set (drives the backfill cost, §8).
+- **OOS month must come from the usable calendar, not "most recent."** Most-recent contiguous usable run
+  ≥21 d = **2026-02-06 → 2026-05-05**; the prior run is 2024-06-22 → 2026-02-04 (split by 1-day Binance
+  gaps). **Recent May–June 2026 is NOT usable** (Binance `book_delta_v2` gaps). Pick OOS ≈ **April 2026**.
+
+Reproduce: `ingest/verify_trades_and_calendar.py` (anchor via `END=YYYY-MM-DD`).
+
+---
+
+## 5a. Vendor stitching (Coinbase gap-fill) — unit/timestamp sanity PASSED; recon parity PENDING
+
+**Status: NOT production-validated.** The hybrid is promising but two hard gates remain (recon-level
+parity, snapshot/day-boundary semantics). What we have shown so far:
+
+- **Coverage (done):** CoinAPI has **12/12 sampled Crypto Lake gap days** (entire 33-day hole + the Nov
+  gap + singletons), each with substantial `limitbook_full` (0.9–3.5 GB) and `quotes`. CoinAPI *can*
+  supply every gap day.
+- **Unit/timestamp sanity (done, but a weaker test than production):** on a clean overlap day
+  (2025-06-01, exchange-time 1 s grid), Crypto Lake's **derived `book`** vs CoinAPI **`quotes` (L1)** mid
+  agree — median |Δmid| = $0.000, correlation 0.999982, 89% of seconds within $1. This proves
+  **prices, units, and timestamp conventions line up** with no systematic offset. It does **not** prove
+  production parity: production uses Crypto Lake **reconstructed `book_delta_v2`** vs CoinAPI **L3
+  aggregated to L2** — neither of which was exercised here. And the rare ~$249 second-scale spikes
+  **cannot be assumed to "wash out"** for second-scale labels; they must be characterized, not dismissed.
+
+**Hard gates before treating the hybrid as production-validated:**
+1. **Recon-level parity:** reconstruct Crypto Lake `book_delta_v2` → top-K L2 and CoinAPI `limitbook_full`
+   (L3) → top-K L2 for the **same overlap day**, and compare per-level price/size and the resulting
+   labels (not just L1 mid). Quantify the spike population at the exact bar/label horizons.
+2. **Snapshot/day-boundary semantics:** apply the §4.3 / §5a-Recon ordering rules and confirm the
+   reconstructed book is uncrossed across the day boundary.
+
+### 5a-Recon. `book_delta_v2` reconstruction & reseed policy
+`book_delta_v2` is a **mid-stream incremental feed** (no per-day snapshot, absolute-size/`0`=remove), so
+recon cannot naively carry state across *every* boundary — `book_delta_v2` has gaps and Coinbase has
+large vendor-filled holes. Required policy:
+- **Initial seed:** cold-start from a known full state. Candidate seed = the first dense multi-level
+  cluster after a gap, or Crypto Lake's `book` snapshot **only on days verified uncrossed** (the `book`
+  product is intermittently crossed — see below — so validate the seed before trusting it).
+- **Gap/reseed detection:** reseed whenever (a) a partition day is missing, (b) `sequence_number`
+  discontinuity within a day, (c) a vendor switch (Lake↔CoinAPI) at a fill boundary, or (d) the
+  reconstructed book goes/stays crossed beyond a tolerance. Never carry state *through* a gap.
+- **Seed-quality gate:** after seeding, require N consecutive uncrossed, plausibly-deep snapshots before
+  emitting bars; otherwise reseed from the next candidate.
+- **Vendor-switch seams:** at each Lake→CoinAPI(fill)→Lake transition, reseed from the incoming vendor's
+  first full state; do not assume continuity across the seam.
+
+**Why the seed must be validated:** Crypto Lake's derived `book` (20-level snapshot) product is
+**intermittently crossed on some days** (2026-04-01: 31.75% crossed, spreads to −$1188; 2025-06-01: 0%).
+We don't use that product for features, but if it's used as a reseed source it must be checked first.
+Whether the underlying `book_delta_v2` *reconstruction* is also degraded on such days is **unknown until
+recon exists** — that feeds the quality-map TODO (§10); degraded present-days get CoinAPI fill like gaps.
 
 ---
 
@@ -179,11 +248,14 @@ Crypto Lake parquet, BTC, 2026-04-01:
 CoinAPI Coinbase (csv.gz): `limitbook_full` (L3) **2266 MB/day**, `quotes` 74, `trades` 68. Note the
 L3 csv.gz is ~8× Crypto Lake's L2 parquet — another reason the hybrid keeps Coinbase on Crypto Lake.
 
-| Span | Crypto Lake (all feeds) | + CoinAPI 33-day backfill | **Total raw** |
+| Span | Crypto Lake (all feeds) | + CoinAPI backfill (~52 fill days, L3) | **Total raw** |
 |---|---|---|---|
-| 12 mo | 427 GB | ~75 GB | **~0.50 TB** |
-| 18 mo | 643 GB | ~75 GB | **~0.72 TB** |
-| 24 mo | 858 GB | ~75 GB | **~0.93 TB** |
+| 12 mo | 427 GB | ~120 GB | **~0.55 TB** |
+| 18 mo | 643 GB | ~120 GB | **~0.76 TB** |
+| 24 mo | 858 GB | ~120 GB | **~0.98 TB** |
+
+(Backfilled L3 is transient — it aggregates to top-K L2 at ~10 GB after recon. Fill-day count scales
+with the chosen span; ~52 is the full 2-yr usable-calendar set, §5b.)
 
 After `recon` + bar building, the **training set collapses to GB-scale** (§7).
 
@@ -194,16 +266,23 @@ After `recon` + bar building, the **training set collapses to GB-scale** (§7).
 **Target box:** local, RTX 3070 (8 GB), **32 GB RAM**, **2 TB SATA SSD**. Decision: **local-first**
 (spec §11). No AWS egress is charged to us (Crypto Lake not requester-pays; CoinAPI on Cloudflare R2 =
 no egress), and the model is small — so cloud buys only optional *speed* on the one-time recon pass
-(a single same-region Tokyo spot instance), never a persistent cluster.
+(a single same-region **eu-west-1** spot instance — that's where the Lake bucket lives, even though
+capture is in Tokyo), never a persistent cluster.
 
 - **Disk (2 TB):** comfortable — ~0.7–0.9 TB raw + ≤60 GB processed leaves ~1 TB free. Keep raw
   compressed; never decompress `book_delta_v2` to disk.
 - **RAM (32 GB) is the binding constraint** and drives bar design. The SSL feature matrix =
   bars × features/bar × dtype:
   - bars (§5.1, ~1 bar/0.5–2 s) over 18 mo ≈ 20–47 M; features/bar (§6, ~3 venues) ≈ 150–250.
-  - **Defaults to stay RAM-resident (~10–15 GB):** store features **fp16** and tune the dollar-bar
-    threshold to **~20–30 M bars**. fp32 + fine bars (→ 30–60 GB) would not fit; fall back to
-    **mmap from the SSD** (OK for a small, GPU-bound model) only if a config pushes past RAM.
+  - **Canonical processed features are `float32`** (or typed scaled int columns), **not fp16.** The
+    milestone-0 baseline is **LightGBM** and labels are **bps-level returns** (§10) — fp16's ~3-decimal
+    mantissa corrupts both. `fp16` is allowed **only as a GPU tensor export format** for the JEPA
+    encoder, derived from the float32 canonical store.
+  - At float32, ~25 M bars × ~200 feat ≈ **~20 GB** — fits 32 GB but with little headroom. Keep it
+    resident by tuning the dollar-bar threshold toward **~20–25 M bars** and trimming feature count
+    (e.g. K=10). If a config pushes past ~24 GB, **mmap the float32 store from the SSD** (fine for a
+    small, GPU-bound model) rather than dropping to fp16. Targets (returns/triple-barrier) stay
+    `float32`/`float64` always.
 - **Recon must stream per day** — one day of Binance perp `book_delta_v2` is 109 M rows (~4 GB if
   loaded whole); process events sequentially (Rust, parallel per (day, instrument)).
 - **Training** is GPU-bound: data loaded once into RAM, SATA never in the hot path.
@@ -215,41 +294,60 @@ no egress), and the model is small — so cloud buys only optional *speed* on th
 | Item | Cost |
 |---|---|
 | Crypto Lake subscription | ~$64/mo (flat, unlimited) |
-| CoinAPI 33-day Coinbase backfill (L3 book + trades) | ~$82 (−$25 free credit ≈ $57 out of pocket) |
-| CoinAPI all historical Coinbase gaps (~46 d) | ~$113 |
-| Compute | $0 (local); optional one-off Tokyo spot for recon |
+| CoinAPI Coinbase backfill — **52 fill days** within the usable calendar (§5b), L3 book + trades | ~$120 (−$25 free credit ≈ $95 out of pocket) |
+| ↳ if only the single 33-day hole is filled | ~$82 |
+| Compute | $0 (local); optional one-off same-region (**eu-west-1**) spot for recon |
 | Storage | $0 (existing 2 TB SSD) |
+
+Backfill = ~52 Coinbase days × ~2.27 GB L3 × $1/GB + trades; the exact set is the usable-calendar fill
+list (§5b). Volatile periods (e.g. Dec'24) can run 10–20% larger.
 
 ---
 
 ## 9. Reproducing the verification
 
 ```bash
-.venv/bin/python ingest/verify_lake.py      # Lake auth + table existence/coverage (metadata only)
-.venv/bin/python ingest/verify_lake2.py     # 2-yr gap structure + origin_time (downloads ~2 GB)
-.venv/bin/python ingest/coinapi_rest.py     # CoinAPI coverage dates via the $25 REST credit
-.venv/bin/python ingest/coinapi_flatfiles.py 14   # CoinAPI flat-files coverage + 8 MB schema sample
-.venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31  # CoinAPI → Parquet
+# Coverage/calendar scripts anchor on $END (default 2026-06-22 = the snapshot below).
+# Set END=YYYY-MM-DD to refresh against a later "today".
+END=2026-06-22 .venv/bin/python ingest/verify_lake.py              # auth + table coverage (metadata)
+END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap structure + origin_time (~2 GB)
+END=2026-06-22 .venv/bin/python ingest/verify_trades_and_calendar.py  # trade validation + usable calendar
+.venv/bin/python ingest/coinapi_rest.py                          # CoinAPI coverage dates (REST $25 credit)
+.venv/bin/python ingest/coinapi_flatfiles.py 14                  # CoinAPI flat-files coverage + 8 MB schema
+.venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31   # CoinAPI → Parquet
 ```
-Scripts are throttled, resumable, and exit cleanly on quota/billing gates. Secrets live in `.env`
-(git-ignored).
+Coverage windows are **anchored on the `END` env var** (default `2026-06-22`); without it they reproduce
+the original snapshot. (The `coinapi_flatfiles.py`/`download_coinapi.py` day arguments are explicit
+already.) Scripts are throttled, resumable, and exit cleanly on quota/billing gates. Secrets in `.env`
+(git-ignored). **Figures in this doc are the 2026-06-22 snapshot** — re-run with a new `END` to refresh.
 
 ---
 
 ## 10. Open items / verification TODOs
 
-- [x] **Cross-vendor Coinbase stitching** — VALIDATED (§5a): CoinAPI covers all sampled gap days;
-      vendor mids agree to $0.000 median / 0.999982 corr on a clean overlap day.
-- [x] **Crypto Lake bucket region** — `eu-west-1` (confirmed via pyarrow S3 read; head_bucket 403s).
-- [ ] **`book_delta_v2` continuous reconstruction** — recon must seed from a snapshot and carry book
-      state across days (no per-day seed; absolute-size/0=remove). Then verify the reconstructed book is
-      uncrossed, incl. on a day where the `book` snapshot product is crossed (e.g. 2026-04-01).
-- [ ] **Crypto Lake Coinbase quality map** — scan how many *present* days have a degraded `book_delta_v2`
-      reconstruction (not just the `book` snapshot product); those get CoinAPI fill like gaps.
-- [ ] **Within-timestamp ordering for CoinAPI** (no `sequence_number`; rely on `seq` row order + L3 `order_id`).
+Done:
+- [x] **Coinbase gap-day coverage by CoinAPI** — 12/12 sampled present (§5a).
+- [x] **Unit/timestamp sanity** (L1 mid, clean day) — $0.000 median / 0.999982 corr (§5a). *Not* parity.
+- [x] **Crypto Lake bucket region** — `eu-west-1` (pyarrow S3 read; head_bucket 403s).
+- [x] **Trade-feed validation** (1 day, 3 venues) — §5b; Coinbase needs origin_time sort.
+- [x] **Usable all-feed calendar** — §5b; OOS ≈ April 2026, 52 Coinbase fill days.
+- [x] **Coverage scripts de-hard-coded** — anchor on `END` env (§9).
+
+Hard gates before the hybrid Coinbase plan is production-validated:
+- [ ] **Recon-level L3→L2 / L2 parity** — reconstruct Lake `book_delta_v2`→top-K and CoinAPI
+      `limitbook_full`→top-K on the same overlap day; compare per-level price/size **and labels** at the
+      bar/label horizons. Characterize the ~$249 second-scale spike population (do **not** assume wash-out).
+- [ ] **`book_delta_v2` continuous reconstruction + reseed policy** (§5a-Recon) — apply `seq`-order +
+      snapshot-first rules; confirm reconstructed book uncrossed across day boundaries and on a day where
+      the `book` snapshot product is crossed (e.g. 2026-04-01).
+- [ ] **Crypto Lake Coinbase quality map** — how many *present* days have a degraded `book_delta_v2`
+      *reconstruction* (not just the `book` snapshot product)? Degraded present-days get CoinAPI fill.
+
+Other open items:
+- [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
+- [ ] **Within-timestamp ordering for CoinAPI** (no `sequence_number`; rely on `seq` + L3 `order_id`).
 - [ ] **Binance downloader** — not yet built; same throttled/resumable/partitioned pattern as
-      `download_coinapi.py`, streaming per day (109 M rows). Read direct via pyarrow S3 (`eu-west-1`)
-      or lakeapi.
+      `download_coinapi.py`, streaming per day (109 M rows). Read direct via pyarrow S3 (`eu-west-1`) or lakeapi.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
 
 ---
