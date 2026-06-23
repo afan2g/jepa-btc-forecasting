@@ -21,6 +21,7 @@ class LiveReconstructor:
     def __init__(self, *, k: int, watermark_ns: int) -> None:
         self.k = k
         self.watermark_ns = watermark_ns
+        self.late_count = 0  # events dropped for arriving behind the watermark
         self._buf: list = []
         self._max_ts = None
         self._ob = OrderBook()
@@ -44,8 +45,19 @@ class LiveReconstructor:
             self._emit_delta(ev) if isinstance(ev, Delta) else self._emit_trade(ev)
 
     def push(self, ev) -> None:
-        self._buf.append(ev)
+        # Reject events that arrive behind the watermark. If an event's engine time is
+        # already at/below the release threshold computed from the max ts seen SO FAR,
+        # the watermark has passed it and earlier events were already emitted; replaying
+        # it now would apply a stale delta after later trades, corrupting every
+        # subsequent snapshot. Per docs/literature-review.md §5.3 (Flink watermark) late
+        # events are DROPPED, never retro-injected. A correct, bounded feed (skew <
+        # watermark) never trips this; a non-zero late_count signals the watermark is too
+        # small or a stream gap needs reseeding (docs/data.md §5a-Recon, deferred).
+        if self._max_ts is not None and ev.ts_engine <= self._max_ts - self.watermark_ns:
+            self.late_count += 1
+            return
         self._max_ts = ev.ts_engine if self._max_ts is None else max(self._max_ts, ev.ts_engine)
+        self._buf.append(ev)
         self._release(self._max_ts - self.watermark_ns)
 
     def flush(self) -> pd.DataFrame:

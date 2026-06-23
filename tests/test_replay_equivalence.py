@@ -55,6 +55,33 @@ def test_live_equals_offline_exactly():
     pd.testing.assert_frame_equal(offline, online, check_dtype=True)
 
 
+def test_live_drops_events_behind_the_watermark_without_corrupting():
+    """A late event (skew > watermark) must be dropped, never retro-injected into the
+    book — otherwise it corrupts every subsequent snapshot (literature-review.md §5.3)."""
+    deltas = [Delta(10, 1, "bid", 100.0, 2.0), Delta(10, 2, "ask", 101.0, 3.0),
+              Delta(100, 3, "bid", 100.0, 5.0)]
+    trades = [Trade(110, 1001, "buy", 101.0, 0.1)]
+    ordered = sorted([*deltas, *trades], key=order_key)
+
+    clean = LiveReconstructor(k=2, watermark_ns=30)
+    for ev in ordered:
+        clean.push(ev)
+    expected = clean.flush().reset_index(drop=True)
+    assert clean.late_count == 0
+
+    live = LiveReconstructor(k=2, watermark_ns=30)
+    for ev in ordered:
+        live.push(ev)
+    # ts=10 is far behind max_ts=110 (threshold 80); a fresh ask@105 that, if replayed,
+    # would wrongly appear as ask level 1 in the already-advanced book.
+    live.push(Delta(10, 99, "ask", 105.0, 7.0))
+    out = live.flush().reset_index(drop=True)
+
+    assert live.late_count == 1
+    pd.testing.assert_frame_equal(expected, out)       # late event had zero effect
+    assert pd.isna(out["ask_1_price"]).all()           # corruption (ask 105) did NOT land
+
+
 def test_live_handles_in_order_arrival_identically():
     deltas, trades = _bigger_world()
     offline = reconstruct_book_at_trades(deltas, trades, k=3).reset_index(drop=True)
