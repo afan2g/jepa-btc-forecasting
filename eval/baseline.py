@@ -17,7 +17,9 @@ class ConfigResult:
     name: str
     fold_sharpes: np.ndarray        # one OOS Sharpe per CPCV fold (the distribution)
     per_sample_pnl: np.ndarray      # OOS net PnL per sample (nan if never tested)
-    mean_fold_sharpe: float         # TRADE-level Sharpe (feeds DSR; gate also requires min_trades)
+    mean_fold_sharpe: float         # equal-weight mean of the per-fold Sharpe distribution (diagnostic)
+    trade_sharpe: float             # TRADE-level Sharpe over the AGGREGATE OOS traded series
+                                    #   (uniqueness-weighted; consistent with t_eff) -> feeds DSR
     sample_sharpe: float            # sample/time-level Sharpe incl. no-trade zeros (honest headline)
     net_pnl: float
     gross_pnl: float                # PnL before costs (gross - net = the cost wall)
@@ -84,10 +86,13 @@ def evaluate_config(matrix: pd.DataFrame, feature_cols, model: str, *,
     mcc = float(matthews_corrcoef(real_sign, pred_sign)) if n_tr > 1 and len(np.unique(pred_sign)) > 1 else 0.0
     pnl_traded = pnl_s[traded_s]
     sample_sharpe = weighted_sharpe(pnl_s, w[seen], trade_only=False)  # incl. no-trade zeros
+    # DSR input: trade Sharpe over the AGGREGATE OOS traded series (same series as t_eff), so a
+    # tiny high-Sharpe fold can't dominate the equal-weight fold mean and lift DSR over the gate.
+    trade_sharpe = weighted_sharpe(pnl_s, w[seen], traded=traded_s)
     fs = np.array(fold_sharpes, float)
     return ConfigResult(
         name=model, fold_sharpes=fs, per_sample_pnl=per_sample,
-        mean_fold_sharpe=float(fs.mean()), sample_sharpe=sample_sharpe,
+        mean_fold_sharpe=float(fs.mean()), trade_sharpe=trade_sharpe, sample_sharpe=sample_sharpe,
         net_pnl=float(np.nansum(per_sample)), gross_pnl=float(gross_s.sum()), n_trades=n_tr,
         turnover=float(n_tr / max(int(seen.sum()), 1)), t_eff=t_eff, mcc=mcc,
         skew=float(pd.Series(pnl_traded).skew()) if n_tr > 2 else 0.0,

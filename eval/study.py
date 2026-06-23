@@ -9,6 +9,9 @@ from eval.baseline import evaluate_config, CONFIGS
 from eval.cost import weighted_sharpe
 from eval.stats import deflated_sharpe, pbo
 
+# G1 is the LightGBM signal-existence gate (experiment-plan.md): only these rungs can pass it.
+LGBM_RUNGS = ("lgbm_reg", "lgbm_clf")
+
 
 def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int, k: int,
               embargo_ns: int, max_lookback_ns: int, configs=CONFIGS, extra_trials: int = 0,
@@ -32,13 +35,17 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
                                   embargo_ns=embargo_ns) for c in configs}
     naive = results["naive"]
     candidates = [r for c, r in results.items() if c != "naive"]
+    # G1 (experiment-plan.md §Phase 1) is pre-registered as whether **LightGBM** clears the
+    # gate; Ridge/DLinear are evaluated as trials (for the DSR multiple-testing benchmark and
+    # PBO) but only a LightGBM rung clearing _solo can make G1 pass.
+    gate_candidates = [r for r in candidates if r.name in LGBM_RUNGS]
 
-    # DSR per config: trade-level Sharpe vs across-trial dispersion; T = effective trade
-    # count. The pre-registered min_trades floor guards against few-trade flukes.
-    trial_sharpes = np.array([r.mean_fold_sharpe for r in results.values()])
+    # DSR per config: aggregate-OOS trade Sharpe vs across-trial dispersion; T = effective
+    # trade count (same traded series). The pre-registered min_trades floor guards few-trade flukes.
+    trial_sharpes = np.array([r.trade_sharpe for r in results.values()])
     sr_std = float(trial_sharpes.std() + 1e-9)
     n_trials = max(2, len(results) + extra_trials)
-    dsr_by = {r.name: deflated_sharpe(sr_hat=r.mean_fold_sharpe, sr_trials_std=sr_std,
+    dsr_by = {r.name: deflated_sharpe(sr_hat=r.trade_sharpe, sr_trials_std=sr_std,
                                       n_trials=n_trials, T=max(int(round(r.t_eff)), 2),
                                       skew=r.skew, kurt=r.kurt) for r in results.values()}
 
@@ -60,11 +67,11 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
                     and r.n_trades >= min_trades and r.t_eff >= min_eff_trades
                     and r.sample_sharpe >= min_sample_sharpe
                     and r.net_pnl > naive.net_pnl)
-    passing = [r for r in candidates if _solo(r)]
+    passing = [r for r in gate_candidates if _solo(r)]           # only LightGBM rungs gate G1
     g1 = bool(passing and pbo_available and pbo_val < pbo_thresh)
     g1_inconclusive = bool(passing and not pbo_available)        # would pass but PBO uncomputable
     winner = (max(passing, key=lambda r: r.net_pnl) if passing
-              else max(candidates, key=lambda r: r.net_pnl))
+              else max(gate_candidates or candidates, key=lambda r: r.net_pnl))
 
     # Per-regime: slice the WINNER's OOS PnL (no refit); sample/time-level Sharpe.
     per_regime = {}
@@ -76,8 +83,9 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
 
     def _row(r):
         return {"net_pnl": r.net_pnl, "gross_pnl": r.gross_pnl,
-                "cost_wall": r.gross_pnl - r.net_pnl, "trade_sharpe": r.mean_fold_sharpe,
-                "sample_sharpe": r.sample_sharpe, "dsr": dsr_by[r.name], "n_trades": r.n_trades,
+                "cost_wall": r.gross_pnl - r.net_pnl, "trade_sharpe": r.trade_sharpe,
+                "fold_sharpe": r.mean_fold_sharpe, "sample_sharpe": r.sample_sharpe,
+                "dsr": dsr_by[r.name], "n_trades": r.n_trades,
                 "turnover": r.turnover, "mcc": r.mcc, "passes_solo": _solo(r)}
     return {
         "g1_pass": g1,
@@ -85,8 +93,8 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
         "winner": winner.name if passing else None,
         "pbo": pbo_val, "pbo_available": pbo_available,
         "best": {"name": winner.name, "net_pnl": winner.net_pnl, "gross_pnl": winner.gross_pnl,
-                 "cost_wall": winner.gross_pnl - winner.net_pnl, "sharpe": winner.mean_fold_sharpe,
-                 "trade_sharpe": winner.mean_fold_sharpe, "sample_sharpe": winner.sample_sharpe,
+                 "cost_wall": winner.gross_pnl - winner.net_pnl, "sharpe": winner.trade_sharpe,
+                 "trade_sharpe": winner.trade_sharpe, "sample_sharpe": winner.sample_sharpe,
                  "dsr": dsr_by[winner.name], "pbo": pbo_val, "turnover": winner.turnover,
                  "mcc": winner.mcc, "n_trades": winner.n_trades},
         "rungs": {r.name: _row(r) for r in results.values()},

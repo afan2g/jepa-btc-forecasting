@@ -52,6 +52,19 @@ def test_min_sample_sharpe_floor_blocks_pass():
     assert blocked["g1_pass"] is False and blocked["winner"] is None
 
 
+def test_g1_requires_a_lightgbm_rung():
+    # G1 (experiment-plan.md) is the LightGBM signal-existence gate. A ladder with no LightGBM
+    # rung must NOT pass G1 even when the linear rung clears the solo gate.
+    df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=21)
+    full = run_study(df, feats, cost_default=None, n_groups=6, k=2, embargo_ns=lb, max_lookback_ns=lb)
+    assert full["g1_pass"] is True                                  # LightGBM rungs clear
+    no_lgbm = run_study(df, feats, cost_default=None, n_groups=6, k=2, embargo_ns=lb,
+                        max_lookback_ns=lb, configs=("naive", "ridge"))
+    assert no_lgbm["rungs"]["ridge"]["passes_solo"] is True         # ridge does clear _solo
+    assert no_lgbm["g1_pass"] is False                             # ...but G1 needs LightGBM
+    assert no_lgbm["winner"] is None
+
+
 def test_winner_is_a_passing_candidate():
     df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=8)
     out = run_study(df, feats, cost_default=None, n_groups=6, k=2,

@@ -18,6 +18,20 @@ def test_classifier_config_runs_and_signs_forecast():
     assert r.name == "lgbm_clf" and r.net_pnl is not None
 
 
+def test_dsr_input_is_aggregate_trade_sharpe():
+    # The DSR input must be the Sharpe of the AGGREGATE OOS traded series (consistent with
+    # t_eff), not the equal-weight fold mean, so a tiny high-Sharpe fold can't lift the gate.
+    from eval.cost import weighted_sharpe
+    df, feats, _ = make_matrix(n=3000, signal_strength=3.0, seed=2)
+    r = evaluate_config(df, feats, "lgbm_reg", n_groups=6, k=2, embargo_ns=0)
+    w = df["uniqueness"].to_numpy(float)
+    finite = np.isfinite(r.per_sample_pnl)
+    p = r.per_sample_pnl[finite]
+    expected = weighted_sharpe(p, w[finite], traded=(p != 0.0))   # aggregate traded series
+    assert r.trade_sharpe == expected
+    assert len(r.fold_sharpes) > 1                                 # fold distribution still kept
+
+
 def test_naive_makes_no_trades():
     df, feats, _ = make_matrix(n=2000, signal_strength=3.0, seed=6)
     r = evaluate_config(df, feats, "naive", n_groups=5, k=1, embargo_ns=0)
