@@ -1,14 +1,15 @@
+import pytest
 import pandas as pd
 from recon.events import Delta, Trade, order_key
 from recon.merge import merge_sorted
 from recon.orderbook import OrderBook
 from recon.reconstruct import reconstruct_book_at_trades
-from recon.synthetic import simple_world
+from recon.synthetic import simple_world, same_ts_world
 from recon.ingest import deltas_from_df, trades_from_df
 
 
-def _events():
-    draw, traw = simple_world()
+def _events_for(world_fn):
+    draw, traw = world_fn()
     # Rename normalized synthetic columns to RAW Lake names before ingest:
     # deltas use sequence_number, trades use id (see recon/ingest.py).
     d = deltas_from_df(pd.DataFrame(draw).rename(columns={"ts_engine": "origin_time", "seq": "sequence_number"}),
@@ -16,6 +17,10 @@ def _events():
     t = trades_from_df(pd.DataFrame(traw).rename(columns={"ts_engine": "timestamp", "seq": "id"}),
                        engine_time_col="timestamp")
     return d, t
+
+
+def _events():
+    return _events_for(simple_world)
 
 
 def test_reconstruct_matches_hand_computed_snapshots():
@@ -29,17 +34,36 @@ def test_reconstruct_matches_hand_computed_snapshots():
     assert list(out["ask_0_price"]) == [101.0, 101.0, 102.0]
 
 
-def test_no_lookahead_dropping_future_deltas_is_invariant():
-    """For each trade, deleting every delta with order key >= the trade's key must
-    not change that trade's reconstructed snapshot (spec §5.3 lookahead guard)."""
-    d, t = _events()
-    full = reconstruct_book_at_trades(d, t, k=1)
+def test_same_ts_world_matches_hand_computed_snapshots():
+    """Ground-truth for the §5.3 same-ts convention: every trade shares its ts with
+    deltas and must see those same-ts deltas applied. (The invariance test below
+    cannot pin this — flipping the convention changes full and per-trade runs
+    together — so the convention is locked here with explicit expected values.)"""
+    d, t = _events_for(same_ts_world)
+    out = reconstruct_book_at_trades(d, t, k=1)
+    assert list(out["trade_ts"]) == [10, 20, 30, 40]
+    assert list(out["mid"]) == [100.5, 100.0, 100.0, 100.5]
+    assert list(out["bid_0_price"]) == [100.0, 99.0, 99.0, 99.0]
+    assert list(out["ask_0_price"]) == [101.0, 101.0, 101.0, 102.0]
+    assert list(out["bid_0_size"]) == [2.0, 1.0, 1.0, 1.0]
+    assert list(out["ask_0_size"]) == [3.0, 3.0, 5.0, 4.0]
+
+
+@pytest.mark.parametrize("world_fn", [simple_world, same_ts_world])
+def test_no_lookahead_dropping_future_deltas_is_invariant(world_fn):
+    """For each trade, deleting every delta with order key >= the trade's key must not
+    change that trade's reconstructed snapshot, across ALL emitted columns (spec §5.3
+    lookahead guard). Runs over same_ts_world too, where deltas and trades share a
+    ts_engine, so a same-ts ordering regression (deltas no longer < trades at equal ts)
+    is caught generically rather than only by one bespoke case."""
+    d, t = _events_for(world_fn)
+    full = reconstruct_book_at_trades(d, t, k=3).reset_index(drop=True)
     for i, tr in enumerate(t):
         kept = [x for x in d if order_key(x) < order_key(tr)]
-        one = reconstruct_book_at_trades(kept, [tr], k=1)
-        assert one["mid"].iloc[0] == full["mid"].iloc[i]
-        assert one["bid_0_price"].iloc[0] == full["bid_0_price"].iloc[i]
-        assert one["ask_0_price"].iloc[0] == full["ask_0_price"].iloc[i]
+        one = reconstruct_book_at_trades(kept, [tr], k=3).reset_index(drop=True)
+        # Compare every column (prices, sizes, mid, microprice, trade fields), dtypes
+        # included — a same-ts inclusion or dtype regression fails here.
+        pd.testing.assert_frame_equal(one, full.iloc[[i]].reset_index(drop=True))
 
 
 def test_seed_book_is_not_mutated_by_reconstruction():
