@@ -10,11 +10,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _engine_col(df):
+def _shared_engine_col(*dfs):
+    """First engine-time column populated (>0 for ~all rows) in EVERY stream.
+
+    The recon convention (plan §5.3) requires ONE engine-time axis used identically for
+    deltas and trades. Selecting per-stream would, in the §4 fallback case (book
+    origin_time empty but trades' populated), put deltas on received_time and trades on
+    origin_time — mixing exchange and capture clocks and shifting trade/book order by
+    capture latency. Picking a column populated in both (origin_time preferred; docs/data.md
+    §5 'recon must align on origin_time') keeps a single clock, and fails loudly otherwise."""
     for c in ("origin_time", "received_time", "timestamp", "receipt_timestamp"):
-        if c in df.columns and (df[c].astype("int64") > 0).mean() > 0.99:
+        if all(c in df.columns and (df[c].astype("int64") > 0).mean() > 0.99 for df in dfs):
             return c
-    raise AssertionError("no populated engine-time column")
+    raise AssertionError("no engine-time column populated in all streams")
 
 
 def test_reconstruct_real_sample_is_sane():
@@ -29,8 +37,9 @@ def test_reconstruct_real_sample_is_sane():
     warm-up gate (docs/data.md §5a-Recon)."""
     dd = pd.read_parquet(FIXTURES / "book_delta_v2_sample.parquet")
     tt = pd.read_parquet(FIXTURES / "trades_sample.parquet")
-    deltas = deltas_from_df(dd, engine_time_col=_engine_col(dd))
-    trades = trades_from_df(tt, engine_time_col=_engine_col(tt))
+    col = _shared_engine_col(dd, tt)  # ONE clock for both streams (plan §5.3)
+    deltas = deltas_from_df(dd, engine_time_col=col)
+    trades = trades_from_df(tt, engine_time_col=col)
     out = reconstruct_book_at_trades(deltas, trades, k=10)
     assert len(out) > 0
     # Total order preserved (valid regardless of the cold start).
