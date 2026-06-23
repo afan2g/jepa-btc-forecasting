@@ -17,4 +17,6 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.setuptools.packages.find]
-include = ["recon*"]
+# Ship the Phase-1 baseline packages too, so a non-editable `pip install .[baseline]` can
+# import eval.*/data.* (not just runs from the repo root).
+include = ["recon*", "eval*", "data*"]
