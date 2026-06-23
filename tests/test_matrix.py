@@ -1,0 +1,43 @@
+import pytest
+from eval.matrix import validate_matrix, RESERVED
+from eval.synthetic import make_matrix
+
+
+def test_valid_matrix_passes():
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
+    validate_matrix(df, feats)  # no raise
+
+
+def test_missing_reserved_column_raises():
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
+    with pytest.raises(ValueError, match="t_available"):
+        validate_matrix(df.drop(columns=["t_available"]), feats)
+
+
+def test_feature_manifest_must_be_disjoint_from_reserved():
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
+    with pytest.raises(ValueError, match="reserved"):
+        validate_matrix(df, feats + ["cost_bps"])
+
+
+def test_unknown_feature_in_manifest_raises():
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
+    with pytest.raises(ValueError, match="not in matrix"):
+        validate_matrix(df, feats + ["nonexistent_feat"])
+
+
+def test_timing_invariants_enforced():
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
+    bad = df.copy(); bad.loc[0, "t_available"] = bad.loc[0, "t_event"] - 1
+    with pytest.raises(ValueError, match="t_available >= t_event"):
+        validate_matrix(bad, feats)
+    bad2 = df.copy(); bad2.loc[0, "t_feature_start"] = bad2.loc[0, "t_event"] + 1
+    with pytest.raises(ValueError, match="t_feature_start <= t_event"):
+        validate_matrix(bad2, feats)
+
+
+def test_baseline_requires_synchronous_t_available():
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)  # synthetic sets t_available == t_event
+    bad = df.copy(); bad.loc[0, "t_available"] = bad.loc[0, "t_event"] + 1
+    with pytest.raises(ValueError, match="t_available == t_event"):
+        validate_matrix(bad, feats)

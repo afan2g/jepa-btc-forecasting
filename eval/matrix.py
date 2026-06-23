@@ -1,0 +1,32 @@
+"""ModelMatrix contract: reserved-column registry + explicit feature manifest."""
+from __future__ import annotations
+import pandas as pd
+
+RESERVED = (
+    "y_fwd_bps", "label", "t_event", "t_barrier", "t_feature_start", "t_available",
+    "cost_bps", "half_spread_bps", "uniqueness", "regime", "horizon",
+)
+
+
+def validate_matrix(df: pd.DataFrame, feature_cols: list[str]) -> None:
+    """Validate the contract. Features come from the explicit manifest, never inferred."""
+    for c in RESERVED:
+        if c not in df.columns:
+            raise ValueError(f"ModelMatrix missing reserved column {c!r}")
+    reserved_in_manifest = set(feature_cols) & set(RESERVED)
+    if reserved_in_manifest:
+        raise ValueError(f"feature manifest includes reserved columns: {reserved_in_manifest}")
+    missing = [c for c in feature_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"manifest features not in matrix: {missing}")
+    if not (df["t_barrier"] >= df["t_event"]).all():
+        raise ValueError("invalid span: require t_barrier >= t_event")
+    if not (df["t_available"] >= df["t_event"]).all():
+        raise ValueError("invalid timing: require t_available >= t_event")
+    if not (df["t_feature_start"] <= df["t_event"]).all():
+        raise ValueError("invalid timing: require t_feature_start <= t_event")
+    if not (df["t_available"] == df["t_event"]).all():
+        raise ValueError("baseline requires t_available == t_event (synchronous decide-and-act; "
+                         "model cross-venue latency upstream by lagging features)")
+    if not ((df["uniqueness"] > 0) & (df["uniqueness"] <= 1)).all():
+        raise ValueError("uniqueness must be in (0, 1]")
