@@ -36,6 +36,14 @@ def test_timing_invariants_enforced():
         validate_matrix(bad2, feats)
 
 
+def test_label_out_of_domain_rejected():
+    # Contract restricts label to {-1,0,+1}; a stray class would corrupt lgbm_clf silently.
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
+    bad = df.copy(); bad.loc[0, "label"] = 2
+    with pytest.raises(ValueError, match="label"):
+        validate_matrix(bad, feats)
+
+
 def test_negative_costs_rejected():
     # Fail closed: negative cost/spread would invert the no-trade band and credit costs as
     # PnL, manufacturing trades and inflating the gate.
