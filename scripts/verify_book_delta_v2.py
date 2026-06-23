@@ -46,10 +46,18 @@ def lake_session():
 
 
 def engine_col(df):
+    """First engine-time column that is present AND populated (>0 for ~all rows).
+
+    origin_time may be PRESENT but empty — the spec §4 fallback case this script exists to
+    detect — so presence alone is not enough: an unpopulated origin_time would yield a
+    garbage cutoff and filter the trade fixture to the wrong span. This mirrors the
+    populated-column selection in tests/test_fixture_integration.py::_engine_col, so the
+    cutoff uses the SAME column reconstruction will use. astype('int64') normalizes both
+    int64 ns and datetime64[ns] (NaT/epoch-0 -> <=0, correctly rejected)."""
     for c in ("origin_time", "received_time", "timestamp", "receipt_timestamp"):
-        if c in df.columns:
+        if c in df.columns and (df[c].astype("int64") > 0).mean() > 0.99:
             return c
-    raise SystemExit(f"no engine-time column in {list(df.columns)}")
+    raise SystemExit(f"no populated engine-time column in {list(df.columns)}")
 
 
 sess = lake_session()
