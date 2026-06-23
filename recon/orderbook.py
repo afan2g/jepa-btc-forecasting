@@ -10,8 +10,14 @@ class OrderBook:
         self._last_seq: int | None = None
 
     def apply(self, d: Delta) -> bool:
-        """Apply a delta. Returns False if a sequence gap is detected (seq not strictly
-        increasing within the stream), True otherwise. Caller decides re-snapshot policy."""
+        """Apply a delta. Returns False when `seq` is NOT strictly increasing vs the last
+        applied delta (a duplicate/out-of-order anomaly signal), True otherwise.
+
+        This is a partial signal only: it does NOT detect a forward gap (missing
+        sequence_numbers, e.g. 5 -> 8), and neither reconstructor currently consumes the
+        return value. Full reseed-on-discontinuity (docs/data.md §5a-Recon) and
+        forward-gap detection are deferred — they need the real book_delta_v2
+        sequence_number increment semantics confirmed by Task 1's Lake capture."""
         ok = self._last_seq is None or d.seq > self._last_seq
         self._last_seq = d.seq
         book = self.bids if d.side == "bid" else self.asks
