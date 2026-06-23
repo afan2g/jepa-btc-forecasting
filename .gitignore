@@ -14,3 +14,4 @@ __pycache__/
 *.csv.gz
 *.parquet
 data/raw/
+coinapi_rate_limits/

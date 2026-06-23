@@ -44,7 +44,9 @@ BUCKET = "coinapi"
 EXCHANGE = "COINBASE"
 SYMBOL_MATCH = "+SC-COINBASE_SPOT_BTC_USD+"     # exact (trailing + excludes BTC_USDT)
 SAMPLE_BYTES = 8 * 1024 * 1024                  # 8 MB Range GET for schema sampling
-REQ_PER_MIN = 8                                 # stay under the 10/min tier limit
+# Per-tier max RPM: T0=10, T1=40, T2=160, T3=640. We're on T1 (40) -> default 32 (safe margin).
+# Bump COINAPI_RPM when the account tier rises (cumulative-spend cliffs $8/$32/$128/$512).
+REQ_PER_MIN = int(os.environ.get("COINAPI_RPM", "32"))
 
 
 # ----------------------------------------------------------------------------- rate limiting

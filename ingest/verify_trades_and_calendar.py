@@ -49,24 +49,32 @@ def present(sess, table, exch, sym, end, days):
                              exchanges=[exch], symbols=[sym], boto3_session=sess)
     return {dt.date.fromisoformat(o["dt"]) for o in objs}
 
-def coinapi_fill_status(fill_days, min_mb=50):
-    """For each Coinbase fill day, does CoinAPI have a consolidated daily limitbook_full file?
-    Returns {day: {'ok': bool, 'mb': float, 'reason': str}}. Throttled (~8/min)."""
+def coinapi_fill_status(needs, min_book_mb=50, min_trade_mb=1):
+    """needs: {day: {'book': bool, 'trades': bool}} — what CoinAPI must supply for that day.
+    Probes ONLY the needed product(s): LIMITBOOK_FULL for book, TRADES for trades. Distinguishes a
+    genuine missing file from a probe ERROR (auth/quota/network) — the latter is inconclusive, NOT
+    'unfillable'. Returns {day: {'book':{present,mb,ok}|None,'trades':{...}|None,'ok':bool,'error':bool}}.
+    Throttled (~8/min)."""
     import coinapi_flatfiles as ff
     from _common import load_env
     s3 = ff.make_client(load_env()["COINAPI_KEY"])
     out = {}
-    for d in fill_days:
+    for d, need in needs.items():
+        rec = {"book": None, "trades": None, "error": False, "reason": ""}
         try:
-            res = ff.coinbase_btc_file(s3, "coinapi", d.strftime("%Y%m%d"), "LIMITBOOK_FULL")
+            for prod, key, floor in (("book", "LIMITBOOK_FULL", min_book_mb),
+                                     ("trades", "TRADES", min_trade_mb)):
+                if not need[prod]:
+                    continue
+                res = ff.coinbase_btc_file(s3, "coinapi", d.strftime("%Y%m%d"), key)
+                mb = (res[1] / 1e6) if res else 0.0
+                rec[prod] = {"present": bool(res), "mb": round(mb, 1),
+                             "ok": bool(res) and mb >= floor}
         except Exception as e:
-            out[d] = {"ok": False, "mb": 0.0, "reason": f"error:{type(e).__name__}"}; continue
-        if not res:
-            out[d] = {"ok": False, "mb": 0.0, "reason": "missing/hourly-tail-only"}
-        else:
-            mb = res[1] / 1e6
-            out[d] = {"ok": mb >= min_mb, "mb": round(mb, 1),
-                      "reason": "ok" if mb >= min_mb else f"suspiciously small ({mb:.0f}MB)"}
+            rec["error"] = True; rec["reason"] = f"{type(e).__name__}: {str(e)[:60]}"
+        needed = [p for p in ("book", "trades") if need[p]]
+        rec["ok"] = (not rec["error"]) and all(rec[p] and rec[p]["ok"] for p in needed)
+        out[d] = rec
     return out
 
 def runs(daysset, start, end):
@@ -102,51 +110,80 @@ def calendar(sess, end, days=730, require_funding_oi=True, verify_backfill=False
     if require_funding_oi: binance &= P["funding"] & P["oi"]
     lake_all = binance & P["cb_book"] & P["cb_trade"]          # everything from Lake
     usable_assumed = binance                                  # assumes Coinbase is CoinAPI-backfillable
-    fill = sorted(d for d in usable_assumed if d not in (P["cb_book"] & P["cb_trade"]))
+    # Per fill day, what must CoinAPI supply — book and/or trades (finding: both, not just book).
+    needs = {d: {"book": d not in P["cb_book"], "trades": d not in P["cb_trade"]}
+             for d in usable_assumed if d not in (P["cb_book"] & P["cb_trade"])}
+    fill = sorted(needs)
+    nb = sum(1 for d in fill if needs[d]["book"]); nt = sum(1 for d in fill if needs[d]["trades"])
     print(f"\n  Binance-side intersection (the binding constraint): {len(binance)}/{cal_n}")
     print(f"  Lake-only all-feed intersection (incl. Coinbase):   {len(lake_all)}/{cal_n}")
     print(f"  USABLE assuming Coinbase backfill:                  {len(usable_assumed)}/{cal_n} "
           f"({100*len(usable_assumed)/cal_n:.1f}%)  [ASSUMPTION until --verify-backfill]")
-    print(f"  Coinbase days needing CoinAPI fill (within usable): {len(fill)}")
+    print(f"  Coinbase days needing CoinAPI fill: {len(fill)} (book {nb}, trades {nt})")
 
-    # (High finding) verify CoinAPI actually has each fill day; don't assume.
-    status, usable_verified = None, None
+    # (High finding) verify CoinAPI has the NEEDED product(s) per fill day; don't assume; errors != missing.
+    status, usable_verified, unfillable, errored = None, None, [], []
     if verify_backfill and fill:
-        hr(f"  Verifying CoinAPI flat-file availability for {len(fill)} fill days (throttled)")
-        status = coinapi_fill_status(fill)
-        bad = [d for d in fill if not status[d]["ok"]]
-        usable_verified = sorted(usable_assumed - set(bad))
+        hr(f"  Verifying CoinAPI book+trades for {len(fill)} fill days (throttled)")
+        status = coinapi_fill_status(needs)
         for d in fill:
-            s = status[d]; print(f"    {d}  {'OK ' if s['ok'] else 'BAD'}  {s['mb']:7.0f}MB  {s['reason']}")
-        print(f"\n  fill days CoinAPI CANNOT cover: {len(bad)} -> {[d.isoformat() for d in bad]}")
+            s = status[d]
+            if s["error"]: errored.append(d)
+            elif not s["ok"]: unfillable.append(d)
+        # conservative: drop both genuinely-unfillable AND inconclusive(error) days from usable
+        usable_verified = sorted(usable_assumed - set(unfillable) - set(errored))
+        for d in fill:
+            s = status[d]
+            bk = f"book {s['book']['mb']:.0f}MB" if s["book"] else "book—"
+            tr = f"trades {s['trades']['mb']:.0f}MB" if s["trades"] else "trades—"
+            tag = "ERROR" if s["error"] else ("OK " if s["ok"] else "MISSING")
+            print(f"    {d}  {tag:7} {bk:14} {tr:14} {s['reason']}")
+        print(f"\n  genuinely unfillable: {len(unfillable)} {[d.isoformat() for d in unfillable]}")
+        print(f"  inconclusive (probe error): {len(errored)} {[d.isoformat() for d in errored]}")
         print(f"  USABLE after verified backfill: {len(usable_verified)}/{cal_n} "
               f"({100*len(usable_verified)/cal_n:.1f}%)")
     elif fill:
         print("  (skipped CoinAPI verification — pass --verify-backfill to confirm the fill set)")
 
-    base = usable_verified if usable_verified is not None else sorted(usable_assumed)
-    r = [x for x in runs(set(base), start, end) if x[2] >= 21]
+    final_usable = usable_verified if usable_verified is not None else sorted(usable_assumed)
+    r = [x for x in runs(set(final_usable), start, end) if x[2] >= 21]
     print(f"\n  contiguous usable runs >=21d (OOS candidates):")
     for a, b, n in sorted(r, key=lambda x: -x[1].toordinal())[:6]:
         print(f"    {a} .. {b}  ({n}d)")
 
-    # (finding 3) emit the actual fill-day list + the calendar, not just counts
+    # backfill is "verified" only if it ran AND no probe errors occurred (finding: errors != verified).
+    backfill_verified = bool(verify_backfill and fill) and len(errored) == 0
+    # (finding) auditable: emit the actual day lists + why days were excluded.
+    cal_days = [start + dt.timedelta(i) for i in range((end - start).days)]
+    excluded = {}
+    req = ["binF_book", "binF_trade", "binS_book", "binS_trade"] + (["funding", "oi"] if require_funding_oi else [])
+    for d in cal_days:
+        if d in set(final_usable):
+            continue
+        reasons = [f"missing:{k}" for k in req if d not in P[k]]
+        if d in set(unfillable): reasons.append("coinbase:unfillable")
+        if d in set(errored): reasons.append("coinbase:probe_error")
+        excluded[d.isoformat()] = reasons or ["excluded"]
+
     rec = {
         "anchor_end": end.isoformat(), "days": days, "require_funding_oi": require_funding_oi,
         "feed_present_counts": {k: len(P[k]) for k in feeds},
         "binance_intersection": len(binance),
         "usable_assumed_backfill": len(usable_assumed),
-        "coinbase_fill_days": [d.isoformat() for d in fill],
-        "backfill_verified": bool(verify_backfill and fill),
+        "usable_days": [d.isoformat() for d in final_usable],
+        "lake_all_days": [d.isoformat() for d in sorted(lake_all)],
+        "excluded_days_by_reason": excluded,
+        "coinbase_fill_days": {d.isoformat(): needs[d] for d in fill},
+        "backfill_verified": backfill_verified,
         "fill_status": ({d.isoformat(): status[d] for d in fill} if status else None),
         "usable_after_verified_backfill": (len(usable_verified) if usable_verified is not None else None),
-        "fill_days_unfillable": ([d.isoformat() for d in fill if status and not status[d]["ok"]]
-                                 if status else None),
+        "fill_days_unfillable": [d.isoformat() for d in unfillable],
+        "fill_days_probe_error": [d.isoformat() for d in errored],
         "oos_candidate_runs": [[a.isoformat(), b.isoformat(), n] for a, b, n in r],
     }
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with open(out, "w") as f: json.dump(rec, f, indent=2)
-    print(f"\n  wrote calendar + fill-day list -> {out}")
+    print(f"\n  backfill_verified={backfill_verified}  wrote auditable calendar -> {out}")
 
 def parse_args():
     p = argparse.ArgumentParser(description="Trade-feed validation + usable all-feed calendar")

@@ -59,10 +59,11 @@ History span: **12–24 months** for SSL pretrain; recent 3–6 mo for head fine
     credit** (date-bounded queries capped at 10 credits; no-`limit` call = 1 credit). REST credit price
     ≈ $5.26/1,000 for the first 1,000/day, cheaper at volume. Order book here is top-N L2 **snapshots**
     (≤100 levels), not incremental — validation only, not production.
-- **Limits:** autoscaling, no static per-tier cap — but our metered key throttles at **~10 requests/min**
-  (a `SlowDown`/429 above that), plus a **concurrency** cap (`X-ConcurrencyLimit-*`). All clients
-  throttle to **8/min**. Rate-limit headers are **not reliable**; monitor via **Customer Portal →
-  Usage Explorer / Traces** (free, no credit cost). Credits **never expire**; top up $5–$5000 (PAYG).
+- **Limits (spend-tiered):** global **max RPM / concurrency** rise with cumulative spend —
+  T0 10/1 (cliff $8) · **T1 40/2 (current, cliff $32)** · T2 160/4 ($128) · T3 640/8 ($512) · T4 none.
+  Exceeding RPM → `SlowDown`/429. Clients throttle via `COINAPI_RPM` (default **32**, safe under T1's 40;
+  bump when the tier rises). Rate-limit headers are **not reliable**; monitor via **Customer Portal →
+  Usage Explorer / Traces** (free). Credits **never expire**; top up $5–$5000 (PAYG).
 - **⚠️ Before any bulk download, enable Spend Management** (Billing → Spend Management, **OFF by
   default**): set a daily credit cap + hard-stop + alerts (50/80/95%). This is the guardrail against a
   runaway backfill/full-pull bill. See §8.
@@ -190,10 +191,12 @@ CoinAPI-fillable:
 
 - **Binance-side intersection = 704/730**; **usable with Coinbase backfill = 704/730 (96.4%)**;
   Lake-only all-feed intersection (no backfill) = 652/730.
-- **52 Coinbase days need CoinAPI fill** within the usable set — **all 52 verified present in CoinAPI
-  flat files (0 unfillable)**, totalling **91.2 GB** L3 (drives the backfill cost, §8). So
-  `usable_after_verified_backfill = 704/730 (96.4%)` is *measured*, not assumed. The exact fill-day list
-  + per-day sizes + OOS runs are written to **`data/usable_calendar.json`**.
+- **52 Coinbase days need CoinAPI fill** within the usable set, split by product: **47 need book**
+  (84.6 GB L3) and **all 52 need trades** (2.6 GB) — both **verified present in CoinAPI flat files
+  (0 unfillable, 0 probe-error → `backfill_verified=True`)**. So `usable_after_verified_backfill =
+  704/730 (96.4%)` is *measured*, not assumed. The full artifact — `usable_days` (704), `lake_all_days`
+  (652), `excluded_days_by_reason` (26, e.g. `missing:binF_book`), the fill-day book/trades status, and
+  OOS runs — is written to **`data/usable_calendar.json`** (auditable without re-listing vendors).
 - **OOS month must come from the usable calendar, not "most recent."** Most-recent contiguous usable run
   ≥21 d = **2026-02-06 → 2026-05-05**; the prior run is 2024-06-22 → 2026-02-04 (split by 1-day Binance
   gaps). **Recent May–June 2026 is NOT usable** (Binance `book_delta_v2` gaps). Pick OOS ≈ **April 2026**.
@@ -310,13 +313,13 @@ capture is in Tokyo), never a persistent cluster.
 | Item | Cost |
 |---|---|
 | Crypto Lake subscription | ~$64/mo (flat, unlimited) |
-| CoinAPI Coinbase backfill — **52 fill days** (all CoinAPI-verified present, §5b), L3 book + trades | **~$102** (book 91 GB≈$91 + trades ≈$11) at flat $1/$3 per GB; −$25 credit ≈ **$77 OOP** |
+| CoinAPI Coinbase backfill (§5b, all verified), book 47 d / trades 52 d | **~$92** (book 84.6 GB≈$85 + trades 2.6 GB≈$8) at $1/$3 per GB; −$25 ≈ **$67 OOP** |
 | ↳ if only the single 33-day hole is filled | ~$82 |
 | Compute | $0 (local); optional one-off same-region (**eu-west-1**) spot for recon |
 | Storage | $0 (existing 2 TB SSD) |
 
-- Backfill GB is **measured**: the 52 fill-day L3 files total **91.2 GB** (summed from
-  `data/usable_calendar.json`, mostly the Dec'24 cluster), so ~**$91** at flat $1/GB, **plus trades**.
+- Backfill GB is **measured** (split by product, summed from `data/usable_calendar.json`): 47 book days
+  = **84.6 GB** L3 (~$85), 52 trade days = **2.6 GB** (~$8 at $3/GB) → **~$92**, mostly the Dec'24 cluster.
   If the WebSocket "Tier-1" tiered GB discount applies to flat files (unconfirmed), it'd be **less**.
 - **⚠️ Enable CoinAPI Spend Management (daily cap + hard-stop) before running the backfill or any full
   L3 pull** — it's OFF by default (§2.2). Set a daily budget, watch Billing → Overview and Usage
@@ -348,8 +351,9 @@ already.) Scripts are throttled, resumable, and exit cleanly on quota/billing ga
 ## 10. Open items / verification TODOs
 
 Done:
-- [x] **Coinbase backfill coverage by CoinAPI** — **all 52 usable-calendar fill days verified present**
-      (0 unfillable, 91.2 GB), not just a 12-day sample (§5b, `data/usable_calendar.json`).
+- [x] **Coinbase backfill coverage by CoinAPI** — all 52 fill days verified for the **needed product(s)**:
+      47 book (84.6 GB) + 52 trades (2.6 GB), 0 unfillable, 0 probe-error → `backfill_verified=True`.
+      Auditable `usable_days`/`lake_all_days`/`excluded_days_by_reason` in `data/usable_calendar.json` (§5b).
 - [x] **Unit/timestamp sanity** (L1 mid, clean day) — $0.000 median / 0.999982 corr (§5a). *Not* parity.
 - [x] **Crypto Lake bucket region** — `eu-west-1` (pyarrow S3 read; head_bucket 403s).
 - [x] **Trade-feed validation** (1 day, 3 venues) — §5b; Coinbase needs origin_time sort.
