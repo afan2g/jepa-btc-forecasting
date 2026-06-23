@@ -1,0 +1,5 @@
+# Intentionally empty.
+#
+# Add ignored local files here only if Claude/Codex managed worktrees need them.
+# Do not add `.env` unless you explicitly accept copying credentials into
+# worktrees.
