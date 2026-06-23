@@ -68,6 +68,14 @@ def test_ingest_raises_clear_error_when_side_column_missing():
         deltas_from_df(df, engine_time_col="origin_time")
 
 
+def test_ingest_rejects_unknown_side_value():
+    # An unexpected side encoding must fail loudly, not be silently classified as "ask".
+    df = pd.DataFrame({"origin_time": [1, 2], "sequence_number": [1, 2],
+                       "side": ["bid", "weird"], "price": [100.0, 101.0], "size": [1.0, 1.0]})
+    with pytest.raises(ValueError, match="unrecognized delta side"):
+        deltas_from_df(df, engine_time_col="origin_time")
+
+
 @pytest.mark.skipif(not (FIXTURES / "book_delta_v2_sample.parquet").exists(),
                     reason="needs Task 1 fixture")
 def test_ingest_real_fixture_smoke():

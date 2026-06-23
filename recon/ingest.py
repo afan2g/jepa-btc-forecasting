@@ -18,8 +18,9 @@ from __future__ import annotations
 import pandas as pd
 from recon.events import Delta, Trade
 
-# Side values meaning the bid/buy side. Covers bool `side_is_bid`, ints, and strings.
+# Known side encodings. side_is_bid is a bool; raw/legacy feeds may use strings or ints.
 _BID_VALUES = ("bid", "b", "buy", True, 1, "1")
+_ASK_VALUES = ("ask", "a", "sell", "s", False, 0, "0")
 
 
 def _pick(df: pd.DataFrame, candidates: tuple[str, ...], *, field: str) -> str:
@@ -33,7 +34,16 @@ def _pick(df: pd.DataFrame, candidates: tuple[str, ...], *, field: str) -> str:
 
 
 def _side_str(v) -> str:
-    return "bid" if v in _BID_VALUES else "ask"
+    # Schema-boundary guard: classify ONLY known encodings; raise on anything else
+    # (unexpected spelling, stringified bool, null) rather than silently defaulting to
+    # "ask", which would corrupt the reconstructed book.
+    if v in _BID_VALUES:
+        return "bid"
+    if v in _ASK_VALUES:
+        return "ask"
+    raise ValueError(
+        f"unrecognized delta side value {v!r}; expected one of {_BID_VALUES + _ASK_VALUES}"
+    )
 
 
 def _ns(s: pd.Series) -> pd.Series:
