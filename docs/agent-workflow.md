@@ -110,6 +110,17 @@ Current path:
 4. Add `AGENTS.md` review guidance.
 5. Use `@codex review` only when you need a manual re-review or a focused pass.
 
+For a longer review, use the explicit deep-review path:
+
+```bash
+scripts/request_codex_deep_review.sh <PR_NUMBER>
+```
+
+This posts a detailed `@codex` PR comment asking for a broader architecture,
+testing, reproducibility, and integration-risk review. Use it on larger PRs or
+PRs implementing a plan/spec. Keep the automatic PR-open review enabled as the
+default fast pass.
+
 ## Merge Policy
 
 - Claude agents do not merge.

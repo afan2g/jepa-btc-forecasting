@@ -86,6 +86,20 @@ file as the durable reviewer and repository-contract guidance.
   number, verify the number from the artifact when possible.
 - Call out tests or checks that were not run.
 
+## Deep Review Guidelines
+
+When a PR comment asks for a "deep review", "long review", or "architecture
+review", provide a fuller review than the default GitHub code-review pass:
+
+- Include P1/P2/P3 findings, not only merge-blocking defects.
+- Review the PR against the relevant spec/plan/docs, not just local code style.
+- Check architecture fit, data/modeling assumptions, reproducibility,
+  evaluation methodology, CI/test adequacy, and integration risks.
+- Mention "no findings" explicitly if no issues are found.
+- After findings, include open questions/assumptions and residual risks.
+- Keep summaries brief, but do not omit important non-blocking risks.
+- Do not approve or merge the PR.
+
 ## Integration Review Guidelines
 
 - Integration review answers: "Do the reviewed PRs work together?"
