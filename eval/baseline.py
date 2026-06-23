@@ -30,6 +30,8 @@ class ConfigResult:
 
 
 def _fit_predict(model, Xtr, ytr, ltr, Xte, wtr, scale):
+    if len(Xtr) < 2:        # degenerate fold (empty/near-empty train after purge) -> no trades
+        return np.zeros(len(Xte))
     if model == "naive":
         return np.zeros(len(Xte))
     if model == "ridge":
@@ -64,7 +66,7 @@ def evaluate_config(matrix: pd.DataFrame, feature_cols, model: str, *,
                     matrix["t_barrier"].to_numpy())
     acc_fc = np.zeros(len(matrix)); cnt = np.zeros(len(matrix)); fold_sharpes = []
     for tr, te in cpcv_splits(te_t, t0, t1, n_groups=n_groups, k=k, embargo_ns=embargo_ns):
-        scale = float(y[tr].std() + 1e-9)
+        scale = float(y[tr].std() + 1e-9) if len(tr) else 0.0  # empty-fold std would be nan
         fc = _fit_predict(model, X[tr], y[tr], lab[tr], X[te], w[tr], scale)
         fpnl, _, _ = net_pnl(fc, y[te], cost_bps=cost[te], half_spread_bps=half[te])
         fold_sharpes.append(weighted_sharpe(fpnl, w[te]))

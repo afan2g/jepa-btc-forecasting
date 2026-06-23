@@ -24,6 +24,34 @@ def test_naive_makes_no_trades():
     assert r.n_trades == 0 and r.net_pnl == 0.0
 
 
+def test_degenerate_empty_train_fold_does_not_crash():
+    # Clustered long-horizon spans: the per-test-span purge empties train on EVERY fold.
+    # naive/lgbm_clf already survive; ridge/lgbm_reg must degrade to a no-trade zero fold,
+    # not abort the whole study (review finding: empty-train crash).
+    import pandas as pd
+    from eval.synthetic import FEATURES
+    n = 600
+    rng = np.random.default_rng(0)
+    H = 10 ** 12                                   # horizon dwarfs the step -> spans all overlap
+    t_event = (np.arange(n, dtype=np.int64) + 1) * 1000
+    df = pd.DataFrame(rng.standard_normal((n, len(FEATURES))), columns=list(FEATURES))
+    df["y_fwd_bps"] = rng.standard_normal(n)
+    df["label"] = np.sign(df["y_fwd_bps"]).astype(int)
+    df["t_event"] = t_event
+    df["t_barrier"] = t_event + H
+    df["t_feature_start"] = t_event - H
+    df["t_available"] = t_event
+    df["cost_bps"] = 1.0
+    df["half_spread_bps"] = 0.5
+    df["uniqueness"] = 0.5
+    df["regime"] = "tight"
+    df["horizon"] = "10s"
+    for model in CONFIGS:
+        r = evaluate_config(df, list(FEATURES), model, n_groups=6, k=2, embargo_ns=0)
+        assert r.name == model            # completes without raising
+        assert np.isfinite(r.net_pnl)     # degenerate folds contribute zeros, not nan/crash
+
+
 def test_uniqueness_weight_is_passed_to_fit(monkeypatch):
     df, feats, _ = make_matrix(n=1500, signal_strength=3.0, seed=7)
     seen = {}
