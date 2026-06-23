@@ -6,9 +6,17 @@ requires-python = ">=3.12"
 # pandas). pyarrow (parquet engine) and pytest are dev/test-only — not imported by recon.
 dependencies = ["pandas"]
 
+[project.optional-dependencies]
+# Phase-1 baseline evaluator: eval/ imports scikit-learn + lightgbm at import time, and the
+# CLI (scripts/run_baseline.py) reads the ModelMatrix parquet (needs a pyarrow engine). Kept
+# as an extra so a plain `recon` install stays light; install with `pip install -e .[baseline]`.
+baseline = ["scikit-learn", "lightgbm", "pyarrow"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 
 [tool.setuptools.packages.find]
-include = ["recon*"]
+# Ship the Phase-1 baseline packages too, so a non-editable `pip install .[baseline]` can
+# import eval.*/data.* (not just runs from the repo root).
+include = ["recon*", "eval*", "data*"]
