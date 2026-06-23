@@ -61,6 +61,37 @@ def test_winner_is_a_passing_candidate():
         assert out["rungs"][out["winner"]]["passes_solo"] is True
 
 
+def test_study_pbo_is_invariant_to_row_order():
+    # PBO's CSCV blocks must be chronological. A ModelMatrix not pre-sorted by t_event (e.g.
+    # concatenated parquet partitions) must yield the SAME PBO/G1 as the sorted one. Use a
+    # time-localized signal (first half predictive, second half noise) so PBO is genuinely
+    # order-sensitive -> without the sort, the shuffled run diverges.
+    import pandas as pd
+    from eval.synthetic import FEATURES
+    n = 4800
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((n, len(FEATURES)))
+    f = X[:, 0] + np.tanh(X[:, 1]) * 1.5
+    half = n // 2
+    y = np.empty(n)
+    y[:half] = 6.0 * f[:half] + rng.standard_normal(half) * 8
+    y[half:] = rng.standard_normal(n - half) * 8
+    H = 10_000_000_000
+    te = (np.arange(n) + 1) * (H // 4)
+    df = pd.DataFrame(X, columns=list(FEATURES))
+    df["y_fwd_bps"] = y; df["label"] = np.sign(y).astype(int)
+    df["t_event"] = te; df["t_barrier"] = te + H
+    df["t_feature_start"] = te - H; df["t_available"] = te
+    df["cost_bps"] = 1.5; df["half_spread_bps"] = 0.6; df["uniqueness"] = 0.25
+    df["regime"] = np.where(X[:, 3] > 0, "tight", "wide"); df["horizon"] = "10s"
+    feats = list(FEATURES)
+    base = run_study(df, feats, cost_default=None, n_groups=6, k=2, embargo_ns=H, max_lookback_ns=H)
+    shuffled = df.sample(frac=1.0, random_state=1).reset_index(drop=True)
+    out = run_study(shuffled, feats, cost_default=None, n_groups=6, k=2, embargo_ns=H, max_lookback_ns=H)
+    assert out["pbo"] == base["pbo"]          # PBO reproducible regardless of input row order
+    assert out["g1_pass"] == base["g1_pass"]
+
+
 def test_per_regime_handles_nonrange_index():
     df, feats, lb = make_matrix(n=4000, signal_strength=4.0, seed=8)
     df.index = df["t_event"].to_numpy()           # non-range (timestamp) index

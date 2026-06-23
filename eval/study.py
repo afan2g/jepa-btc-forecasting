@@ -43,12 +43,17 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
                                       skew=r.skew, kurt=r.kurt) for r in results.values()}
 
     # PBO over the configs x common-OOS-sample matrix (selection overfitting). Fail-closed.
-    # Weight blocks by uniqueness so overlapping-label clusters don't skew the rankings.
+    # Weight blocks by uniqueness so overlapping-label clusters don't skew the rankings, and
+    # order the rows by t_event first: pbo() blocks by adjacent position, so an input matrix
+    # not already in chronological order (e.g. concatenated parquet partitions) would give a
+    # non-reproducible PBO. cpcv_splits is already order-robust; this makes PBO match it.
     w = matrix["uniqueness"].to_numpy(float)
+    te = matrix["t_event"].to_numpy()
     M = np.column_stack([r.per_sample_pnl for r in results.values()])
-    rows = np.isfinite(M).all(axis=1)
-    pbo_available = bool(rows.sum() >= 32)
-    pbo_val = float(pbo(M[rows], s=8, weights=w[rows])) if pbo_available else float("nan")
+    finite = np.where(np.isfinite(M).all(axis=1))[0]
+    finite = finite[np.argsort(te[finite], kind="stable")]
+    pbo_available = bool(finite.size >= 32)
+    pbo_val = float(pbo(M[finite], s=8, weights=w[finite])) if pbo_available else float("nan")
 
     def _solo(r):  # per-candidate gate (multiple testing handled by DSR n_trials + PBO)
         return bool(r.net_pnl > 0 and dsr_by[r.name] > dsr_thresh
