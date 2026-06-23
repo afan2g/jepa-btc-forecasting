@@ -51,6 +51,35 @@ def _ns(s: pd.Series) -> pd.Series:
     return s.astype("int64")
 
 
+# Engine-time column preference. origin_time (exchange time) first, then received_time
+# (capture time); the two raw-`qnt` names are accepted as legacy aliases.
+ENGINE_TIME_CANDIDATES = ("origin_time", "received_time", "timestamp", "receipt_timestamp")
+
+
+def is_populated(s: pd.Series) -> bool:
+    """True if an engine-time column is populated (>0 for ~all rows). origin_time can be
+    PRESENT but empty (spec §4 fallback) — population, not presence, decides usability."""
+    return (_ns(s) > 0).mean() > 0.99
+
+
+def shared_engine_time_col(*dfs: pd.DataFrame) -> str:
+    """The SINGLE engine-time column to use across ALL given streams (plan §5.3).
+
+    Returns the first candidate present AND populated in EVERY stream — origin_time
+    preferred (docs/data.md §5: 'recon must align on origin_time'), falling back to
+    received_time only if both streams populate it. This is the one authority for the
+    §5.3 single-axis convention: selecting per-stream could put deltas on received_time
+    and trades on origin_time, mixing exchange and capture clocks. Raises if no column is
+    populated across all streams, rather than silently mixing or dropping a stream."""
+    for c in ENGINE_TIME_CANDIDATES:
+        if all(c in df.columns and is_populated(df[c]) for df in dfs):
+            return c
+    raise ValueError(
+        "no engine-time column populated across all streams; "
+        f"columns per stream = {[list(df.columns) for df in dfs]}"
+    )
+
+
 def _require_populated(df: pd.DataFrame, col: str) -> None:
     if col not in df.columns:
         raise ValueError(f"engine-time column {col!r} not in {list(df.columns)}")

@@ -11,12 +11,18 @@ vendor APIs — only an explicit `python scripts/verify_book_delta_v2.py` run do
 import datetime as dt
 import os
 import pathlib
+import sys
 
 import boto3
 import lakeapi
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT = ROOT / "tests" / "fixtures"
+
+# Use the recon package's single §5.3 engine-time-axis selector (works when run directly
+# via `python scripts/...`, where repo root is not on sys.path by default).
+sys.path.insert(0, str(ROOT))
+from recon.ingest import shared_engine_time_col  # noqa: E402
 
 
 def lake_session():
@@ -47,21 +53,6 @@ def lake_session():
             f"Crypto Lake AWS key {e} not found in .env or environment "
             "(need aws_access_key_id and aws_secret_access_key)."
         ) from None
-
-
-def engine_col(df):
-    """First engine-time column that is present AND populated (>0 for ~all rows).
-
-    origin_time may be PRESENT but empty — the spec §4 fallback case this script exists to
-    detect — so presence alone is not enough: an unpopulated origin_time would yield a
-    garbage cutoff and filter the trade fixture to the wrong span. This mirrors the
-    populated-column selection in tests/test_fixture_integration.py::_engine_col, so the
-    cutoff uses the SAME column reconstruction will use. astype('int64') normalizes both
-    int64 ns and datetime64[ns] (NaT/epoch-0 -> <=0, correctly rejected)."""
-    for c in ("origin_time", "received_time", "timestamp", "receipt_timestamp"):
-        if c in df.columns and (df[c].astype("int64") > 0).mean() > 0.99:
-            return c
-    raise SystemExit(f"no populated engine-time column in {list(df.columns)}")
 
 
 def main():
@@ -98,7 +89,9 @@ def main():
     # strictly before the last retained delta) so reconstruction never snapshots a trade
     # against a book missing later deltas dropped by the row cap.
     MAX_DELTAS = 5000
-    ts_col = engine_col(deltas)
+    # ONE engine-time clock populated in BOTH streams (plan §5.3), so the cutoff and the
+    # fixture it writes match the axis reconstruction will use.
+    ts_col = shared_engine_time_col(deltas, trades)
     deltas_kept = deltas.head(MAX_DELTAS)
     if len(deltas_kept) < len(deltas):
         cutoff = deltas_kept[ts_col].max()

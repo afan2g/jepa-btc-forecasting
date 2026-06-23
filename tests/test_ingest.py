@@ -1,9 +1,36 @@
 import pandas as pd
 import pytest
 from recon.events import Delta, Trade
-from recon.ingest import deltas_from_df, trades_from_df
+from recon.ingest import deltas_from_df, trades_from_df, shared_engine_time_col
 from recon.synthetic import simple_world
 from tests.conftest import FIXTURES
+
+
+def _dt(*ns):
+    return pd.to_datetime(list(ns))
+
+
+def test_shared_engine_time_col_prefers_origin_time_in_both():
+    b = 1668470400000000000
+    d = pd.DataFrame({"origin_time": _dt(b, b + 1), "received_time": _dt(b, b + 1)})
+    t = pd.DataFrame({"origin_time": _dt(b, b + 1), "received_time": _dt(b, b + 1)})
+    assert shared_engine_time_col(d, t) == "origin_time"
+
+
+def test_shared_engine_time_col_falls_back_to_column_populated_in_both():
+    b = 1668470400000000000
+    # Deltas' origin_time is empty (§4 fallback); both populate received_time -> one clock.
+    d = pd.DataFrame({"origin_time": _dt(pd.NaT, pd.NaT), "received_time": _dt(b, b + 1)})
+    t = pd.DataFrame({"origin_time": _dt(b, b + 1), "received_time": _dt(b, b + 1)})
+    assert shared_engine_time_col(d, t) == "received_time"
+
+
+def test_shared_engine_time_col_raises_when_no_column_populated_in_all():
+    b = 1668470400000000000
+    d = pd.DataFrame({"origin_time": _dt(pd.NaT, pd.NaT), "received_time": _dt(b, b + 1)})
+    t = pd.DataFrame({"origin_time": _dt(b, b + 1)})  # trades lack received_time
+    with pytest.raises(ValueError, match="no engine-time column populated across all"):
+        shared_engine_time_col(d, t)
 
 
 def test_deltas_from_df_normalizes_synthetic():
