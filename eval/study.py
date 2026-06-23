@@ -17,6 +17,16 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
     validate_matrix(matrix, feature_cols)
     if embargo_ns < max_lookback_ns:
         raise ValueError(f"embargo_ns ({embargo_ns}) must cover max_lookback_ns ({max_lookback_ns})")
+    # Cross-check the DECLARED max_lookback_ns against the matrix's ACTUAL per-row look-back
+    # (t_event - t_feature_start). The embargo is sized to max_lookback_ns; if that scalar
+    # understates the true feature window, a post-test train row's features reach back into
+    # the test label span -> silent look-ahead leakage that inflates the gate. Fail closed
+    # using the ground-truth column the matrix already carries.
+    observed_lookback = int((matrix["t_event"] - matrix["t_feature_start"]).max())
+    if max_lookback_ns < observed_lookback:
+        raise ValueError(f"max_lookback_ns ({max_lookback_ns}) understates the matrix's actual "
+                         f"per-row look-back ({observed_lookback} = max(t_event - t_feature_start)); "
+                         f"the embargo would not cover the feature window -> look-back leakage")
 
     results = {c: evaluate_config(matrix, feature_cols, c, n_groups=n_groups, k=k,
                                   embargo_ns=embargo_ns) for c in configs}
