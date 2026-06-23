@@ -1,0 +1,30 @@
+import numpy as np
+from eval.stats import deflated_sharpe, pbo
+
+
+def test_dsr_high_when_t_large_and_sr_clears_benchmark():
+    d = deflated_sharpe(sr_hat=0.25, sr_trials_std=0.12, n_trials=4, T=3000, skew=0.0, kurt=3.0)
+    assert d > 0.95
+
+
+def test_dsr_low_when_sr_is_noise_max():
+    d = deflated_sharpe(sr_hat=0.02, sr_trials_std=0.05, n_trials=1000, T=1500, skew=0.0, kurt=3.0)
+    assert d < 0.5
+
+
+def test_dsr_requires_two_trials():
+    import pytest
+    with pytest.raises(ValueError):
+        deflated_sharpe(sr_hat=0.3, sr_trials_std=0.1, n_trials=1, T=100, skew=0.0, kurt=3.0)
+
+
+def test_pbo_high_for_all_noise_trials():
+    rng = np.random.default_rng(0)
+    assert pbo(rng.standard_normal((400, 200)), s=8) > 0.35
+
+
+def test_pbo_low_for_one_dominant_trial():
+    rng = np.random.default_rng(0)
+    M = rng.standard_normal((400, 50)) * 0.1
+    M[:, 0] += 1.0
+    assert pbo(M, s=8) < 0.1
