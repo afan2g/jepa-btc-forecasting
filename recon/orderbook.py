@@ -1,5 +1,6 @@
 """Order-book state machine. Plain dicts; min/max queries (perf deferred to Rust)."""
 from __future__ import annotations
+import heapq
 from recon.events import Delta
 
 
@@ -60,10 +61,25 @@ class OrderBook:
         # one-sidedness. With None, an all-missing column becomes object dtype and a
         # partially-missing one becomes float64, making the reconstructed schema
         # data-dependent and breaking the offline/live byte-identity guarantee.
+        #
+        # Top-K via heapq.nlargest/nsmallest, NOT sorted(...)[:k]: these are documented to
+        # equal sorted(...)[:k]/sorted(...,reverse=True)[:k] (so the output stays byte-
+        # identical) but run in O(N log k) instead of O(N log N). This matters because a
+        # parity/label sampler calls snapshot() once per grid point (86,400×/day at a 1 s
+        # grid) on a Coinbase book of ~tens of thousands of levels per side; a full sort
+        # each time would dominate the one-day run. best bid/ask (and hence mid/microprice)
+        # are read off the top-K we already computed, avoiding 4 extra full max/min scans.
         nan = float("nan")
-        m, mp = self.mid(), self.microprice()
-        bids = sorted(self.bids, reverse=True)[:k]
-        asks = sorted(self.asks)[:k]
+        bids = heapq.nlargest(k, self.bids)   # prices, descending
+        asks = heapq.nsmallest(k, self.asks)  # prices, ascending
+        bb = bids[0] if bids else None
+        ba = asks[0] if asks else None
+        if bb is not None and ba is not None:
+            bs, as_ = self.bids[bb], self.asks[ba]
+            m = (bb + ba) / 2.0
+            mp = (as_ * bb + bs * ba) / (bs + as_)
+        else:
+            m = mp = None
         out: dict = {"mid": nan if m is None else m,
                      "microprice": nan if mp is None else mp}
         for i in range(k):

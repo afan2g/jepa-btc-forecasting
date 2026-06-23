@@ -229,6 +229,30 @@ parity, snapshot/day-boundary semantics). What we have shown so far:
 2. **Snapshot/day-boundary semantics:** apply the §4.3 / §5a-Recon ordering rules and confirm the
    reconstructed book is uncrossed across the day boundary.
 
+**Tooling status (parity gate) — added, live run PENDING.** The one-day parity gate is now
+implemented and **synthetic-unit-validated** (no measured vendor results yet): `recon/coinapi.py`
+replays CoinAPI `limitbook_full` L3 → top-K L2 (seq-order, snapshot-first day-open clamp,
+defensive `SNAPSHOT/ADD/DELETE/MATCH/SET/SUB` with `order_id` state and quality counters);
+`recon/reconstruct.py::reconstruct_lake_l2_at_samples` reconstructs Lake `book_delta_v2` → top-K
+L2 on the same exchange-time grid (memory-safe, no per-row object list); `recon/parity.py`
+compares per-level price/size, mid, crossed/missing rates, the |Δmid| spike population, and
+directional label agreement at the 2 s/10 s/60 s horizons; `scripts/run_coinbase_parity.py` wires
+it on real data. Because `book_delta_v2` cold-starts with no per-day snapshot (§5a-Recon), the gate
+applies a **seed-established warm-up cutoff** (best bid/ask present, uncrossed, sustained) and
+**excludes the Lake warm-up window** from the comparison so warm-up artifacts don't drive the
+decision (`--no-warmup-gate` to disable); it also reports **per-level both-present coverage** so
+thin/one-sided top-K depths are marked, not silently dropped. The full validated seed from Lake's
+`book` snapshot product stays the deferred §5a-Recon follow-up. ⚠️ The CoinAPI **SUB/MATCH size convention is an unverified assumption** —
+absolute-size by default, `--size-policy decrement` as the A/B alternative; the live run decides
+which yields an uncrossed, parity-matching book. Run (after enabling CoinAPI Spend Management, §8):
+
+```bash
+.venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01   # one overlap day
+.venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10           # -> data/reports/
+```
+
+No measured parity numbers are recorded here until that run is executed against live data.
+
 ### 5a-Recon. `book_delta_v2` reconstruction & reseed policy
 `book_delta_v2` is a **mid-stream incremental feed** (no per-day snapshot, absolute-size/`0`=remove), so
 recon cannot naively carry state across *every* boundary — `book_delta_v2` has gaps and Coinbase has
@@ -366,6 +390,8 @@ Hard gates before the hybrid Coinbase plan is production-validated:
 - [ ] **Recon-level L3→L2 / L2 parity** — reconstruct Lake `book_delta_v2`→top-K and CoinAPI
       `limitbook_full`→top-K on the same overlap day; compare per-level price/size **and labels** at the
       bar/label horizons. Characterize the ~$249 second-scale spike population (do **not** assume wash-out).
+      *(Tooling added & synthetic-validated — `recon/coinapi.py`, `recon/parity.py`,
+      `scripts/run_coinbase_parity.py`; see §5a "Tooling status". Live measured run still pending.)*
 - [ ] **`book_delta_v2` continuous reconstruction + reseed policy** (§5a-Recon) — apply `seq`-order +
       snapshot-first rules; confirm reconstructed book uncrossed across day boundaries and on a day where
       the `book` snapshot product is crossed (e.g. 2026-04-01).

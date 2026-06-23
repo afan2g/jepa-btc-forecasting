@@ -2,9 +2,12 @@
 name = "jepa-btc"
 version = "0.0.1"
 requires-python = ">=3.12"
-# Runtime dep of the importable `recon` package (recon.ingest/reconstruct/live import
-# pandas). pyarrow (parquet engine) and pytest are dev/test-only — not imported by recon.
-dependencies = ["pandas"]
+# Runtime deps of the importable `recon` package: recon.ingest/reconstruct/live import
+# pandas; recon.reconstruct/coinapi/parity also import numpy directly (np.lexsort/where for
+# the array-path reconstruction and parity stats). numpy ships with pandas, but it is now a
+# DIRECT import so we pin it explicitly. pyarrow (parquet engine) and pytest stay dev/test-only
+# (pyarrow is used by scripts/run_coinbase_parity.py, not by the recon package itself).
+dependencies = ["pandas", "numpy"]
 
 [project.optional-dependencies]
 # Phase-1 baseline evaluator: eval/ imports scikit-learn + lightgbm at import time, and the
