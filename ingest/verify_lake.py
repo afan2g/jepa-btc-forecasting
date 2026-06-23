@@ -88,9 +88,18 @@ def main():
 
     hr("3. spec §4 #1 — is origin_time POPULATED in Binance book_delta_v2? (1-day download)")
     table = "book_delta_v2"
-    # a day ~80d before the anchor (consolidated region); may land on a gap —
-    # verify_lake2.py picks a guaranteed-present date instead.
-    start = dt.datetime.combine(END - dt.timedelta(days=82), dt.time())
+    # Pick a GUARANTEED-PRESENT date from list_data (closest present day to END-82d) so this
+    # load-bearing check never silently no-ops on a gap after END changes.
+    win_start = dt.datetime.combine(END - dt.timedelta(days=180), dt.time())
+    objs = lakeapi.list_data(table=table, start=win_start, end=dt.datetime.combine(END, dt.time()),
+                             exchanges=[BIN_FUT], symbols=[PERP], boto3_session=sess)
+    present = sorted({dt.date.fromisoformat(o["dt"]) for o in objs})
+    if not present:
+        print("  no book_delta_v2 partitions in window — cannot verify."); return
+    target = END - dt.timedelta(days=82)
+    pick = min(present, key=lambda d: abs((d - target).days))
+    print(f"  using guaranteed-present date {pick} (closest to {target})")
+    start = dt.datetime.combine(pick, dt.time())
     end = start + dt.timedelta(days=1)
     df = None
     for cols in (["origin_time", "received_time"], ["timestamp", "receipt_timestamp"], None):
