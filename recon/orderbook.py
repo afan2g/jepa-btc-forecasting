@@ -21,6 +21,16 @@ class OrderBook:
             book[d.price] = d.size
         return ok
 
+    def copy(self) -> "OrderBook":
+        """Shallow-but-independent copy: new level dicts + carried gap state. Used to
+        seed a reconstruction without mutating the caller's book (prices/sizes are
+        immutable floats, so dict() copies suffice)."""
+        ob = OrderBook()
+        ob.bids = dict(self.bids)
+        ob.asks = dict(self.asks)
+        ob._last_seq = self._last_seq
+        return ob
+
     def best_bid(self) -> float | None:
         return max(self.bids) if self.bids else None
 

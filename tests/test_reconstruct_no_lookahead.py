@@ -42,6 +42,29 @@ def test_no_lookahead_dropping_future_deltas_is_invariant():
         assert one["ask_0_price"].iloc[0] == full["ask_0_price"].iloc[i]
 
 
+def test_seed_book_is_not_mutated_by_reconstruction():
+    """A seed carried across segments must not be mutated, so reuse is deterministic."""
+    from recon.orderbook import OrderBook
+    seed = OrderBook()
+    seed.apply(Delta(5, 1, "bid", 100.0, 2.0))
+    seed.apply(Delta(5, 2, "ask", 101.0, 3.0))
+    before = (dict(seed.bids), dict(seed.asks), seed._last_seq)
+
+    # Reconstruct twice reusing the same seed; both must see the seeded book only.
+    d = [Delta(10, 3, "bid", 99.0, 5.0)]
+    t = [Trade(20, 1001, "buy", 101.0, 0.1)]
+    out1 = reconstruct_book_at_trades(d, t, k=1, seed=seed)
+    out2 = reconstruct_book_at_trades(d, t, k=1, seed=seed)
+
+    # Seed object is unchanged after both calls.
+    assert (seed.bids, seed.asks, seed._last_seq) == before
+    # Both calls produced identical results (no cross-call contamination).
+    pd.testing.assert_frame_equal(out1, out2)
+    # The trade saw the seeded best bid/ask plus the new delta level (best bid 100).
+    assert out1["bid_0_price"].iloc[0] == 100.0
+    assert out1["ask_0_price"].iloc[0] == 101.0
+
+
 def test_trade_does_not_see_same_ts_later_kind_or_its_own_impact():
     # A delta with the SAME ts but kind=trade ordering must be excluded; a same-ts
     # delta (kind=0) must be included.
