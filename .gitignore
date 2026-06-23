@@ -15,3 +15,7 @@ __pycache__/
 *.parquet
 data/raw/
 coinapi_rate_limits/
+
+# parity / recon reports (generated; can be large) — keep out of git
+data/reports/
+data/processed/
