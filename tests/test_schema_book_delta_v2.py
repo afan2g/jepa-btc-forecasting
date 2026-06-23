@@ -14,7 +14,8 @@ def test_book_delta_v2_has_required_fields():
     # update this set to the observed names if Crypto Lake differs.
     have = set(df.columns)
     assert "sequence_number" in have
-    assert {"side"} & have or {"is_bid"} & have, "no side/is_bid column"
+    # Real lakeapi book_delta_v2 uses `side_is_bid` (bool); accept legacy names too.
+    assert {"side_is_bid", "side", "is_bid"} & have, "no side_is_bid/side/is_bid column"
     assert "price" in have
     assert "size" in have or "amount" in have, "no size/amount column"
     assert {"origin_time", "received_time", "timestamp", "receipt_timestamp"} & have
