@@ -43,7 +43,14 @@ def test_real_one_day_parity_runs_and_is_well_formed(tmp_path):
     chunks = rcp.iter_coinapi_chunks(str(CAPI_PARQUET), chunk_rows=2_000_000)
     report, lake, capi = rcp.run_parity_core(lake_df, chunks, day=DAY, k=10, grid_ms=1000)
 
-    assert report["parity"]["n_grid"] == 86400
+    # Full grid spans the day; the parity comparison runs on the post-warm-up subset
+    # (gate_warmup defaults True), so n_grid is the FULL grid minus the Lake cold-start window.
+    assert report["parity"]["n_grid_full"] == 86400
+    assert report["meta"]["grid_points"] == 86400
+    assert 0 < report["parity"]["n_grid"] <= 86400
+    if report["warmup"]["established"]:
+        assert report["parity"]["since_ts"] == report["warmup"]["cutoff_ts"]
+        assert report["parity"]["n_grid"] == 86400 - report["warmup"]["excluded_samples"]
     assert report["meta"]["coinapi_event_rows"] > 0
     for q in (report["lake_quality"], report["coinapi_quality"]):
         assert 0.0 <= q["crossed_rate"] <= 1.0
