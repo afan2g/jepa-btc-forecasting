@@ -34,6 +34,17 @@ def test_noncontiguous_combo_keeps_substantial_train():
         assert len(tr) >= 40          # ~ (6-2)/6 of 120 minus purge halo, never empty
 
 
+def test_rejects_degenerate_cpcv_params():
+    import pytest
+    t0, t1 = _spans(120)
+    # k must leave at least one test and one train group: 1 <= k < n_groups.
+    for bad_k in (0, -1, 6, 7):
+        with pytest.raises(ValueError):
+            list(cpcv_splits(t0, t0, t1, n_groups=6, k=bad_k, embargo_ns=0))
+    with pytest.raises(ValueError):                       # n_groups must be >= 2
+        list(cpcv_splits(t0, t0, t1, n_groups=1, k=1, embargo_ns=0))
+
+
 def test_embargo_drops_post_test_window():
     t0, t1 = _spans(120)
     emb = 50

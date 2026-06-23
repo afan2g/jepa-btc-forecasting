@@ -31,7 +31,21 @@ def _merge_intervals(lo: np.ndarray, hi: np.ndarray):
 
 def cpcv_splits(t_event, t0, t1, *, n_groups: int, k: int, embargo_ns: int):
     """Yield (train_idx, test_idx) for every k-of-n_groups combination. embargo_ns is
-    REQUIRED (set it ≥ the longest feature look-back to avoid feature-window leakage)."""
+    REQUIRED (set it ≥ the longest feature look-back to avoid feature-window leakage).
+
+    Validates the CPCV geometry EAGERLY (before iterating) so a misconfigured experiment
+    raises instead of silently producing degenerate folds: k == n_groups leaves no train
+    group (every row tests, train empty) and k <= 0 leaves no test group, either of which
+    would read as an ordinary G1 failure rather than a bad gate setting."""
+    if n_groups < 2:
+        raise ValueError(f"n_groups must be >= 2; got {n_groups}")
+    if not (1 <= k < n_groups):
+        raise ValueError(f"k must satisfy 1 <= k < n_groups (need >=1 test and >=1 train "
+                         f"group); got k={k}, n_groups={n_groups}")
+    return _cpcv_iter(t_event, t0, t1, n_groups=n_groups, k=k, embargo_ns=embargo_ns)
+
+
+def _cpcv_iter(t_event, t0, t1, *, n_groups: int, k: int, embargo_ns: int):
     t0 = np.asarray(t0); t1 = np.asarray(t1)
     groups = make_time_groups(t_event, n_groups)
     for combo in combinations(range(n_groups), k):
