@@ -45,6 +45,14 @@ def test_rejects_degenerate_cpcv_params():
         list(cpcv_splits(t0, t0, t1, n_groups=1, k=1, embargo_ns=0))
 
 
+def test_rejects_n_groups_exceeding_sample_count():
+    import pytest
+    t0, t1 = _spans(5)                                    # 5 samples < 6 groups
+    # Fewer samples than groups leaves empty time-groups -> duplicate + empty-test folds.
+    with pytest.raises(ValueError):
+        list(cpcv_splits(t0, t0, t1, n_groups=6, k=2, embargo_ns=0))
+
+
 def test_embargo_drops_post_test_window():
     t0, t1 = _spans(120)
     emb = 50

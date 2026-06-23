@@ -35,13 +35,19 @@ def cpcv_splits(t_event, t0, t1, *, n_groups: int, k: int, embargo_ns: int):
 
     Validates the CPCV geometry EAGERLY (before iterating) so a misconfigured experiment
     raises instead of silently producing degenerate folds: k == n_groups leaves no train
-    group (every row tests, train empty) and k <= 0 leaves no test group, either of which
-    would read as an ordinary G1 failure rather than a bad gate setting."""
+    group (every row tests, train empty), k <= 0 leaves no test group, and n_groups beyond
+    the sample count leaves empty time-groups (duplicate + empty-test folds) — each would
+    read as an ordinary G1 failure rather than a bad gate setting."""
+    n_samples = len(t_event)
     if n_groups < 2:
         raise ValueError(f"n_groups must be >= 2; got {n_groups}")
     if not (1 <= k < n_groups):
         raise ValueError(f"k must satisfy 1 <= k < n_groups (need >=1 test and >=1 train "
                          f"group); got k={k}, n_groups={n_groups}")
+    if n_groups > n_samples:                             # n points fill at most n of the bins
+        raise ValueError(f"n_groups ({n_groups}) exceeds sample count ({n_samples}); some "
+                         f"time-groups would be empty, producing duplicate/empty CPCV folds. "
+                         f"Require n_groups <= n_samples.")
     return _cpcv_iter(t_event, t0, t1, n_groups=n_groups, k=k, embargo_ns=embargo_ns)
 
 
