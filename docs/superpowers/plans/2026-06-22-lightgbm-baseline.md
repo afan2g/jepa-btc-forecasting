@@ -1269,6 +1269,7 @@ Note on **#1**: because DSR scales by √T, trade-level-Sharpe×√(n_trades) �
 
 **Still honestly deferred (called out, not silent):**
 - **PBO power is weak with only 4 ladder configs** — it becomes meaningful when `extra_trials`/the config set grows during sweeps; wire a persistent study-wide trial ledger then. The hook (`extra_trials`, configs list) is in place.
+- **Sweep surface (manifest):** `run_from_manifest`/`resolve_gate` intentionally fix `configs=CONFIGS` and `extra_trials=0` (single-study scope; `DEFAULT_GATE` omits them on purpose). When sweeps begin, extend the resolved manifest surface to carry `configs`/`extra_trials` and feed a persistent cross-study trial ledger into DSR `n_trials` + PBO — otherwise multiple-testing across sweeps is undercounted.
 - **DSR `sr_trials_std` from 4 configs is a noisy benchmark estimate** — same remedy (more configs in the ledger). The point estimate × √T term dominates for large-T real edges, so the gate is still informative.
 - **Live-safety is *contract-checked*, not *enforced***: `t_available`/`t_feature_start` are validated for ordering, but verifying features actually respect them is the bars/recon job (E0.1/E0.3), asserted there.
 

@@ -182,7 +182,9 @@ def calendar(sess, end, days=730, require_funding_oi=True, verify_backfill=False
         "oos_candidate_runs": [[a.isoformat(), b.isoformat(), n] for a, b, n in r],
     }
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    with open(out, "w") as f: json.dump(rec, f, indent=2)
+    with open(out, "w") as f:
+        json.dump(rec, f, indent=2)
+        f.write("\n")
     print(f"\n  backfill_verified={backfill_verified}  wrote auditable calendar -> {out}")
 
 def parse_args():
