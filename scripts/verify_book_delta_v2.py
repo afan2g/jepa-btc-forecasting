@@ -5,12 +5,21 @@ Spec §4 check #1: is origin_time populated for Binance book_delta_v2? If empty
 """
 import datetime as dt
 import pathlib
-import boto3
+import sys
+
 import lakeapi
 
-OUT = pathlib.Path(__file__).resolve().parents[1] / "tests" / "fixtures"
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+OUT = ROOT / "tests" / "fixtures"
 OUT.mkdir(parents=True, exist_ok=True)
-sess = boto3.Session(region_name="eu-west-1")
+
+# Use the SAME explicit Crypto Lake session as the other ingest scripts: the
+# subscriber keys come from .env, NOT the personal ~/.aws default profile (which would
+# auth into the wrong account and fail with AccessDenied even when valid keys exist).
+sys.path.insert(0, str(ROOT / "ingest"))
+from verify_lake import lake_session  # noqa: E402
+
+sess = lake_session()
 
 # A 2-minute window AFTER Binance-futures book history start (2022-11-14, spec §4).
 start = dt.datetime(2022, 11, 15, 0, 0, 0)
