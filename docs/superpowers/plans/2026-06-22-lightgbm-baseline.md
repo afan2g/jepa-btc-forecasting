@@ -1,4 +1,4 @@
-# LightGBM Baseline + Signal-Existence Gate (G1) — Implementation Plan (rev. 3)
+# LightGBM Baseline + Signal-Existence Gate (G1) — Implementation Plan (rev. 4)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -37,6 +37,15 @@
 | 4 | DSR `T` = raw overlapping trade count | `T` = **effective sample size** = Σ uniqueness over trades |
 | 5 | `lgbm_clf` crashes on single-class folds | single-class fold → zeros (no trades) |
 | 6 | no gross/turnover/MCC | added to per-config result + study output |
+
+### rev. 4 fixes (third review round)
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | trade-only Sharpe feeds DSR/gate | report trade-level **and** sample/time-level Sharpe; gate adds a pre-registered `min_trades` turnover floor (lets DSR keep trade-level) |
+| 2 | CLI omits gross/turnover/MCC/inconclusive | entrypoint prints gross, cost wall, turnover, MCC, and PASS/FAIL/INCONCLUSIVE |
+| 3 | `best` chosen by net before gate → false fail | per-candidate gate; G1 passes if **any** non-naive config clears (DSR `n_trials` + study PBO handle multiple testing) |
+| 4 | stale expected test counts | corrected (test_matrix 6, test_cost 5) |
 
 ---
 
@@ -262,7 +271,7 @@ def validate_matrix(df: pd.DataFrame, feature_cols: list[str]) -> None:
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_matrix.py -v`
-Expected: PASS (5 passed)
+Expected: PASS (6 passed)
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -474,12 +483,17 @@ def net_pnl(forecast_bps, realized_bps, *, cost_bps, half_spread_bps=0.0,
     return pnl, traded, gross
 
 
-def weighted_sharpe(pnl_per_sample, weights) -> float:
-    """Uniqueness-weighted Sharpe over traded samples (overlapping labels overcount)."""
+def weighted_sharpe(pnl_per_sample, weights, *, trade_only: bool = True) -> float:
+    """Uniqueness-weighted Sharpe. trade_only=True -> over traded samples (hit quality);
+    trade_only=False -> over ALL decision samples incl. no-trade zeros (the strategy's
+    sample/time-level Sharpe). Overlapping labels overcount, hence the weighting."""
     pnl = np.asarray(pnl_per_sample, float)
     w = np.asarray(weights, float)
-    mask = pnl != 0.0
-    p, ww = pnl[mask], w[mask]
+    if trade_only:
+        mask = pnl != 0.0
+        p, ww = pnl[mask], w[mask]
+    else:
+        p, ww = pnl, w
     if len(p) < 2 or ww.sum() == 0:
         return 0.0
     mean = np.average(p, weights=ww)
@@ -490,7 +504,7 @@ def weighted_sharpe(pnl_per_sample, weights) -> float:
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_cost.py -v`
-Expected: PASS (4 passed)
+Expected: PASS (5 passed)
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -742,7 +756,8 @@ class ConfigResult:
     name: str
     fold_sharpes: np.ndarray        # one OOS Sharpe per CPCV fold (the distribution)
     per_sample_pnl: np.ndarray      # OOS net PnL per sample (nan if never tested)
-    mean_fold_sharpe: float
+    mean_fold_sharpe: float         # TRADE-level Sharpe (feeds DSR; gate also requires min_trades)
+    sample_sharpe: float            # sample/time-level Sharpe incl. no-trade zeros (honest headline)
     net_pnl: float
     gross_pnl: float                # PnL before costs (gross - net = the cost wall)
     n_trades: int
@@ -805,11 +820,12 @@ def evaluate_config(matrix: pd.DataFrame, feature_cols, model: str, *,
     real_sign = np.sign(y[seen][traded_s]).astype(int)
     mcc = float(matthews_corrcoef(real_sign, pred_sign)) if n_tr > 1 and len(np.unique(pred_sign)) > 1 else 0.0
     pnl_traded = pnl_s[traded_s]
+    sample_sharpe = weighted_sharpe(pnl_s, w[seen], trade_only=False)  # incl. no-trade zeros
     fs = np.array(fold_sharpes, float)
     return ConfigResult(
         name=model, fold_sharpes=fs, per_sample_pnl=per_sample,
-        mean_fold_sharpe=float(fs.mean()), net_pnl=float(np.nansum(per_sample)),
-        gross_pnl=float(gross_s.sum()), n_trades=n_tr,
+        mean_fold_sharpe=float(fs.mean()), sample_sharpe=sample_sharpe,
+        net_pnl=float(np.nansum(per_sample)), gross_pnl=float(gross_s.sum()), n_trades=n_tr,
         turnover=float(n_tr / max(int(seen.sum()), 1)), t_eff=t_eff, mcc=mcc,
         skew=float(pd.Series(pnl_traded).skew()) if n_tr > 2 else 0.0,
         kurt=float(pd.Series(pnl_traded).kurtosis() + 3.0) if n_tr > 3 else 3.0,
@@ -881,8 +897,8 @@ from eval.stats import deflated_sharpe, pbo
 
 
 def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int, k: int,
-              embargo_ns: int, max_lookback_ns: int, configs=CONFIGS,
-              extra_trials: int = 0, dsr_thresh: float = 0.95, pbo_thresh: float = 0.5):
+              embargo_ns: int, max_lookback_ns: int, configs=CONFIGS, extra_trials: int = 0,
+              dsr_thresh: float = 0.95, pbo_thresh: float = 0.5, min_trades: int = 30):
     validate_matrix(matrix, feature_cols)
     if embargo_ns < max_lookback_ns:
         raise ValueError(f"embargo_ns ({embargo_ns}) must cover max_lookback_ns ({max_lookback_ns})")
@@ -890,46 +906,57 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
     results = {c: evaluate_config(matrix, feature_cols, c, n_groups=n_groups, k=k,
                                   embargo_ns=embargo_ns) for c in configs}
     naive = results["naive"]
-    best = max((r for c, r in results.items() if c != "naive"), key=lambda r: r.net_pnl)
+    candidates = [r for c, r in results.items() if c != "naive"]
 
-    # DSR: best config's Sharpe vs across-trial dispersion; T = EFFECTIVE sample size
-    # (Σ uniqueness over trades), not the raw overlapping trade count.
+    # DSR per config: trade-level Sharpe vs across-trial dispersion; T = effective trade
+    # count. The pre-registered min_trades floor guards against few-trade flukes.
     trial_sharpes = np.array([r.mean_fold_sharpe for r in results.values()])
+    sr_std = float(trial_sharpes.std() + 1e-9)
     n_trials = max(2, len(results) + extra_trials)
-    dsr = deflated_sharpe(sr_hat=best.mean_fold_sharpe,
-                          sr_trials_std=float(trial_sharpes.std() + 1e-9),
-                          n_trials=n_trials, T=max(int(round(best.t_eff)), 2),
-                          skew=best.skew, kurt=best.kurt)
+    dsr_by = {r.name: deflated_sharpe(sr_hat=r.mean_fold_sharpe, sr_trials_std=sr_std,
+                                      n_trials=n_trials, T=max(int(round(r.t_eff)), 2),
+                                      skew=r.skew, kurt=r.kurt) for r in results.values()}
 
-    # PBO over the configs x common-OOS-sample matrix (real trials).
+    # PBO over the configs x common-OOS-sample matrix (selection overfitting). Fail-closed.
     M = np.column_stack([r.per_sample_pnl for r in results.values()])
     rows = np.isfinite(M).all(axis=1)
     pbo_available = bool(rows.sum() >= 32)
     pbo_val = float(pbo(M[rows], s=8)) if pbo_available else float("nan")
 
-    # Per-regime: slice the BEST config's OOS PnL (no refit).
+    def _solo(r):  # per-candidate gate (multiple testing handled by DSR n_trials + PBO)
+        return bool(r.net_pnl > 0 and dsr_by[r.name] > dsr_thresh
+                    and r.n_trades >= min_trades and r.net_pnl > naive.net_pnl)
+    passing = [r for r in candidates if _solo(r)]
+    g1 = bool(passing and pbo_available and pbo_val < pbo_thresh)
+    g1_inconclusive = bool(passing and not pbo_available)        # would pass but PBO uncomputable
+    winner = (max(passing, key=lambda r: r.net_pnl) if passing
+              else max(candidates, key=lambda r: r.net_pnl))
+
+    # Per-regime: slice the WINNER's OOS PnL (no refit); sample/time-level Sharpe.
     w = matrix["uniqueness"].to_numpy(float)
     per_regime = {}
     for reg, idx in matrix.groupby("regime").groups.items():
-        ii = np.asarray(idx); p = best.per_sample_pnl[ii]
+        ii = np.asarray(idx); p = winner.per_sample_pnl[ii]
         per_regime[str(reg)] = {"net_pnl": float(np.nansum(p)),
-                                "sharpe": weighted_sharpe(np.nan_to_num(p), w[ii]),
+                                "sample_sharpe": weighted_sharpe(np.nan_to_num(p), w[ii], trade_only=False),
                                 "n": int(np.isfinite(p).sum())}
 
-    # FAIL-CLOSED: the gate cannot PASS without a computable PBO below threshold.
-    g1 = bool(best.net_pnl > 0 and dsr > dsr_thresh and pbo_available
-              and pbo_val < pbo_thresh and best.net_pnl > naive.net_pnl)
+    def _row(r):
+        return {"net_pnl": r.net_pnl, "gross_pnl": r.gross_pnl,
+                "cost_wall": r.gross_pnl - r.net_pnl, "trade_sharpe": r.mean_fold_sharpe,
+                "sample_sharpe": r.sample_sharpe, "dsr": dsr_by[r.name], "n_trades": r.n_trades,
+                "turnover": r.turnover, "mcc": r.mcc, "passes_solo": _solo(r)}
     return {
         "g1_pass": g1,
-        "g1_inconclusive": bool(not pbo_available and not g1
-                                and best.net_pnl > 0 and dsr > dsr_thresh),
-        "best": {"name": best.name, "net_pnl": best.net_pnl, "gross_pnl": best.gross_pnl,
-                 "sharpe": best.mean_fold_sharpe, "dsr": dsr, "pbo": pbo_val,
-                 "turnover": best.turnover, "mcc": best.mcc, "t_eff": best.t_eff,
-                 "n_trades": best.n_trades},
-        "rungs": {c: {"net_pnl": r.net_pnl, "gross_pnl": r.gross_pnl,
-                      "sharpe": r.mean_fold_sharpe, "n_trades": r.n_trades,
-                      "mcc": r.mcc} for c, r in results.items()},
+        "g1_inconclusive": g1_inconclusive,
+        "winner": winner.name if passing else None,
+        "pbo": pbo_val, "pbo_available": pbo_available,
+        "best": {"name": winner.name, "net_pnl": winner.net_pnl, "gross_pnl": winner.gross_pnl,
+                 "cost_wall": winner.gross_pnl - winner.net_pnl, "sharpe": winner.mean_fold_sharpe,
+                 "trade_sharpe": winner.mean_fold_sharpe, "sample_sharpe": winner.sample_sharpe,
+                 "dsr": dsr_by[winner.name], "pbo": pbo_val, "turnover": winner.turnover,
+                 "mcc": winner.mcc, "n_trades": winner.n_trades},
+        "rungs": {r.name: _row(r) for r in results.values()},
         "per_regime": per_regime,
     }
 ```
@@ -974,7 +1001,7 @@ def test_gate_fails_on_pure_noise():
     out = run_study(df, feats, cost_default=None, n_groups=6, k=2,
                     embargo_ns=lb, max_lookback_ns=lb)
     assert out["g1_pass"] is False
-    assert out["best"]["net_pnl"] <= 0
+    assert out["winner"] is None          # no candidate cleared the gate
 ```
 
 - [ ] **Step 2: Run it**
@@ -1019,11 +1046,16 @@ def main(matrix_path, manifest_path):
         out = run_study(sub.reset_index(drop=True), man["feature_cols"], cost_default=None,
                         n_groups=6, k=2, embargo_ns=man["embargo_ns"],
                         max_lookback_ns=man["max_lookback_ns"])
-        print(f"\n=== horizon {h} ===  G1 PASS: {out['g1_pass']}")
-        b = out["best"]; print(f"  best={b['name']} net_pnl={b['net_pnl']:.1f} "
-                               f"dsr={b['dsr']:.3f} pbo={b['pbo']:.3f} trades={b['n_trades']}")
+        status = "PASS" if out["g1_pass"] else ("INCONCLUSIVE" if out["g1_inconclusive"] else "FAIL")
+        print(f"\n=== horizon {h} ===  G1: {status}  (winner={out['winner']}, pbo={out['pbo']:.3f})")
+        for name, r in out["rungs"].items():
+            print(f"  {name:9s} gross={r['gross_pnl']:.1f} net={r['net_pnl']:.1f} "
+                  f"cost_wall={r['cost_wall']:.1f} trade_sr={r['trade_sharpe']:.3f} "
+                  f"sample_sr={r['sample_sharpe']:.3f} dsr={r['dsr']:.3f} "
+                  f"turnover={r['turnover']:.3f} mcc={r['mcc']:.3f} trades={r['n_trades']} "
+                  f"pass={r['passes_solo']}")
         for reg, r in out["per_regime"].items():
-            print(f"  regime {reg:6s}: net_pnl={r['net_pnl']:.1f} sharpe={r['sharpe']:.3f} n={r['n']}")
+            print(f"  regime {reg:6s}: net={r['net_pnl']:.1f} sample_sr={r['sample_sharpe']:.3f} n={r['n']}")
 
 if __name__ == "__main__":
     main(sys.argv[1], sys.argv[2])
@@ -1081,6 +1113,14 @@ git commit -m "feat: real-feature G1 study entrypoint (manifest-driven, per-regi
 - **#4 DSR T** → `T = round(Σ uniqueness over trades)` (effective sample size). ✓
 - **#5 clf single-class** → `lgbm_clf` returns zeros on one-class folds. ✓
 - **#6 gross/turnover/MCC** → added to `ConfigResult` + study `best`/`rungs` output. ✓
+
+**rev. 4 review (third round):**
+- **#1 trade-only Sharpe** → `weighted_sharpe(trade_only=...)`; `ConfigResult.sample_sharpe` reported alongside trade-level; gate adds pre-registered `min_trades` floor (default 30). ✓
+- **#2 CLI** → entrypoint prints gross, cost_wall, turnover, MCC, trade/sample Sharpe, and PASS/FAIL/INCONCLUSIVE. ✓
+- **#3 best-before-gate** → per-candidate `_solo` gate; G1 passes if any non-naive config clears; `winner` is `None` when none do. ✓
+- **#4 stale counts** → test_matrix (6), test_cost (5) corrected. ✓
+
+Note on **#1**: because DSR scales by √T, trade-level-Sharpe×√(n_trades) ≈ sample-level-Sharpe×√(n_all), so switching the metric barely moves the DSR z-score — the `min_trades` floor is the real guard against few-trade flukes, and the sample-level Sharpe is reported for honest sizing.
 
 **Still honestly deferred (called out, not silent):**
 - **PBO power is weak with only 4 ladder configs** — it becomes meaningful when `extra_trials`/the config set grows during sweeps; wire a persistent study-wide trial ledger then. The hook (`extra_trials`, configs list) is in place.
