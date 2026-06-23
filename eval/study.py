@@ -43,10 +43,12 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
                                       skew=r.skew, kurt=r.kurt) for r in results.values()}
 
     # PBO over the configs x common-OOS-sample matrix (selection overfitting). Fail-closed.
+    # Weight blocks by uniqueness so overlapping-label clusters don't skew the rankings.
+    w = matrix["uniqueness"].to_numpy(float)
     M = np.column_stack([r.per_sample_pnl for r in results.values()])
     rows = np.isfinite(M).all(axis=1)
     pbo_available = bool(rows.sum() >= 32)
-    pbo_val = float(pbo(M[rows], s=8)) if pbo_available else float("nan")
+    pbo_val = float(pbo(M[rows], s=8, weights=w[rows])) if pbo_available else float("nan")
 
     def _solo(r):  # per-candidate gate (multiple testing handled by DSR n_trials + PBO)
         return bool(r.net_pnl > 0 and dsr_by[r.name] > dsr_thresh
@@ -60,7 +62,6 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
               else max(candidates, key=lambda r: r.net_pnl))
 
     # Per-regime: slice the WINNER's OOS PnL (no refit); sample/time-level Sharpe.
-    w = matrix["uniqueness"].to_numpy(float)
     per_regime = {}
     for reg, ii in matrix.groupby("regime").indices.items():   # .indices = positional rows (index-agnostic)
         p = winner.per_sample_pnl[ii]

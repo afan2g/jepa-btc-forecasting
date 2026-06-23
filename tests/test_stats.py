@@ -30,6 +30,19 @@ def test_pbo_low_for_one_dominant_trial():
     assert pbo(M, s=8) < 0.1
 
 
+def test_pbo_weights_are_threaded():
+    # Uniform weights reproduce the unweighted result; a dense low-uniqueness cluster that
+    # spuriously favors one config must change the gate input once it is down-weighted.
+    rng = np.random.default_rng(1)
+    M = rng.standard_normal((320, 6)) * 0.5
+    M[:, 0] += 0.4                                   # config 0 has a mild genuine edge
+    assert pbo(M, s=8, weights=np.ones(320)) == pbo(M, s=8)
+    w = np.ones(320)
+    M[:40, 1] += 6.0                                 # duplicated-exposure cluster favoring cfg 1
+    w[:40] = 0.01                                    # ...but those rows are nearly non-unique
+    assert pbo(M, s=8, weights=w) != pbo(M, s=8)
+
+
 def test_pbo_counts_lower_half_boundary_ranks():
     # The IS-best config is OOS-worst on every imbalanced split -> selection overfitting.
     # The self-inclusive /N rank pegged those boundary cases at exactly 0.5 (logit 0), so

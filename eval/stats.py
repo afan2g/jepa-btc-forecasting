@@ -19,17 +19,26 @@ def deflated_sharpe(*, sr_hat, sr_trials_std, n_trials, T, skew, kurt) -> float:
     return float(_N.cdf(z))
 
 
-def pbo(pnl_matrix: np.ndarray, *, s: int = 8) -> float:
-    """CSCV PBO over a (n_obs x n_trials) matrix; columns are distinct strategy configs."""
+def pbo(pnl_matrix: np.ndarray, *, s: int = 8, weights=None) -> float:
+    """CSCV PBO over a (n_obs x n_trials) matrix; columns are distinct strategy configs.
+
+    Block performance is a per-config mean over the rows in the block. Pass per-row
+    ``weights`` (e.g. sample uniqueness) to weight that mean so heavily-overlapping-label
+    clusters do not dominate IS/OOS rankings by duplicated exposure — consistent with the
+    uniqueness weighting used everywhere else in the evaluator. weights=None -> equal
+    weights (identical to the plain block mean)."""
     M = np.asarray(pnl_matrix, float)
     if M.shape[1] < 2:
         raise ValueError("PBO needs >= 2 trial configs (columns)")
+    w = np.ones(M.shape[0]) if weights is None else np.asarray(weights, float)
     blocks = np.array_split(np.arange(M.shape[0]), s)
     logits = []
     for tr in combinations(range(s), s // 2):
         te = [b for b in range(s) if b not in tr]
-        is_perf = M[np.concatenate([blocks[b] for b in tr])].mean(0)
-        oos_perf = M[np.concatenate([blocks[b] for b in te])].mean(0)
+        tr_rows = np.concatenate([blocks[b] for b in tr])
+        te_rows = np.concatenate([blocks[b] for b in te])
+        is_perf = np.average(M[tr_rows], axis=0, weights=w[tr_rows])
+        oos_perf = np.average(M[te_rows], axis=0, weights=w[te_rows])
         best = int(np.argmax(is_perf))
         # Relative OOS rank of the IS-best config with an (N+1) denominator (CSCV). The
         # selected config is in the numerator, so a /N (mean) rank pegs the worst config at
