@@ -1,4 +1,4 @@
-# LightGBM Baseline + Signal-Existence Gate (G1) — Implementation Plan (rev. 2)
+# LightGBM Baseline + Signal-Existence Gate (G1) — Implementation Plan (rev. 3)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -27,6 +27,19 @@
 
 ---
 
+## rev. 3 fixes (second review round)
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | `half_spread_bps` carried but not charged | `net_pnl` charges `cost_bps + 2×half_spread_bps` (mid-anchored round trip crosses twice) |
+| 2 | `t_available` recorded but not used → credit for pre-actionable returns | `validate_matrix` **enforces `t_available == t_event`** (synchronous; latency handled upstream by lagging features) |
+| 3 | G1 passes when PBO is `nan` | gate **fails closed**; `g1_inconclusive` flag when PBO uncomputable |
+| 4 | DSR `T` = raw overlapping trade count | `T` = **effective sample size** = Σ uniqueness over trades |
+| 5 | `lgbm_clf` crashes on single-class folds | single-class fold → zeros (no trades) |
+| 6 | no gross/turnover/MCC | added to per-config result + study output |
+
+---
+
 ## The `ModelMatrix` contract (revised)
 
 A pandas DataFrame, one row per (bar, horizon) sample. **Columns are partitioned into three sets:**
@@ -37,9 +50,9 @@ A pandas DataFrame, one row per (bar, horizon) sample. **Columns are partitioned
 - `t_event` (int ns) — decision time (the bar's engine time).
 - `t_barrier` (int ns) — end of the label span; span = `[t_event, t_barrier]`.
 - `t_feature_start` (int ns) — earliest input timestamp any feature in the row depends on (for lookback/embargo verification). Must be ≤ `t_event`.
-- `t_available` (int ns) — when the full feature vector was actually actionable (latency-aware; ≥ `t_event`). Cross-venue/latency-lagged features push this later.
-- `cost_bps` (float) — per-sample round-trip taker cost (2×fee + slippage estimate).
-- `half_spread_bps` (float) — per-sample half-spread (band/regime input).
+- `t_available` (int ns) — when the full feature vector was actually actionable. **For this baseline it must equal `t_event`** (synchronous decide-and-act); cross-venue/transport latency is handled *upstream* by lagging the feature so the value known at `t_event` already respects latency. Retained for future asynchronous-action modeling (where the label would instead anchor at `t_available`).
+- `cost_bps` (float) — per-sample round-trip cost from **fees + slippage only** (`2×fee + slippage`), against a mid-anchored return. Spread is charged separately.
+- `half_spread_bps` (float) — per-sample half-spread. Charged in PnL: a mid-anchored taker round trip crosses the spread twice, so total cost = `cost_bps + 2×half_spread_bps + margin`.
 - `uniqueness` (float ∈ (0,1]) — average-uniqueness sample weight (overlapping labels overcount).
 - `regime` (category/str) — spread/vol bucket for stratified reporting.
 - `horizon` (str) — e.g. `2s`, `10s`, `60s`.
@@ -128,7 +141,7 @@ def make_matrix(n: int = 8000, *, signal_strength: float, seed: int,
     df["t_event"] = t_event
     df["t_barrier"] = t_barrier
     df["t_feature_start"] = t_event - lookback
-    df["t_available"] = t_event + latency_ns
+    df["t_available"] = t_event  # synchronous baseline: latency handled upstream by lagging features
     df["cost_bps"] = np.where(regime == "wide", 4.0, 1.5)
     df["half_spread_bps"] = np.where(regime == "wide", 2.0, 0.6)
     df["uniqueness"] = _concurrency_uniqueness(t_event, t_barrier)
@@ -194,6 +207,13 @@ def test_timing_invariants_enforced():
     bad2 = df.copy(); bad2.loc[0, "t_feature_start"] = bad2.loc[0, "t_event"] + 1
     with pytest.raises(ValueError, match="t_feature_start <= t_event"):
         validate_matrix(bad2, feats)
+
+
+def test_baseline_requires_synchronous_t_available():
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)  # synthetic sets t_available == t_event
+    bad = df.copy(); bad.loc[0, "t_available"] = bad.loc[0, "t_event"] + 1
+    with pytest.raises(ValueError, match="t_available == t_event"):
+        validate_matrix(bad, feats)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -232,6 +252,9 @@ def validate_matrix(df: pd.DataFrame, feature_cols: list[str]) -> None:
         raise ValueError("invalid timing: require t_available >= t_event")
     if not (df["t_feature_start"] <= df["t_event"]).all():
         raise ValueError("invalid timing: require t_feature_start <= t_event")
+    if not (df["t_available"] == df["t_event"]).all():
+        raise ValueError("baseline requires t_available == t_event (synchronous decide-and-act; "
+                         "model cross-venue latency upstream by lagging features)")
     if not ((df["uniqueness"] > 0) & (df["uniqueness"] <= 1)).all():
         raise ValueError("uniqueness must be in (0, 1]")
 ```
@@ -385,18 +408,27 @@ from eval.cost import net_pnl, weighted_sharpe
 def test_per_sample_cost_band():
     fc = np.array([3.0, 3.0, -5.0])
     rr = np.array([4.0, 4.0, -3.0])
-    cost = np.array([5.0, 1.0, 1.0])     # sample0 band too high to trade
-    pnl, traded = net_pnl(fc, rr, cost_bps=cost)
+    cost = np.array([5.0, 1.0, 1.0])     # sample0 band too high to trade; no spread here
+    pnl, traded, gross = net_pnl(fc, rr, cost_bps=cost)
     assert traded.tolist() == [False, True, True]
     assert pnl[1] == 4.0 - 1.0           # +1*4 - 1
     assert pnl[2] == 3.0 - 1.0           # -1*-3 - 1
+    assert gross[1] == 4.0
+
+
+def test_spread_charged_via_two_crossings():
+    fc = np.array([5.0]); rr = np.array([4.0])
+    pnl, traded, gross = net_pnl(fc, rr, cost_bps=np.array([1.0]),
+                                 half_spread_bps=np.array([0.5]))
+    # total cost = 1 + 2*0.5 = 2 ; band 2 ; |5|>2 trade ; pnl = 4 - 2 ; gross = 4
+    assert traded[0] and pnl[0] == 2.0 and gross[0] == 4.0
 
 
 def test_zero_edge_loses_costs():
     rng = np.random.default_rng(0)
     rr = rng.standard_normal(5000) * 10
     fc = rng.standard_normal(5000) * 10
-    pnl, traded = net_pnl(fc, rr, cost_bps=np.full(5000, 2.0))
+    pnl, traded, _ = net_pnl(fc, rr, cost_bps=np.full(5000, 2.0))
     assert pnl[traded].mean() < 0
 
 
@@ -420,22 +452,26 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'eval.cost'`
 
 `eval/cost.py`:
 ```python
-"""No-trade-band, fees-included PnL with PER-SAMPLE cost; uniqueness-weighted Sharpe."""
+"""No-trade-band, fees-included PnL with PER-SAMPLE cost + spread; uniqueness-weighted Sharpe."""
 from __future__ import annotations
 import numpy as np
 
 
-def net_pnl(forecast_bps, realized_bps, *, cost_bps, margin_bps=0.0):
-    """Trade when |forecast| > per-sample (cost+margin). PnL = sign(forecast)*realized -
-    cost. cost_bps may be scalar or per-sample array. Honest taker fills (full cost each
-    trade). Returns (pnl_per_sample, traded_mask)."""
-    fc = np.asarray(forecast_bps, float)
-    rr = np.asarray(realized_bps, float)
-    cost = np.asarray(cost_bps, float) * np.ones_like(fc)
-    band = cost + margin_bps
+def net_pnl(forecast_bps, realized_bps, *, cost_bps, half_spread_bps=0.0,
+            spread_crossings=2, margin_bps=0.0):
+    """Trade when |forecast| > total per-sample band, where
+    total_cost = cost_bps + spread_crossings*half_spread_bps. A mid-anchored taker round
+    trip crosses the spread twice (buy at ask, sell at bid) -> spread_crossings=2.
+    cost_bps/half_spread_bps may be scalar or per-sample arrays. Honest taker fills.
+    Returns (pnl_per_sample, traded_mask, gross_pnl_per_sample)."""
+    fc = np.asarray(forecast_bps, float); rr = np.asarray(realized_bps, float)
+    total_cost = (np.asarray(cost_bps, float)
+                  + spread_crossings * np.asarray(half_spread_bps, float)) * np.ones_like(fc)
+    band = total_cost + margin_bps
     traded = np.abs(fc) > band
-    pnl = np.where(traded, np.sign(fc) * rr - cost, 0.0)
-    return pnl, traded
+    gross = np.where(traded, np.sign(fc) * rr, 0.0)
+    pnl = np.where(traded, gross - total_cost, 0.0)
+    return pnl, traded, gross
 
 
 def weighted_sharpe(pnl_per_sample, weights) -> float:
@@ -693,6 +729,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
+from sklearn.metrics import matthews_corrcoef
 import lightgbm as lgb
 from data.cv import cpcv_splits
 from eval.cost import net_pnl, weighted_sharpe
@@ -704,10 +741,14 @@ CONFIGS = ("naive", "ridge", "lgbm_reg", "lgbm_clf")
 class ConfigResult:
     name: str
     fold_sharpes: np.ndarray        # one OOS Sharpe per CPCV fold (the distribution)
-    per_sample_pnl: np.ndarray      # OOS PnL per sample (nan if never tested)
+    per_sample_pnl: np.ndarray      # OOS net PnL per sample (nan if never tested)
     mean_fold_sharpe: float
     net_pnl: float
+    gross_pnl: float                # PnL before costs (gross - net = the cost wall)
     n_trades: int
+    turnover: float                 # trades / OOS samples
+    t_eff: float                    # effective sample size = Σ uniqueness over trades
+    mcc: float                      # sign(forecast) vs sign(realized) over trades
     skew: float
     kurt: float
 
@@ -723,6 +764,8 @@ def _fit_predict(model, Xtr, ytr, ltr, Xte, wtr, scale):
         m.fit(Xtr, ytr, sample_weight=wtr)
         return m.predict(Xte)
     if model == "lgbm_clf":
+        if len(np.unique(ltr)) < 2:        # single-class fold (heavy-flat regime) -> no trades
+            return np.zeros(len(Xte))
         m = lgb.LGBMClassifier(n_estimators=200, num_leaves=31, learning_rate=0.05,
                                min_child_samples=50, subsample=0.8, verbose=-1)
         m.fit(Xtr, ltr, sample_weight=wtr)
@@ -739,28 +782,37 @@ def evaluate_config(matrix: pd.DataFrame, feature_cols, model: str, *,
     y = matrix["y_fwd_bps"].to_numpy(float)
     lab = matrix["label"].to_numpy(int)
     cost = matrix["cost_bps"].to_numpy(float)
+    half = matrix["half_spread_bps"].to_numpy(float)
     w = matrix["uniqueness"].to_numpy(float)
     te_t, t0, t1 = (matrix["t_event"].to_numpy(), matrix["t_event"].to_numpy(),
                     matrix["t_barrier"].to_numpy())
-    acc = np.zeros(len(matrix)); cnt = np.zeros(len(matrix)); fold_sharpes = []
+    acc_fc = np.zeros(len(matrix)); cnt = np.zeros(len(matrix)); fold_sharpes = []
     for tr, te in cpcv_splits(te_t, t0, t1, n_groups=n_groups, k=k, embargo_ns=embargo_ns):
         scale = float(y[tr].std() + 1e-9)
         fc = _fit_predict(model, X[tr], y[tr], lab[tr], X[te], w[tr], scale)
-        pnl, _ = net_pnl(fc, y[te], cost_bps=cost[te])
-        fold_sharpes.append(weighted_sharpe(pnl, w[te]))
-        acc[te] += pnl; cnt[te] += 1
-    per_sample = np.full(len(matrix), np.nan)
+        fpnl, _, _ = net_pnl(fc, y[te], cost_bps=cost[te], half_spread_bps=half[te])
+        fold_sharpes.append(weighted_sharpe(fpnl, w[te]))
+        acc_fc[te] += fc; cnt[te] += 1
     seen = cnt > 0
-    per_sample[seen] = acc[seen] / cnt[seen]
-    traded = per_sample[seen] != 0.0
-    pnl_traded = per_sample[seen][traded]
+    fc_ps = np.full(len(matrix), np.nan); fc_ps[seen] = acc_fc[seen] / cnt[seen]
+    # Per-sample PnL from the averaged OOS forecast -> consistent pnl/gross/traded/mcc.
+    pnl_s, traded_s, gross_s = net_pnl(fc_ps[seen], y[seen],
+                                       cost_bps=cost[seen], half_spread_bps=half[seen])
+    per_sample = np.full(len(matrix), np.nan); per_sample[seen] = pnl_s
+    n_tr = int(traded_s.sum())
+    t_eff = float(w[seen][traded_s].sum())
+    pred_sign = np.sign(fc_ps[seen][traded_s]).astype(int)
+    real_sign = np.sign(y[seen][traded_s]).astype(int)
+    mcc = float(matthews_corrcoef(real_sign, pred_sign)) if n_tr > 1 and len(np.unique(pred_sign)) > 1 else 0.0
+    pnl_traded = pnl_s[traded_s]
     fs = np.array(fold_sharpes, float)
     return ConfigResult(
         name=model, fold_sharpes=fs, per_sample_pnl=per_sample,
         mean_fold_sharpe=float(fs.mean()), net_pnl=float(np.nansum(per_sample)),
-        n_trades=int(traded.sum()),
-        skew=float(pd.Series(pnl_traded).skew()) if traded.sum() > 2 else 0.0,
-        kurt=float(pd.Series(pnl_traded).kurtosis() + 3.0) if traded.sum() > 3 else 3.0,
+        gross_pnl=float(gross_s.sum()), n_trades=n_tr,
+        turnover=float(n_tr / max(int(seen.sum()), 1)), t_eff=t_eff, mcc=mcc,
+        skew=float(pd.Series(pnl_traded).skew()) if n_tr > 2 else 0.0,
+        kurt=float(pd.Series(pnl_traded).kurtosis() + 3.0) if n_tr > 3 else 3.0,
     )
 ```
 
@@ -816,10 +868,9 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'eval.study'`
 
 `eval/study.py`:
 ```python
-"""Study: run the ladder as TRIAL CONFIGS, compute DSR (best config vs the trial
-dispersion) and PBO (CSCV over the configs x OOS-sample matrix), and the G1 gate with
-per-regime breakdown. n_trials reflects ALL configs tried (pass extra_trials for a
-study-wide count beyond the ladder)."""
+"""Study: run the ladder as TRIAL CONFIGS, compute DSR (best config vs trial dispersion,
+with an EFFECTIVE sample size) and PBO (CSCV over configs x OOS-sample matrix), and the
+G1 gate (FAIL-CLOSED when PBO is unavailable) with per-regime breakdown and gross/net."""
 from __future__ import annotations
 import numpy as np
 import pandas as pd
@@ -839,42 +890,46 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
     results = {c: evaluate_config(matrix, feature_cols, c, n_groups=n_groups, k=k,
                                   embargo_ns=embargo_ns) for c in configs}
     naive = results["naive"]
-    candidates = [r for c, r in results.items() if c != "naive"]
-    best = max(candidates, key=lambda r: r.net_pnl)
+    best = max((r for c, r in results.items() if c != "naive"), key=lambda r: r.net_pnl)
 
-    # DSR: best config's Sharpe vs the dispersion across the trial set (multiple testing).
+    # DSR: best config's Sharpe vs across-trial dispersion; T = EFFECTIVE sample size
+    # (Σ uniqueness over trades), not the raw overlapping trade count.
     trial_sharpes = np.array([r.mean_fold_sharpe for r in results.values()])
     n_trials = max(2, len(results) + extra_trials)
     dsr = deflated_sharpe(sr_hat=best.mean_fold_sharpe,
                           sr_trials_std=float(trial_sharpes.std() + 1e-9),
-                          n_trials=n_trials, T=max(best.n_trades, 2),
+                          n_trials=n_trials, T=max(int(round(best.t_eff)), 2),
                           skew=best.skew, kurt=best.kurt)
 
-    # PBO: configs x common-OOS-sample PnL matrix (real trials, not time-bins of one).
-    cols = [r.per_sample_pnl for r in results.values()]
-    M = np.column_stack(cols)
+    # PBO over the configs x common-OOS-sample matrix (real trials).
+    M = np.column_stack([r.per_sample_pnl for r in results.values()])
     rows = np.isfinite(M).all(axis=1)
-    pbo_val = float(pbo(M[rows], s=8)) if rows.sum() >= 32 else float("nan")
+    pbo_available = bool(rows.sum() >= 32)
+    pbo_val = float(pbo(M[rows], s=8)) if pbo_available else float("nan")
 
     # Per-regime: slice the BEST config's OOS PnL (no refit).
     w = matrix["uniqueness"].to_numpy(float)
     per_regime = {}
     for reg, idx in matrix.groupby("regime").groups.items():
-        ii = np.asarray(idx)
-        p = best.per_sample_pnl[ii]
+        ii = np.asarray(idx); p = best.per_sample_pnl[ii]
         per_regime[str(reg)] = {"net_pnl": float(np.nansum(p)),
                                 "sharpe": weighted_sharpe(np.nan_to_num(p), w[ii]),
                                 "n": int(np.isfinite(p).sum())}
 
-    g1 = bool(best.net_pnl > 0 and dsr > dsr_thresh
-              and (np.isnan(pbo_val) or pbo_val < pbo_thresh)
-              and best.net_pnl > naive.net_pnl)
+    # FAIL-CLOSED: the gate cannot PASS without a computable PBO below threshold.
+    g1 = bool(best.net_pnl > 0 and dsr > dsr_thresh and pbo_available
+              and pbo_val < pbo_thresh and best.net_pnl > naive.net_pnl)
     return {
         "g1_pass": g1,
-        "best": {"name": best.name, "net_pnl": best.net_pnl, "sharpe": best.mean_fold_sharpe,
-                 "dsr": dsr, "pbo": pbo_val, "n_trades": best.n_trades},
-        "rungs": {c: {"net_pnl": r.net_pnl, "sharpe": r.mean_fold_sharpe,
-                      "n_trades": r.n_trades} for c, r in results.items()},
+        "g1_inconclusive": bool(not pbo_available and not g1
+                                and best.net_pnl > 0 and dsr > dsr_thresh),
+        "best": {"name": best.name, "net_pnl": best.net_pnl, "gross_pnl": best.gross_pnl,
+                 "sharpe": best.mean_fold_sharpe, "dsr": dsr, "pbo": pbo_val,
+                 "turnover": best.turnover, "mcc": best.mcc, "t_eff": best.t_eff,
+                 "n_trades": best.n_trades},
+        "rungs": {c: {"net_pnl": r.net_pnl, "gross_pnl": r.gross_pnl,
+                      "sharpe": r.mean_fold_sharpe, "n_trades": r.n_trades,
+                      "mcc": r.mcc} for c, r in results.items()},
         "per_regime": per_regime,
     }
 ```
@@ -1018,6 +1073,14 @@ git commit -m "feat: real-feature G1 study entrypoint (manifest-driven, per-regi
 - **#6 (regime)** → `run_study` returns `per_regime`; the gate test asserts the tight-spread regime is positive. ✓
 - **#7 (classifier)** → `lgbm_clf` rung (proba→signed bps). ✓
 - **#8 (manifest)** → `RESERVED` registry + explicit `feature_cols`; `validate_matrix` rejects reserved-in-manifest and unknown features. ✓
+
+**rev. 3 review (second round):**
+- **#1 spread** → `net_pnl` charges `cost_bps + 2×half_spread_bps`; `test_spread_charged_via_two_crossings`. ✓
+- **#2 actionable time** → `validate_matrix` enforces `t_available == t_event`; `test_baseline_requires_synchronous_t_available`. ✓
+- **#3 PBO fail-open** → gate fails closed; `g1_inconclusive` when PBO uncomputable. ✓
+- **#4 DSR T** → `T = round(Σ uniqueness over trades)` (effective sample size). ✓
+- **#5 clf single-class** → `lgbm_clf` returns zeros on one-class folds. ✓
+- **#6 gross/turnover/MCC** → added to `ConfigResult` + study `best`/`rungs` output. ✓
 
 **Still honestly deferred (called out, not silent):**
 - **PBO power is weak with only 4 ladder configs** — it becomes meaningful when `extra_trials`/the config set grows during sweeps; wire a persistent study-wide trial ledger then. The hook (`extra_trials`, configs list) is in place.
