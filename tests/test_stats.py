@@ -28,3 +28,13 @@ def test_pbo_low_for_one_dominant_trial():
     M = rng.standard_normal((400, 50)) * 0.1
     M[:, 0] += 1.0
     assert pbo(M, s=8) < 0.1
+
+
+def test_pbo_counts_lower_half_boundary_ranks():
+    # The IS-best config is OOS-worst on every imbalanced split -> selection overfitting.
+    # The self-inclusive /N rank pegged those boundary cases at exactly 0.5 (logit 0), so
+    # they were never counted and PBO collapsed to ~0. The (N+1) relative rank counts the
+    # lower-half ranks, so an overfit ladder is no longer hidden.
+    blocks = np.array([10.0, -10.0, 10.0, -10.0, 10.0, -10.0, 10.0, -10.0])
+    M = np.column_stack([blocks, np.zeros(8)])
+    assert pbo(M, s=8) > 0.3

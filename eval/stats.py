@@ -31,6 +31,11 @@ def pbo(pnl_matrix: np.ndarray, *, s: int = 8) -> float:
         is_perf = M[np.concatenate([blocks[b] for b in tr])].mean(0)
         oos_perf = M[np.concatenate([blocks[b] for b in te])].mean(0)
         best = int(np.argmax(is_perf))
-        rank = min(max((oos_perf <= oos_perf[best]).mean(), 1e-6), 1 - 1e-6)
+        # Relative OOS rank of the IS-best config with an (N+1) denominator (CSCV). The
+        # selected config is in the numerator, so a /N (mean) rank pegs the worst config at
+        # 1/N and a lower-half boundary at exactly 0.5 (logit 0, never counted) -> PBO
+        # underestimates overfitting. /(N+1) maps worst -> 1/(N+1) < 0.5, best -> N/(N+1) > 0.5.
+        rank_count = int((oos_perf <= oos_perf[best]).sum())
+        rank = min(max(rank_count / (M.shape[1] + 1), 1e-6), 1 - 1e-6)
         logits.append(np.log(rank / (1 - rank)))
     return float((np.array(logits) < 0).mean())
