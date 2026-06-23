@@ -68,8 +68,8 @@ def evaluate_config(matrix: pd.DataFrame, feature_cols, model: str, *,
     for tr, te in cpcv_splits(te_t, t0, t1, n_groups=n_groups, k=k, embargo_ns=embargo_ns):
         scale = float(y[tr].std() + 1e-9) if len(tr) else 0.0  # empty-fold std would be nan
         fc = _fit_predict(model, X[tr], y[tr], lab[tr], X[te], w[tr], scale)
-        fpnl, _, _ = net_pnl(fc, y[te], cost_bps=cost[te], half_spread_bps=half[te])
-        fold_sharpes.append(weighted_sharpe(fpnl, w[te]))
+        fpnl, ftraded, _ = net_pnl(fc, y[te], cost_bps=cost[te], half_spread_bps=half[te])
+        fold_sharpes.append(weighted_sharpe(fpnl, w[te], traded=ftraded))
         acc_fc[te] += fc; cnt[te] += 1
     seen = cnt > 0
     fc_ps = np.full(len(matrix), np.nan); fc_ps[seen] = acc_fc[seen] / cnt[seen]

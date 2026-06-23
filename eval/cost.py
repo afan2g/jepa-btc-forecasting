@@ -20,14 +20,18 @@ def net_pnl(forecast_bps, realized_bps, *, cost_bps, half_spread_bps=0.0,
     return pnl, traded, gross
 
 
-def weighted_sharpe(pnl_per_sample, weights, *, trade_only: bool = True) -> float:
+def weighted_sharpe(pnl_per_sample, weights, *, trade_only: bool = True, traded=None) -> float:
     """Uniqueness-weighted Sharpe. trade_only=True -> over traded samples (hit quality);
     trade_only=False -> over ALL decision samples incl. no-trade zeros (the strategy's
-    sample/time-level Sharpe). Overlapping labels overcount, hence the weighting."""
+    sample/time-level Sharpe). Overlapping labels overcount, hence the weighting.
+
+    Pass the explicit ``traded`` mask from net_pnl() to select traded samples; otherwise a
+    trade that breaks even exactly after costs (pnl == 0) is indistinguishable from a
+    no-trade sample and would be dropped. Falls back to ``pnl != 0`` when no mask is given."""
     pnl = np.asarray(pnl_per_sample, float)
     w = np.asarray(weights, float)
     if trade_only:
-        mask = pnl != 0.0
+        mask = (pnl != 0.0) if traded is None else np.asarray(traded, bool)
         p, ww = pnl[mask], w[mask]
     else:
         p, ww = pnl, w

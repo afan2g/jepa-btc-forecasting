@@ -38,3 +38,14 @@ def test_weighted_sharpe_respects_weights():
 
 def test_weighted_sharpe_zero_when_degenerate():
     assert weighted_sharpe(np.zeros(5), np.ones(5)) == 0.0
+
+
+def test_weighted_sharpe_keeps_breakeven_trades_via_mask():
+    # An exact break-even trade nets 0 after costs; inferring trades from pnl != 0 drops it
+    # like a no-trade. With the traded mask it stays in the trade-only Sharpe (DSR input).
+    pnl = np.array([2.0, 0.0, -1.0])
+    w = np.ones(3)
+    traded = np.array([True, True, True])           # all three traded; middle broke even
+    inferred = weighted_sharpe(pnl, w)              # pnl != 0 -> drops the 0.0 trade
+    masked = weighted_sharpe(pnl, w, traded=traded)
+    assert masked != inferred
