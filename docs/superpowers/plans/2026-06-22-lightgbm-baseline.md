@@ -1,4 +1,4 @@
-# LightGBM Baseline + Signal-Existence Gate (G1) — Implementation Plan (rev. 5)
+# LightGBM Baseline + Signal-Existence Gate (G1) — Implementation Plan (rev. 6)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -55,6 +55,14 @@
 | 2 | `min_trades` uses raw count under heavy overlap | gate also requires `t_eff >= min_eff_trades` (effective-trade floor) |
 | 3 | per-regime slicing assumes a RangeIndex | use `groupby(...).indices` (positional), index-agnostic |
 | 4 | gate params not in manifest (reproducibility) | entrypoint reads a pre-registered `gate{}` manifest block and echoes it |
+
+### rev. 6 fixes (fifth review round)
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | manifest `gate` block optional; defaults applied silently; prints `gate={}` | `resolve_gate` **requires** the block, rejects unknown keys, returns + echoes the **resolved** config |
+| 2 | integration test bypasses the manifest path | extracted testable `run_from_manifest()`; CLI + tests route through it (+ non-skip unit tests) |
+| 3 | floor tests one-sided | assert the fixture **passes with defaults** first, then fails with the floor (floor is the cause) |
 
 ---
 
@@ -885,17 +893,23 @@ def test_embargo_must_cover_lookback():
 
 
 def test_min_eff_trades_floor_blocks_pass():
-    df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=8)
-    out = run_study(df, feats, cost_default=None, n_groups=6, k=2,
-                    embargo_ns=lb, max_lookback_ns=lb, min_eff_trades=10**9)
-    assert out["g1_pass"] is False
+    df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=21)  # seed known to pass
+    base = run_study(df, feats, cost_default=None, n_groups=6, k=2,
+                     embargo_ns=lb, max_lookback_ns=lb)
+    assert base["g1_pass"] is True                                     # passes with default floor
+    blocked = run_study(df, feats, cost_default=None, n_groups=6, k=2,
+                        embargo_ns=lb, max_lookback_ns=lb, min_eff_trades=10**9)
+    assert blocked["g1_pass"] is False and blocked["winner"] is None   # the floor is the cause
 
 
 def test_min_sample_sharpe_floor_blocks_pass():
-    df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=8)
-    out = run_study(df, feats, cost_default=None, n_groups=6, k=2,
-                    embargo_ns=lb, max_lookback_ns=lb, min_sample_sharpe=10.0)
-    assert out["g1_pass"] is False
+    df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=21)
+    base = run_study(df, feats, cost_default=None, n_groups=6, k=2,
+                     embargo_ns=lb, max_lookback_ns=lb)
+    assert base["g1_pass"] is True
+    blocked = run_study(df, feats, cost_default=None, n_groups=6, k=2,
+                        embargo_ns=lb, max_lookback_ns=lb, min_sample_sharpe=10.0)
+    assert blocked["g1_pass"] is False and blocked["winner"] is None
 
 
 def test_winner_is_a_passing_candidate():
@@ -1065,38 +1079,69 @@ git commit -m "test: G1 gate passes on signal, fails on noise, reports per-regim
 
 ---
 
-## Task 9: Real-feature integration entrypoint (dependency-gated)
+## Task 9: Manifest-driven entrypoint + real-feature integration (dependency-gated)
 
-**Files:** Create `scripts/run_baseline.py`, `tests/test_baseline_integration.py`
+**Files:** Create `eval/runner.py`, `scripts/run_baseline.py`, `tests/test_runner.py`, `tests/test_baseline_integration.py`
 
-- [ ] **Step 1: Entrypoint**
+- [ ] **Step 1: Manifest resolution + runner (the testable core)**
+
+`eval/runner.py`:
+```python
+"""Manifest-driven G1 runner. The gate block is REQUIRED (pre-registration) and the
+RESOLVED config is returned so every run is reproducible from its own output."""
+from __future__ import annotations
+import pandas as pd
+from eval.study import run_study
+
+DEFAULT_GATE = {"n_groups": 6, "k": 2, "min_trades": 30, "min_eff_trades": 10.0,
+                "min_sample_sharpe": 0.0, "dsr_thresh": 0.95, "pbo_thresh": 0.5}
+
+
+def resolve_gate(manifest: dict) -> dict:
+    """Require the pre-registered 'gate' block; reject unknown (misspelled) keys; fill
+    defaults; return the RESOLVED config."""
+    if "gate" not in manifest:
+        raise ValueError("manifest must include a pre-registered 'gate' block")
+    unknown = set(manifest["gate"]) - set(DEFAULT_GATE)
+    if unknown:
+        raise ValueError(f"unknown gate keys (misspelled?): {sorted(unknown)}")
+    return {**DEFAULT_GATE, **manifest["gate"]}
+
+
+def run_from_manifest(matrix: pd.DataFrame, manifest: dict) -> dict:
+    gate = resolve_gate(manifest)
+    feats = manifest["feature_cols"]
+    emb, lb = manifest["embargo_ns"], manifest["max_lookback_ns"]
+    horizons = {}
+    for h, sub in matrix.groupby("horizon"):
+        horizons[str(h)] = run_study(sub.reset_index(drop=True), feats, cost_default=None,
+                                     embargo_ns=emb, max_lookback_ns=lb, **gate)
+    return {"gate": gate, "horizons": horizons}
+```
+
+- [ ] **Step 2: Thin CLI wrapper**
 
 `scripts/run_baseline.py`:
 ```python
 """Run the G1 study on a real ModelMatrix parquet (bars E0.3 + labels E0.4 output).
 
 Usage: .venv/bin/python scripts/run_baseline.py model_matrix.parquet feature_manifest.json
-The manifest JSON is {"feature_cols": [...], "max_lookback_ns": <int>, "embargo_ns": <int>,
- "gate": {"n_groups": 6, "k": 2, "min_trades": 30, "min_eff_trades": 10, "min_sample_sharpe": 0.0,
-          "dsr_thresh": 0.95, "pbo_thresh": 0.5}}. The gate block is pre-registered and echoed in output.
+Manifest JSON: {"feature_cols": [...], "max_lookback_ns": <int>, "embargo_ns": <int>,
+ "gate": {"n_groups": 6, "k": 2, "min_trades": 30, "min_eff_trades": 10,
+          "min_sample_sharpe": 0.0, "dsr_thresh": 0.95, "pbo_thresh": 0.5}}   # gate REQUIRED
 """
 import sys, json
 import pandas as pd
-from eval.study import run_study
+from eval.runner import run_from_manifest
 
 def main(matrix_path, manifest_path):
     m = pd.read_parquet(matrix_path)
     man = json.load(open(manifest_path))
-    g = man.get("gate", {})  # pre-registered gate parameters
-    for h, sub in m.groupby("horizon"):
-        out = run_study(sub.reset_index(drop=True), man["feature_cols"], cost_default=None,
-                        n_groups=g.get("n_groups", 6), k=g.get("k", 2),
-                        embargo_ns=man["embargo_ns"], max_lookback_ns=man["max_lookback_ns"],
-                        min_trades=g.get("min_trades", 30), min_eff_trades=g.get("min_eff_trades", 10.0),
-                        min_sample_sharpe=g.get("min_sample_sharpe", 0.0),
-                        dsr_thresh=g.get("dsr_thresh", 0.95), pbo_thresh=g.get("pbo_thresh", 0.5))
+    res = run_from_manifest(m, man)
+    print(f"resolved gate: {res['gate']}")                # echo the EFFECTIVE (resolved) config
+    for h, out in res["horizons"].items():
         status = "PASS" if out["g1_pass"] else ("INCONCLUSIVE" if out["g1_inconclusive"] else "FAIL")
-        print(f"\n=== horizon {h} ===  G1: {status}  (winner={out['winner']}, pbo={out['pbo']:.3f}, gate={g})")
+        print(f"\n=== horizon {h} ===  G1: {status}  (winner={out['winner']}, pbo={out['pbo']:.3f})")
         for name, r in out["rungs"].items():
             print(f"  {name:9s} gross={r['gross_pnl']:.1f} net={r['net_pnl']:.1f} "
                   f"cost_wall={r['cost_wall']:.1f} trade_sr={r['trade_sharpe']:.3f} "
@@ -1110,13 +1155,51 @@ if __name__ == "__main__":
     main(sys.argv[1], sys.argv[2])
 ```
 
-- [ ] **Step 2: SKIP-guarded integration test**
+- [ ] **Step 3: Runner unit tests (exercise the manifest path on synthetic data)**
+
+`tests/test_runner.py`:
+```python
+import pytest
+from eval.runner import resolve_gate, run_from_manifest, DEFAULT_GATE
+from eval.synthetic import make_matrix
+
+
+def test_resolve_gate_requires_block():
+    with pytest.raises(ValueError, match="gate"):
+        resolve_gate({"feature_cols": []})
+
+
+def test_resolve_gate_rejects_unknown_keys():
+    with pytest.raises(ValueError, match="unknown gate"):
+        resolve_gate({"gate": {"min_tradez": 5}})
+
+
+def test_resolve_gate_fills_defaults():
+    g = resolve_gate({"gate": {"k": 3}})
+    assert g["k"] == 3 and g["min_trades"] == DEFAULT_GATE["min_trades"]
+
+
+def test_run_from_manifest_runs_and_echoes_resolved_gate():
+    m, feats, lb = make_matrix(signal_strength=4.0, seed=8)
+    man = {"feature_cols": feats, "embargo_ns": lb, "max_lookback_ns": lb,
+           "gate": {"n_groups": 6, "k": 2}}
+    res = run_from_manifest(m, man)
+    assert res["gate"]["min_sample_sharpe"] == 0.0       # default filled into resolved config
+    assert "10s" in res["horizons"] and "g1_pass" in res["horizons"]["10s"]
+```
+
+- [ ] **Step 4: Run unit tests**
+
+Run: `.venv/bin/python -m pytest tests/test_runner.py -v`
+Expected: PASS (4 passed)
+
+- [ ] **Step 5: SKIP-guarded real-feature integration test (via the manifest path)**
 
 `tests/test_baseline_integration.py`:
 ```python
 import pathlib, json, pytest
 import pandas as pd
-from eval.study import run_study
+from eval.runner import run_from_manifest
 
 MATRIX = pathlib.Path("data/processed/model_matrix.parquet")
 MANIFEST = pathlib.Path("data/processed/feature_manifest.json")
@@ -1124,22 +1207,23 @@ MANIFEST = pathlib.Path("data/processed/feature_manifest.json")
 pytestmark = pytest.mark.skipif(not (MATRIX.exists() and MANIFEST.exists()),
     reason="needs real ModelMatrix + manifest from bars (E0.3) + labels (E0.4)")
 
-def test_real_matrix_runs_through_study():
+def test_real_matrix_runs_through_manifest():
     m = pd.read_parquet(MATRIX); man = json.load(open(MANIFEST))
-    out = run_study(m, man["feature_cols"], cost_default=None, n_groups=6, k=2,
-                    embargo_ns=man["embargo_ns"], max_lookback_ns=man["max_lookback_ns"])
-    assert "g1_pass" in out and out["per_regime"]
+    res = run_from_manifest(m, man)                      # same path the CLI uses
+    assert res["gate"] and res["horizons"]
+    any_h = next(iter(res["horizons"].values()))
+    assert "g1_pass" in any_h and any_h["per_regime"]
 ```
 
-- [ ] **Step 3: Run (SKIP until real matrix exists)**
+- [ ] **Step 6: Run (SKIP until real matrix exists)**
 
 Run: `.venv/bin/python -m pytest tests/test_baseline_integration.py -v`
 Expected: SKIP (or PASS once the matrix + manifest exist).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 7: Commit**
 ```bash
-git add scripts/run_baseline.py tests/test_baseline_integration.py
-git commit -m "feat: real-feature G1 study entrypoint (manifest-driven, per-regime)"
+git add eval/runner.py scripts/run_baseline.py tests/test_runner.py tests/test_baseline_integration.py
+git commit -m "feat: manifest-driven G1 runner (gate required + resolved) with tested path"
 ```
 
 ---
@@ -1177,6 +1261,11 @@ Note on **#1**: because DSR scales by √T, trade-level-Sharpe×√(n_trades) �
 - **#3 index-agnostic regimes** → per-regime uses `groupby(...).indices` (positional). New `test_per_regime_handles_nonrange_index`. ✓
 - **#4 pre-registered gate** → manifest `gate{}` block read + echoed by the entrypoint. ✓
 - Added tests: `test_min_eff_trades_floor_blocks_pass`, `test_min_sample_sharpe_floor_blocks_pass`, `test_winner_is_a_passing_candidate` (test_study now 6). ✓
+
+**rev. 6 review (fifth round):**
+- **#1 required gate** → `resolve_gate` requires the manifest `gate` block, rejects unknown keys, returns the resolved config; CLI echoes `resolved gate: {...}`. ✓
+- **#2 tested manifest path** → `run_from_manifest` is the shared CLI/test core; `tests/test_runner.py` (4) exercises it on synthetic data; the integration test routes through it. ✓
+- **#3 two-sided floor tests** → both floor tests now assert the fixture PASSES with defaults, then FAILS with the floor (floor is the cause). ✓
 
 **Still honestly deferred (called out, not silent):**
 - **PBO power is weak with only 4 ladder configs** — it becomes meaningful when `extra_trials`/the config set grows during sweeps; wire a persistent study-wide trial ledger then. The hook (`extra_trials`, configs list) is in place.
