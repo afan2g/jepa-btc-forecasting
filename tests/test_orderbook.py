@@ -1,3 +1,4 @@
+import math
 from recon.events import Delta
 from recon.orderbook import OrderBook
 
@@ -36,7 +37,7 @@ def test_snapshot_top_k_sorted_and_padded():
     snap = ob.snapshot(k=2)
     assert snap["bid_0_price"] == 100.0 and snap["bid_1_price"] == 99.0
     assert snap["ask_0_price"] == 101.0
-    assert snap["ask_1_price"] is None  # padded when fewer than k levels
+    assert math.isnan(snap["ask_1_price"])  # padded with NaN when fewer than k levels
 
 
 def test_gap_detection_on_nonmonotonic_sequence():

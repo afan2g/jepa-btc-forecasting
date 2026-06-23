@@ -39,12 +39,20 @@ class OrderBook:
         return (as_ * bb + bs * ba) / (bs + as_)
 
     def snapshot(self, k: int) -> dict:
+        # Pad missing levels/metrics with NaN (a float) rather than None so every
+        # numeric column infers float64 in pandas regardless of book depth or
+        # one-sidedness. With None, an all-missing column becomes object dtype and a
+        # partially-missing one becomes float64, making the reconstructed schema
+        # data-dependent and breaking the offline/live byte-identity guarantee.
+        nan = float("nan")
+        m, mp = self.mid(), self.microprice()
         bids = sorted(self.bids, reverse=True)[:k]
         asks = sorted(self.asks)[:k]
-        out: dict = {"mid": self.mid(), "microprice": self.microprice()}
+        out: dict = {"mid": nan if m is None else m,
+                     "microprice": nan if mp is None else mp}
         for i in range(k):
-            out[f"bid_{i}_price"] = bids[i] if i < len(bids) else None
-            out[f"bid_{i}_size"] = self.bids[bids[i]] if i < len(bids) else None
-            out[f"ask_{i}_price"] = asks[i] if i < len(asks) else None
-            out[f"ask_{i}_size"] = self.asks[asks[i]] if i < len(asks) else None
+            out[f"bid_{i}_price"] = bids[i] if i < len(bids) else nan
+            out[f"bid_{i}_size"] = self.bids[bids[i]] if i < len(bids) else nan
+            out[f"ask_{i}_price"] = asks[i] if i < len(asks) else nan
+            out[f"ask_{i}_size"] = self.asks[asks[i]] if i < len(asks) else nan
         return out

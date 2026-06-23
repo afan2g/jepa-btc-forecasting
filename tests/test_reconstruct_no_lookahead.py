@@ -50,5 +50,5 @@ def test_trade_does_not_see_same_ts_later_kind_or_its_own_impact():
     tr = [Trade(20, 1001, "buy", 101.0, 0.5)]
     out = reconstruct_book_at_trades(d, tr, k=1)
     # delta(20,kind0,seq3) < trade(20,kind1,seq1001) => the ask removal IS applied,
-    # so the trade sees NO ask at 101 (best_ask None).
-    assert out["ask_0_price"].iloc[0] is None
+    # so the trade sees NO ask at 101 (best_ask absent -> NaN-padded).
+    assert pd.isna(out["ask_0_price"].iloc[0])
