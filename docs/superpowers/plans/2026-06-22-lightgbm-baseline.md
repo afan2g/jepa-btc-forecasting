@@ -1,4 +1,4 @@
-# LightGBM Baseline + Signal-Existence Gate (G1) — Implementation Plan (rev. 4)
+# LightGBM Baseline + Signal-Existence Gate (G1) — Implementation Plan (rev. 5)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -47,6 +47,15 @@
 | 3 | `best` chosen by net before gate → false fail | per-candidate gate; G1 passes if **any** non-naive config clears (DSR `n_trials` + study PBO handle multiple testing) |
 | 4 | stale expected test counts | corrected (test_matrix 6, test_cost 5) |
 
+### rev. 5 fixes (fourth review round)
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | G1 gates on trade-level Sharpe only | gate adds an explicit `min_sample_sharpe` floor (capital experience), default 0.0, configurable |
+| 2 | `min_trades` uses raw count under heavy overlap | gate also requires `t_eff >= min_eff_trades` (effective-trade floor) |
+| 3 | per-regime slicing assumes a RangeIndex | use `groupby(...).indices` (positional), index-agnostic |
+| 4 | gate params not in manifest (reproducibility) | entrypoint reads a pre-registered `gate{}` manifest block and echoes it |
+
 ---
 
 ## The `ModelMatrix` contract (revised)
@@ -70,7 +79,7 @@ A pandas DataFrame, one row per (bar, horizon) sample. **Columns are partitioned
 
 **Diagnostics:** any other columns (vendor flags, debug) — ignored by the model.
 
-**Study config (not columns):** `max_lookback_ns` (the longest feature look-back), `embargo_ns` (required; must be ≥ `max_lookback_ns`).
+**Study config (not columns), pre-registered in the manifest `gate` block:** `max_lookback_ns` (longest feature look-back), `embargo_ns` (required; ≥ `max_lookback_ns`), and gate params `n_groups`, `k`, `min_trades`, `min_eff_trades`, `min_sample_sharpe`, `dsr_thresh`, `pbo_thresh`. The entrypoint reads and echoes these for reproducibility.
 
 ---
 
@@ -873,6 +882,37 @@ def test_embargo_must_cover_lookback():
     with pytest.raises(ValueError, match="embargo"):
         run_study(df, feats, cost_default=None, n_groups=5, k=1,
                   embargo_ns=lb - 1, max_lookback_ns=lb)
+
+
+def test_min_eff_trades_floor_blocks_pass():
+    df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=8)
+    out = run_study(df, feats, cost_default=None, n_groups=6, k=2,
+                    embargo_ns=lb, max_lookback_ns=lb, min_eff_trades=10**9)
+    assert out["g1_pass"] is False
+
+
+def test_min_sample_sharpe_floor_blocks_pass():
+    df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=8)
+    out = run_study(df, feats, cost_default=None, n_groups=6, k=2,
+                    embargo_ns=lb, max_lookback_ns=lb, min_sample_sharpe=10.0)
+    assert out["g1_pass"] is False
+
+
+def test_winner_is_a_passing_candidate():
+    df, feats, lb = make_matrix(n=8000, signal_strength=6.0, seed=8)
+    out = run_study(df, feats, cost_default=None, n_groups=6, k=2,
+                    embargo_ns=lb, max_lookback_ns=lb)
+    if out["g1_pass"]:
+        assert out["winner"] is not None
+        assert out["rungs"][out["winner"]]["passes_solo"] is True
+
+
+def test_per_regime_handles_nonrange_index():
+    df, feats, lb = make_matrix(n=4000, signal_strength=4.0, seed=8)
+    df.index = df["t_event"].to_numpy()           # non-range (timestamp) index
+    out = run_study(df, feats, cost_default=None, n_groups=6, k=2,
+                    embargo_ns=lb, max_lookback_ns=lb)
+    assert set(out["per_regime"]) == {"tight", "wide"}
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -898,7 +938,8 @@ from eval.stats import deflated_sharpe, pbo
 
 def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int, k: int,
               embargo_ns: int, max_lookback_ns: int, configs=CONFIGS, extra_trials: int = 0,
-              dsr_thresh: float = 0.95, pbo_thresh: float = 0.5, min_trades: int = 30):
+              dsr_thresh: float = 0.95, pbo_thresh: float = 0.5, min_trades: int = 30,
+              min_eff_trades: float = 10.0, min_sample_sharpe: float = 0.0):
     validate_matrix(matrix, feature_cols)
     if embargo_ns < max_lookback_ns:
         raise ValueError(f"embargo_ns ({embargo_ns}) must cover max_lookback_ns ({max_lookback_ns})")
@@ -925,7 +966,9 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
 
     def _solo(r):  # per-candidate gate (multiple testing handled by DSR n_trials + PBO)
         return bool(r.net_pnl > 0 and dsr_by[r.name] > dsr_thresh
-                    and r.n_trades >= min_trades and r.net_pnl > naive.net_pnl)
+                    and r.n_trades >= min_trades and r.t_eff >= min_eff_trades
+                    and r.sample_sharpe >= min_sample_sharpe
+                    and r.net_pnl > naive.net_pnl)
     passing = [r for r in candidates if _solo(r)]
     g1 = bool(passing and pbo_available and pbo_val < pbo_thresh)
     g1_inconclusive = bool(passing and not pbo_available)        # would pass but PBO uncomputable
@@ -935,8 +978,8 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
     # Per-regime: slice the WINNER's OOS PnL (no refit); sample/time-level Sharpe.
     w = matrix["uniqueness"].to_numpy(float)
     per_regime = {}
-    for reg, idx in matrix.groupby("regime").groups.items():
-        ii = np.asarray(idx); p = winner.per_sample_pnl[ii]
+    for reg, ii in matrix.groupby("regime").indices.items():   # .indices = positional rows (index-agnostic)
+        p = winner.per_sample_pnl[ii]
         per_regime[str(reg)] = {"net_pnl": float(np.nansum(p)),
                                 "sample_sharpe": weighted_sharpe(np.nan_to_num(p), w[ii], trade_only=False),
                                 "n": int(np.isfinite(p).sum())}
@@ -964,7 +1007,7 @@ def run_study(matrix: pd.DataFrame, feature_cols, *, cost_default, n_groups: int
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_study.py -v`
-Expected: PASS (2 passed)
+Expected: PASS (6 passed)
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -1033,7 +1076,9 @@ git commit -m "test: G1 gate passes on signal, fails on noise, reports per-regim
 """Run the G1 study on a real ModelMatrix parquet (bars E0.3 + labels E0.4 output).
 
 Usage: .venv/bin/python scripts/run_baseline.py model_matrix.parquet feature_manifest.json
-The manifest JSON is {"feature_cols": [...], "max_lookback_ns": <int>, "embargo_ns": <int>}.
+The manifest JSON is {"feature_cols": [...], "max_lookback_ns": <int>, "embargo_ns": <int>,
+ "gate": {"n_groups": 6, "k": 2, "min_trades": 30, "min_eff_trades": 10, "min_sample_sharpe": 0.0,
+          "dsr_thresh": 0.95, "pbo_thresh": 0.5}}. The gate block is pre-registered and echoed in output.
 """
 import sys, json
 import pandas as pd
@@ -1042,12 +1087,16 @@ from eval.study import run_study
 def main(matrix_path, manifest_path):
     m = pd.read_parquet(matrix_path)
     man = json.load(open(manifest_path))
+    g = man.get("gate", {})  # pre-registered gate parameters
     for h, sub in m.groupby("horizon"):
         out = run_study(sub.reset_index(drop=True), man["feature_cols"], cost_default=None,
-                        n_groups=6, k=2, embargo_ns=man["embargo_ns"],
-                        max_lookback_ns=man["max_lookback_ns"])
+                        n_groups=g.get("n_groups", 6), k=g.get("k", 2),
+                        embargo_ns=man["embargo_ns"], max_lookback_ns=man["max_lookback_ns"],
+                        min_trades=g.get("min_trades", 30), min_eff_trades=g.get("min_eff_trades", 10.0),
+                        min_sample_sharpe=g.get("min_sample_sharpe", 0.0),
+                        dsr_thresh=g.get("dsr_thresh", 0.95), pbo_thresh=g.get("pbo_thresh", 0.5))
         status = "PASS" if out["g1_pass"] else ("INCONCLUSIVE" if out["g1_inconclusive"] else "FAIL")
-        print(f"\n=== horizon {h} ===  G1: {status}  (winner={out['winner']}, pbo={out['pbo']:.3f})")
+        print(f"\n=== horizon {h} ===  G1: {status}  (winner={out['winner']}, pbo={out['pbo']:.3f}, gate={g})")
         for name, r in out["rungs"].items():
             print(f"  {name:9s} gross={r['gross_pnl']:.1f} net={r['net_pnl']:.1f} "
                   f"cost_wall={r['cost_wall']:.1f} trade_sr={r['trade_sharpe']:.3f} "
@@ -1121,6 +1170,13 @@ git commit -m "feat: real-feature G1 study entrypoint (manifest-driven, per-regi
 - **#4 stale counts** → test_matrix (6), test_cost (5) corrected. ✓
 
 Note on **#1**: because DSR scales by √T, trade-level-Sharpe×√(n_trades) ≈ sample-level-Sharpe×√(n_all), so switching the metric barely moves the DSR z-score — the `min_trades` floor is the real guard against few-trade flukes, and the sample-level Sharpe is reported for honest sizing.
+
+**rev. 5 review (fourth round):**
+- **#1 sample-Sharpe floor** → `_solo` requires `sample_sharpe >= min_sample_sharpe` (default 0.0, configurable); G1 is now hit-quality **and** capital-experience. ✓
+- **#2 effective-trade floor** → `_solo` also requires `t_eff >= min_eff_trades` (default 10), not just raw `n_trades`. ✓
+- **#3 index-agnostic regimes** → per-regime uses `groupby(...).indices` (positional). New `test_per_regime_handles_nonrange_index`. ✓
+- **#4 pre-registered gate** → manifest `gate{}` block read + echoed by the entrypoint. ✓
+- Added tests: `test_min_eff_trades_floor_blocks_pass`, `test_min_sample_sharpe_floor_blocks_pass`, `test_winner_is_a_passing_candidate` (test_study now 6). ✓
 
 **Still honestly deferred (called out, not silent):**
 - **PBO power is weak with only 4 ladder configs** — it becomes meaningful when `extra_trials`/the config set grows during sweeps; wire a persistent study-wide trial ledger then. The hook (`extra_trials`, configs list) is in place.
