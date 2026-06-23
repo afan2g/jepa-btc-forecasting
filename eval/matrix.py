@@ -30,3 +30,10 @@ def validate_matrix(df: pd.DataFrame, feature_cols: list[str]) -> None:
                          "model cross-venue latency upstream by lagging features)")
     if not ((df["uniqueness"] > 0) & (df["uniqueness"] <= 1)).all():
         raise ValueError("uniqueness must be in (0, 1]")
+    # Fail closed on malformed cost rows: negative cost_bps or a crossed/negative
+    # half_spread_bps would make total_cost negative, inverting the no-trade band (every row
+    # trades) and turning the cost charge into credited PnL -> a bad book row could inflate G1.
+    if not (df["cost_bps"] >= 0).all():
+        raise ValueError("cost_bps must be non-negative (fees + slippage)")
+    if not (df["half_spread_bps"] >= 0).all():
+        raise ValueError("half_spread_bps must be non-negative (no crossed/negative spread)")

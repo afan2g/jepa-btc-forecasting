@@ -36,6 +36,18 @@ def test_timing_invariants_enforced():
         validate_matrix(bad2, feats)
 
 
+def test_negative_costs_rejected():
+    # Fail closed: negative cost/spread would invert the no-trade band and credit costs as
+    # PnL, manufacturing trades and inflating the gate.
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
+    bad = df.copy(); bad.loc[0, "cost_bps"] = -1.0
+    with pytest.raises(ValueError, match="cost_bps"):
+        validate_matrix(bad, feats)
+    bad2 = df.copy(); bad2.loc[0, "half_spread_bps"] = -0.1
+    with pytest.raises(ValueError, match="half_spread_bps"):
+        validate_matrix(bad2, feats)
+
+
 def test_baseline_requires_synchronous_t_available():
     df, feats, _ = make_matrix(signal_strength=1.0, seed=1)  # synthetic sets t_available == t_event
     bad = df.copy(); bad.loc[0, "t_available"] = bad.loc[0, "t_event"] + 1
