@@ -1,0 +1,14 @@
+[project]
+name = "jepa-btc"
+version = "0.0.1"
+requires-python = ">=3.12"
+# Runtime dep of the importable `recon` package (recon.ingest/reconstruct/live import
+# pandas). pyarrow (parquet engine) and pytest are dev/test-only — not imported by recon.
+dependencies = ["pandas"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["recon*"]

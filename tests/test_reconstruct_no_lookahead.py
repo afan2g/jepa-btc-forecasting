@@ -1,0 +1,101 @@
+import pytest
+import pandas as pd
+from recon.events import Delta, Trade, order_key
+from recon.merge import merge_sorted
+from recon.orderbook import OrderBook
+from recon.reconstruct import reconstruct_book_at_trades
+from recon.synthetic import simple_world, same_ts_world
+from recon.ingest import deltas_from_df, trades_from_df
+
+
+def _events_for(world_fn):
+    draw, traw = world_fn()
+    # Rename normalized synthetic columns to RAW Lake names before ingest:
+    # deltas use sequence_number, trades use id (see recon/ingest.py).
+    d = deltas_from_df(pd.DataFrame(draw).rename(columns={"ts_engine": "origin_time", "seq": "sequence_number"}),
+                       engine_time_col="origin_time")
+    t = trades_from_df(pd.DataFrame(traw).rename(columns={"ts_engine": "timestamp", "seq": "id"}),
+                       engine_time_col="timestamp")
+    return d, t
+
+
+def _events():
+    return _events_for(simple_world)
+
+
+def test_reconstruct_matches_hand_computed_snapshots():
+    d, t = _events()
+    out = reconstruct_book_at_trades(d, t, k=1)
+    # trade @20 sees mid 100.5 ; @40 sees bid 99/ask 101 -> mid 100.0 ;
+    # @60 sees bid 99/ask 102 -> mid 100.5
+    assert list(out["trade_ts"]) == [20, 40, 60]
+    assert list(out["mid"]) == [100.5, 100.0, 100.5]
+    assert list(out["bid_0_price"]) == [100.0, 99.0, 99.0]
+    assert list(out["ask_0_price"]) == [101.0, 101.0, 102.0]
+
+
+def test_same_ts_world_matches_hand_computed_snapshots():
+    """Ground-truth for the §5.3 same-ts convention: every trade shares its ts with
+    deltas and must see those same-ts deltas applied. (The invariance test below
+    cannot pin this — flipping the convention changes full and per-trade runs
+    together — so the convention is locked here with explicit expected values.)"""
+    d, t = _events_for(same_ts_world)
+    out = reconstruct_book_at_trades(d, t, k=1)
+    assert list(out["trade_ts"]) == [10, 20, 30, 40]
+    assert list(out["mid"]) == [100.5, 100.0, 100.0, 100.5]
+    assert list(out["bid_0_price"]) == [100.0, 99.0, 99.0, 99.0]
+    assert list(out["ask_0_price"]) == [101.0, 101.0, 101.0, 102.0]
+    assert list(out["bid_0_size"]) == [2.0, 1.0, 1.0, 1.0]
+    assert list(out["ask_0_size"]) == [3.0, 3.0, 5.0, 4.0]
+
+
+@pytest.mark.parametrize("world_fn", [simple_world, same_ts_world])
+def test_no_lookahead_dropping_future_deltas_is_invariant(world_fn):
+    """For each trade, deleting every delta with order key >= the trade's key must not
+    change that trade's reconstructed snapshot, across ALL emitted columns (spec §5.3
+    lookahead guard). Runs over same_ts_world too, where deltas and trades share a
+    ts_engine, so a same-ts ordering regression (deltas no longer < trades at equal ts)
+    is caught generically rather than only by one bespoke case."""
+    d, t = _events_for(world_fn)
+    full = reconstruct_book_at_trades(d, t, k=3).reset_index(drop=True)
+    for i, tr in enumerate(t):
+        kept = [x for x in d if order_key(x) < order_key(tr)]
+        one = reconstruct_book_at_trades(kept, [tr], k=3).reset_index(drop=True)
+        # Compare every column (prices, sizes, mid, microprice, trade fields), dtypes
+        # included — a same-ts inclusion or dtype regression fails here.
+        pd.testing.assert_frame_equal(one, full.iloc[[i]].reset_index(drop=True))
+
+
+def test_seed_book_is_not_mutated_by_reconstruction():
+    """A seed carried across segments must not be mutated, so reuse is deterministic."""
+    from recon.orderbook import OrderBook
+    seed = OrderBook()
+    seed.apply(Delta(5, 1, "bid", 100.0, 2.0))
+    seed.apply(Delta(5, 2, "ask", 101.0, 3.0))
+    before = (dict(seed.bids), dict(seed.asks), seed._last_seq)
+
+    # Reconstruct twice reusing the same seed; both must see the seeded book only.
+    d = [Delta(10, 3, "bid", 99.0, 5.0)]
+    t = [Trade(20, 1001, "buy", 101.0, 0.1)]
+    out1 = reconstruct_book_at_trades(d, t, k=1, seed=seed)
+    out2 = reconstruct_book_at_trades(d, t, k=1, seed=seed)
+
+    # Seed object is unchanged after both calls.
+    assert (seed.bids, seed.asks, seed._last_seq) == before
+    # Both calls produced identical results (no cross-call contamination).
+    pd.testing.assert_frame_equal(out1, out2)
+    # The trade saw the seeded best bid/ask plus the new delta level (best bid 100).
+    assert out1["bid_0_price"].iloc[0] == 100.0
+    assert out1["ask_0_price"].iloc[0] == 101.0
+
+
+def test_trade_does_not_see_same_ts_later_kind_or_its_own_impact():
+    # A delta with the SAME ts but kind=trade ordering must be excluded; a same-ts
+    # delta (kind=0) must be included.
+    d = [Delta(10, 1, "bid", 100.0, 2.0), Delta(10, 2, "ask", 101.0, 3.0),
+         Delta(20, 3, "ask", 101.0, 0.0)]  # removes ask AT ts=20, same as the trade
+    tr = [Trade(20, 1001, "buy", 101.0, 0.5)]
+    out = reconstruct_book_at_trades(d, tr, k=1)
+    # delta(20,kind0,seq3) < trade(20,kind1,seq1001) => the ask removal IS applied,
+    # so the trade sees NO ask at 101 (best_ask absent -> NaN-padded).
+    assert pd.isna(out["ask_0_price"].iloc[0])
