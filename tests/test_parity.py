@@ -12,7 +12,7 @@ import pandas as pd
 from recon.events import Delta
 from recon.reconstruct import reconstruct_book_at_samples
 from recon.coinapi import coinapi_frame_from_rows, reconstruct_coinapi_l2_at_samples
-from recon.parity import compare_topk, label_agreement
+from recon.parity import compare_topk, label_agreement, lake_warmup_cutoff
 
 DAY = dt.date(2025, 6, 1)
 DAY_OPEN = pd.Timestamp("2025-06-01").value
@@ -77,6 +77,62 @@ def test_no_trade_band_collapses_small_moves_to_flat_agreement():
     la = label_agreement(f.set_index("sample_ts")["mid"], f.set_index("sample_ts")["mid"],
                          grid_s=1, horizons_s=(1,), band_bps=5.0)
     assert la["1"]["both_flat"] == la["1"]["n"] and la["1"]["agreement"] == 1.0
+
+
+# --------------------------------------------------------------------------- warm-up gate (P2.1)
+def test_lake_warmup_cutoff_excludes_cold_start():
+    # ts 0,1 = one-sided (no ask → cold-start warm-up); 2..5 = seeded & uncrossed.
+    f = pd.DataFrame({
+        "sample_ts": [0, 1, 2, 3, 4, 5],
+        "mid": [np.nan, np.nan, 100.5, 100.5, 100.5, 100.5],
+        "microprice": [np.nan, np.nan, 100.5, 100.5, 100.5, 100.5],
+        "bid_0_price": [100, 100, 100, 100, 100, 100], "bid_0_size": [1] * 6,
+        "ask_0_price": [np.nan, np.nan, 101, 101, 101, 101],
+        "ask_0_size": [np.nan, np.nan, 1, 1, 1, 1],
+    })
+    assert lake_warmup_cutoff(f, min_consecutive=3, min_levels_per_side=1) == 4  # 3rd good sample
+    assert lake_warmup_cutoff(f, min_consecutive=1) == 2                         # first good sample
+    f2 = f.copy()
+    f2[["ask_0_price", "ask_0_size", "mid"]] = np.nan                            # book never gets an ask
+    assert lake_warmup_cutoff(f2) is None
+
+
+def test_lake_warmup_cutoff_respects_min_depth():
+    # both sides have only level 0; requiring 2 levels/side ⇒ never seeded.
+    f = frame([0, 1, 2, 3], [100] * 4, [1] * 4, [101] * 4, [1] * 4)
+    f["bid_1_price"] = np.nan
+    f["ask_1_price"] = np.nan
+    assert lake_warmup_cutoff(f, min_consecutive=1, min_levels_per_side=2) is None
+    assert lake_warmup_cutoff(f, min_consecutive=1, min_levels_per_side=1) == 0
+
+
+def test_compare_topk_since_ts_restricts_to_warm_window():
+    lake = frame([0, 1, 2, 3], [100, 100, 105, 105], [1] * 4, [101, 101, 106, 106], [1] * 4)
+    capi = frame([0, 1, 2, 3], [100, 100, 100, 100], [1] * 4, [101, 101, 101, 101], [1] * 4)
+    full = compare_topk(lake, capi, k=1, grid_s=1, horizons_s=(1,))
+    warm = compare_topk(lake, capi, k=1, grid_s=1, horizons_s=(1,), since_ts=2)
+    assert full["n_grid"] == 4 and warm["n_grid"] == 2 and warm["n_grid_full"] == 4
+    assert warm["since_ts"] == 2
+    # divergence ($5) only at ts>=2: excluding the matching early rows raises the measured median
+    assert full["mid_diff"]["median"] == 2.5     # |Δ| over [0,0,5,5]
+    assert warm["mid_diff"]["median"] == 5.0      # |Δ| over [5,5]
+
+
+# --------------------------------------------------------------------------- per-level coverage (P2.2)
+def test_per_level_coverage_marks_one_sided_depth():
+    cols = {"sample_ts": [0, 1], "mid": [100.5, 100.5], "microprice": [100.5, 100.5],
+            "bid_0_price": [100, 100], "bid_0_size": [1, 1], "bid_1_price": [99, 99],
+            "bid_1_size": [1, 1], "ask_0_price": [101, 101], "ask_0_size": [1, 1],
+            "ask_1_price": [102, 102], "ask_1_size": [1, 1]}
+    lake = pd.DataFrame(cols)
+    capi = pd.DataFrame(cols)
+    capi[["bid_1_price", "bid_1_size"]] = np.nan  # CoinAPI lacks bid level 1 → an uncompared depth
+    rep = compare_topk(lake, capi, k=2, grid_s=1, horizons_s=(1,))
+    cov1 = rep["per_level"]["1"]["coverage"]["bid"]
+    assert cov1["both_present"] == 0 and cov1["only_lake"] == 2 and cov1["only_capi"] == 0
+    assert cov1["both_fraction"] == 0.0
+    cov0 = rep["per_level"]["0"]["coverage"]["bid"]
+    assert cov0["both_present"] == 2 and cov0["both_fraction"] == 1.0
 
 
 # --------------------------------------------------------------------------- cross-vendor

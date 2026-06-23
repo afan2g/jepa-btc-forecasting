@@ -237,7 +237,12 @@ defensive `SNAPSHOT/ADD/DELETE/MATCH/SET/SUB` with `order_id` state and quality 
 L2 on the same exchange-time grid (memory-safe, no per-row object list); `recon/parity.py`
 compares per-level price/size, mid, crossed/missing rates, the |Δmid| spike population, and
 directional label agreement at the 2 s/10 s/60 s horizons; `scripts/run_coinbase_parity.py` wires
-it on real data. ⚠️ The CoinAPI **SUB/MATCH size convention is an unverified assumption** —
+it on real data. Because `book_delta_v2` cold-starts with no per-day snapshot (§5a-Recon), the gate
+applies a **seed-established warm-up cutoff** (best bid/ask present, uncrossed, sustained) and
+**excludes the Lake warm-up window** from the comparison so warm-up artifacts don't drive the
+decision (`--no-warmup-gate` to disable); it also reports **per-level both-present coverage** so
+thin/one-sided top-K depths are marked, not silently dropped. The full validated seed from Lake's
+`book` snapshot product stays the deferred §5a-Recon follow-up. ⚠️ The CoinAPI **SUB/MATCH size convention is an unverified assumption** —
 absolute-size by default, `--size-policy decrement` as the A/B alternative; the live run decides
 which yields an uncrossed, parity-matching book. Run (after enabling CoinAPI Spend Management, §8):
 

@@ -71,6 +71,25 @@ def test_run_parity_core_same_book_reports_zero_divergence():
     assert report["parity"]["missing_book"]["either_fraction"] < 0.01
 
 
+def test_run_parity_core_reports_warmup_block_and_restricts_parity():
+    report, lake, capi = rcp.run_parity_core(
+        _lake_df(), [_coinapi_rows()], day=DAY, k=5, grid_ms=1000, horizons_s=(2,))
+    w = report["warmup"]
+    assert w["gated"] is True and w["established"] is True and w["cutoff_ts"] is not None
+    assert w["excluded_samples"] >= 1                       # the day-open empty sample(s) excluded
+    assert report["parity"]["since_ts"] == w["cutoff_ts"]
+    assert report["parity"]["n_grid"] < report["parity"]["n_grid_full"]
+
+
+def test_run_parity_core_warmup_gate_can_be_disabled():
+    report, _, _ = rcp.run_parity_core(
+        _lake_df(), [_coinapi_rows()], day=DAY, k=5, grid_ms=1000, horizons_s=(2,),
+        gate_warmup=False)
+    assert report["warmup"]["gated"] is False
+    assert report["parity"]["since_ts"] is None
+    assert report["parity"]["n_grid"] == report["parity"]["n_grid_full"] == 86400
+
+
 def test_run_parity_core_handles_empty_lake_day():
     # A Lake gap day → empty delta frame → Lake book fully missing, but the run still
     # completes and the report is well-formed (no crash).

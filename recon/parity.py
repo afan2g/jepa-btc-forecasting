@@ -108,15 +108,58 @@ def label_agreement(lake_mid: pd.Series, capi_mid: pd.Series, *, grid_s: float,
     return out
 
 
+def lake_warmup_cutoff(frame: pd.DataFrame, *, min_consecutive: int = 3,
+                       min_levels_per_side: int = 1) -> int | None:
+    """First `sample_ts` at which a COLD-STARTED Lake `book_delta_v2` reconstruction looks
+    seeded — best bid & ask present, uncrossed, with ≥ `min_levels_per_side` levels per side —
+    SUSTAINED for `min_consecutive` consecutive grid samples. Returns that cutoff ts (int), or
+    None if the book never establishes a sustained seed.
+
+    Rationale (docs/data.md §5a-Recon, §5a): `book_delta_v2` has NO per-day snapshot, so a
+    day's reconstruction cold-starts from an empty book and its early top-K is warm-up, not
+    real liquidity — whereas CoinAPI starts from its full opening SNAPSHOT. Comparing across
+    the warm-up window would let Lake warm-up artifacts, not true vendor divergence, drive the
+    parity decision. The caller excludes samples before this cutoff from the gate. This is the
+    minimal seed-established proxy; a fully validated seed from the Lake `book` snapshot product
+    remains the deferred §5a-Recon follow-up, and per-level coverage (below) surfaces residual
+    depth gaps past the cutoff."""
+    f = frame.set_index("sample_ts").sort_index() if "sample_ts" in frame.columns else frame.sort_index()
+    bid_cols = [c for c in f.columns if c.startswith("bid_") and c.endswith("_price")]
+    ask_cols = [c for c in f.columns if c.startswith("ask_") and c.endswith("_price")]
+    bid_depth = f[bid_cols].notna().sum(axis=1)
+    ask_depth = f[ask_cols].notna().sum(axis=1)
+    good = ((bid_depth >= min_levels_per_side) & (ask_depth >= min_levels_per_side)
+            & f["bid_0_price"].notna() & f["ask_0_price"].notna()
+            & (f["bid_0_price"] < f["ask_0_price"]))
+    run = 0
+    for ts, g in good.items():
+        run = run + 1 if g else 0
+        if run >= min_consecutive:
+            return int(ts)
+    return None
+
+
 def compare_topk(lake: pd.DataFrame, capi: pd.DataFrame, *, k: int, grid_s: float = 1.0,
                  horizons_s=DEFAULT_HORIZONS_S, band_bps: float = 0.0,
-                 n_spikes: int = 25) -> dict:
-    """Compare two top-K L2 frames and return a JSON-serializable parity report dict."""
+                 n_spikes: int = 25, since_ts: int | None = None) -> dict:
+    """Compare two top-K L2 frames and return a JSON-serializable parity report dict.
+
+    `since_ts` (optional): restrict the comparison to samples with `sample_ts >= since_ts`,
+    used to exclude the Lake cold-start warm-up window (see `lake_warmup_cutoff`) so the gate
+    reflects true Lake↔CoinAPI parity, not warm-up. Per-level `coverage` always reports the
+    both-present / one-vendor-only counts so thin or one-sided depths are visibly marked rather
+    than silently dropped by the NaN-skipping diff stats."""
     L, C = align_grids(lake, capi)
+    n_full = len(L)
+    if since_ts is not None:
+        L = L[L.index >= since_ts]
+        C = C[C.index >= since_ts]
     n = len(L)
-    out: dict = {"n_grid": int(n), "k": int(k), "grid_s": float(grid_s)}
+    out: dict = {"n_grid": int(n), "n_grid_full": int(n_full), "k": int(k),
+                 "grid_s": float(grid_s),
+                 "since_ts": (int(since_ts) if since_ts is not None else None)}
     if n == 0:
-        out["error"] = "no overlapping grid points"
+        out["error"] = "no overlapping grid points after warm-up cutoff"
         return out
 
     lake_present = L["bid_0_price"].notna() & L["ask_0_price"].notna()
@@ -148,11 +191,21 @@ def compare_topk(lake: pd.DataFrame, capi: pd.DataFrame, *, k: int, grid_s: floa
 
     out["per_level"] = {}
     for i in range(k):
-        rec = {}
+        rec: dict = {}
+        coverage: dict = {}
         for side in ("bid", "ask"):
             pc, sc = f"{side}_{i}_price", f"{side}_{i}_size"
+            lp, cp = L[pc].notna(), C[pc].notna()
+            both_lvl = lp & cp
+            coverage[side] = {
+                "both_present": int(both_lvl.sum()),
+                "both_fraction": (float(both_lvl.sum() / n) if n else 0.0),
+                "only_lake": int((lp & ~cp).sum()),    # one-sided depth = an uncompared parity miss
+                "only_capi": int((cp & ~lp).sum()),
+            }
             rec[f"{side}_price"] = _abs_stats((L[pc] - C[pc]).abs())
             rec[f"{side}_size"] = _abs_stats((L[sc] - C[sc]).abs())
+        rec["coverage"] = coverage
         out["per_level"][str(i)] = rec
 
     # |Δmid| spike population — characterized at the bar/label resolution, never assumed away.
