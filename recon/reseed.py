@@ -291,8 +291,15 @@ def _replay_seeded(sample_ts, events, *, k: int, policy: ReseedPolicy,
     while si < n:
         emit(sample_ts[si])
         si += 1
-    if crossed_since is not None and last_t is not None and last_t > crossed_since:
-        crossed_duration_ns += last_t - crossed_since
+    # Close a still-open crossed run at the END of the observed window — the grid end or the last
+    # event, whichever is later. The trailing samples past the final event are crossed too, so
+    # closing at the last EVENT time would under-report a terminal crossed episode (its trailing
+    # samples are counted crossed but contribute 0 duration).
+    end_ts = int(sample_ts[-1]) if n else None
+    close_candidates = [t for t in (last_t, end_ts) if t is not None]
+    close_t = max(close_candidates) if close_candidates else None
+    if crossed_since is not None and close_t is not None and close_t > crossed_since:
+        crossed_duration_ns += close_t - crossed_since
 
     frame = pd.DataFrame(rows) if collect_frame else None
     metrics = {

@@ -208,8 +208,11 @@ Reproduce: `ingest/verify_trades_and_calendar.py --verify-backfill` (anchor via 
 
 ## 5a. Vendor stitching (Coinbase gap-fill) — unit/timestamp sanity PASSED; recon parity RUN 2025-06-01 (CoinAPI + Lake seed/reseed RESOLVED on this day; multi-day validation pending before backfill unlock)
 
-**Status: NOT production-validated.** The hybrid is promising but two hard gates remain (recon-level
-parity, snapshot/day-boundary semantics). What we have shown so far:
+**Status: one-day recon parity PASSES (2025-06-01); NOT yet multi-day/production-validated.** The two
+hard gates below (recon-level parity, snapshot/day-boundary semantics) are now **met on the 2025-06-01
+pilot** — Lake reconstructed `book_delta_v2` (seed/reseed) ↔ CoinAPI L3→L2 agree to a $0.00 median mid
+(see Measured results) — but production needs the **multi-day** validation in §10 (gap days, vendor
+seams, a crossed-`book` day, a `SUB` day) before backfill unlock. What we have shown so far:
 
 - **Coverage (done):** CoinAPI has **12/12 sampled Crypto Lake gap days** (entire 33-day hole + the Nov
   gap + singletons), each with substantial `limitbook_full` (0.9–3.5 GB) and `quotes`. CoinAPI *can*
@@ -222,15 +225,19 @@ parity, snapshot/day-boundary semantics). What we have shown so far:
   aggregated to L2** — neither of which was exercised here. And the rare ~$249 second-scale spikes
   **cannot be assumed to "wash out"** for second-scale labels; they must be characterized, not dismissed.
 
-**Hard gates before treating the hybrid as production-validated:**
-1. **Recon-level parity:** reconstruct Crypto Lake `book_delta_v2` → top-K L2 and CoinAPI `limitbook_full`
-   (L3) → top-K L2 for the **same overlap day**, and compare per-level price/size and the resulting
-   labels (not just L1 mid). Quantify the spike population at the exact bar/label horizons.
-2. **Snapshot/day-boundary semantics:** apply the §4.3 / §5a-Recon ordering rules and confirm the
-   reconstructed book is uncrossed across the day boundary.
+**Hard gates before treating the hybrid as production-validated** (both ✅ MET on 2025-06-01; multi-day
+pending — §10):
+1. **Recon-level parity ✅ (2025-06-01):** reconstruct Crypto Lake `book_delta_v2` → top-K L2 and CoinAPI
+   `limitbook_full` (L3) → top-K L2 for the **same overlap day**, and compare per-level price/size and
+   the resulting labels (not just L1 mid). Quantify the spike population at the exact bar/label horizons.
+   *Result: |Δmid| median $0.00, corr 0.99999778, label agreement 0.951/0.983/0.995 (see Measured results).*
+2. **Snapshot/day-boundary semantics ✅ (2025-06-01):** apply the §4.3 / §5a-Recon ordering rules and
+   confirm the reconstructed book is uncrossed across the day boundary. *Result: seed/reseed brings the
+   Lake book from 67% crossed to 0.015%.*
 
 **Tooling status (parity gate) — implemented, synthetic-unit-validated, and RUN LIVE on 2025-06-01
-(measured results below; gate NOT yet passed — Lake side).** The one-day parity gate: `recon/coinapi.py`
+(measured results below; Lake side initially FAILED at 67% crossed on the first run, then RESOLVED by
+the seed/reseed policy).** The one-day parity gate: `recon/coinapi.py`
 replays CoinAPI `limitbook_full` L3 → top-K L2 (seq-order, snapshot-first day-open clamp,
 defensive `SNAPSHOT/ADD/DELETE/MATCH/SET/SUB` with `order_id` state and quality counters);
 `recon/reconstruct.py::reconstruct_lake_l2_at_samples` reconstructs Lake `book_delta_v2` → top-K
@@ -257,7 +264,8 @@ applies to SUB by family analogy only; a future day with partial-fill `SUB` rows
 .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10 --size-policy decrement   # -> data/reports/
 ```
 
-**Measured results — first live run, 2025-06-01 (2026-06-29). Gate NOT yet passed (Lake side).**
+**Measured results — first live run, 2025-06-01 (2026-06-29). Lake side FAILED here (67% crossed) —
+RESOLVED by the seed/reseed A/B below (2026-06-30).**
 Pulled the full CoinAPI day (26.3M L3 events, 800MB→588MB parquet) and loaded the live Crypto Lake
 Coinbase `book_delta_v2` day (16.5M delta rows). Two reconstruction issues surfaced — **neither is
 true vendor disagreement**:
@@ -482,13 +490,12 @@ Done:
       balance (§2.2). **Pre-download action:** enable Spend Management (daily cap + hard-stop).
 
 Hard gates before the hybrid Coinbase plan is production-validated:
-- [ ] **Recon-level L3→L2 / L2 parity** — reconstruct Lake `book_delta_v2`→top-K and CoinAPI
+- [x] **Recon-level L3→L2 / L2 parity (2025-06-01)** — reconstruct Lake `book_delta_v2`→top-K and CoinAPI
       `limitbook_full`→top-K on the same overlap day; compare per-level price/size **and labels** at the
-      bar/label horizons. Characterize the ~$249 second-scale spike population (do **not** assume wash-out).
-      *(Tooling added & synthetic-validated — `recon/coinapi.py`, `recon/parity.py`,
-      `scripts/run_coinbase_parity.py`. **Live run done 2025-06-01 (see §5a "Measured results"):**
-      CoinAPI side RESOLVED (`MATCH`=`decrement`, 0% crossed); gate still blocked by Lake
-      `book_delta_v2` 67% intraday crossing → needs the reseed policy below.)*
+      bar/label horizons; characterize the ~$249 second-scale spike population (do **not** assume wash-out).
+      *(Tooling: `recon/coinapi.py`, `recon/parity.py`, `recon/reseed.py`, `scripts/run_coinbase_parity.py`.*
+      ***Live run 2025-06-01:** CoinAPI side RESOLVED (`MATCH`=`decrement`, 0% crossed) AND Lake side RESOLVED
+      by seed/reseed (67% → 0.015% crossed); |Δmid| median $0.00, corr 0.99999778, spikes >$50 = 2/86k.)*
 - [x] **`book_delta_v2` continuous reconstruction + reseed policy** (§5a-Recon) — seed/reseed IMPLEMENTED
       (`recon/reseed.py`, synthetic-unit-validated: valid-seed-usable, crossed-seed-rejected,
       stranded-recovers-on-reseed, no-look-ahead, tolerance-window, `seq`-duplicates-don't-trigger,

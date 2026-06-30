@@ -203,6 +203,19 @@ def test_reseed_does_not_introduce_lookahead():
     assert 20 in m["crossed_sample_ts"] and 30 not in m["crossed_sample_ts"]
 
 
+def test_terminal_crossed_episode_duration_reaches_grid_end():
+    # If the book crosses on the FINAL event and stays crossed through the trailing samples, the
+    # open crossed interval must close at the grid end (last sample), not the last EVENT time —
+    # otherwise crossed_duration_s_after reports 0 while trailing samples are counted crossed.
+    df = _lake_df([(10, 1, True, 102.0, 1.0)])   # crosses at ts=10 (the last event), stays crossed
+    seed = [book_snapshot(1, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+    frame, m = reconstruct_lake_l2_at_samples_seeded(
+        df, [5, 10, 20, 30], k=1, engine_time_col="origin_time", snapshots=seed,
+        policy=ReseedPolicy(enabled=False, min_levels_per_side=1))
+    assert m["crossed_samples"] == 3            # samples at 10, 20, 30 are crossed
+    assert m["crossed_duration_ns"] == 20       # 30 (grid end) − 10 (onset), NOT 0
+
+
 def test_reseed_blocked_when_only_invalid_snapshots_available():
     df = _stranded_df()
     snaps = [book_snapshot(0, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)]),
