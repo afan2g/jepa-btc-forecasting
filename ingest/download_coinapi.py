@@ -30,9 +30,11 @@ Targets CONSOLIDATED daily partitions (D-YYYYMMDD). The most recent ~3 weeks liv
 as an hourly tail / in coinapi-daily-tail and are out of scope here (live capture).
 
 Usage:
-  python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31
-  python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-03 --keep-raw
-  python ingest/download_coinapi.py --start 2026-05-28 --end 2026-05-28 --sample-mb 8   # cheap smoke test
+  python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01               # one parity day
+  python ingest/download_coinapi.py --start 2026-05-28 --end 2026-05-28 --sample-mb 8 # cheap smoke test
+  # Multi-day BULK = backfill, GATED until the §5a parity+reseed gates pass (docs/data.md §5a/§8):
+  # a >1-day full pull exits 4 unless you pass --allow-backfill (with CoinAPI Spend Management on).
+  python ingest/download_coinapi.py --start 2025-01-01 --end 2025-06-30 --allow-backfill --keep-raw
 """
 from __future__ import annotations
 import argparse
