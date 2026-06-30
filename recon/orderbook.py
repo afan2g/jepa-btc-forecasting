@@ -28,6 +28,19 @@ class OrderBook:
             book[d.price] = d.size
         return ok
 
+    def reseed(self, bids, asks) -> None:
+        """Replace the entire book state with a validated full snapshot (docs/data.md §5a-Recon).
+
+        `bids`/`asks` are iterables of `(price, size)` from a Crypto Lake `book` snapshot that the
+        caller has already validated (uncrossed, two-sided, finite/positive). A reseed is the cure
+        for the cold-start level-stranding failure: it drops every stale/stranded level and restores
+        a known-good state. `_last_seq` is cleared because the snapshot breaks delta sequence
+        continuity (and seq is per-event, not a row-gap detector — so it is never used to *trigger*
+        a reseed; crossing is)."""
+        self.bids = {float(p): float(s) for p, s in bids}
+        self.asks = {float(p): float(s) for p, s in asks}
+        self._last_seq = None
+
     def copy(self) -> "OrderBook":
         """Shallow-but-independent copy: new level dicts + carried gap state. Used to
         seed a reconstruction without mutating the caller's book (prices/sizes are

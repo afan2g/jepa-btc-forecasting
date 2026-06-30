@@ -106,6 +106,22 @@ def test_lake_warmup_cutoff_respects_min_depth():
     assert lake_warmup_cutoff(f, min_consecutive=1, min_levels_per_side=1) == 0
 
 
+def test_exclude_ts_masks_labels_on_the_regular_grid_not_compacted():
+    # Excluding an INTERIOR sample must not compact the time grid for label horizons (Codex P2):
+    # _signed_labels uses positional shift(-step), so a removed interior row would make a 1-step
+    # label jump the gap (t1→t3 = 2s, not 1s). The fix masks excluded points to NaN on the regular
+    # grid → labels whose origin/target is excluded are UNDEFINED, never horizon-stretched.
+    ts = [0, 1, 2, 3, 4]
+    bid = [100, 101, 102, 103, 104]
+    f = frame(ts, bid, [1] * 5, [p + 1 for p in bid], [1] * 5)
+    rep = compare_topk(f, f.copy(), k=1, grid_s=1, horizons_s=(1,), exclude_ts={2})
+    la = rep["label_agreement"]["1"]
+    # valid 1-step label origins: t0 (target t1) and t3 (target t4). t1 (target t2 excluded) and t2
+    # (excluded) are undefined ⇒ n == 2. A compacted grid would wrongly count t1→t3 ⇒ n == 3.
+    assert la["n"] == 2
+    assert rep["n_grid_full"] == 5 and rep["n_grid"] == 4 and rep["n_excluded_crossed"] == 1
+
+
 def test_compare_topk_since_ts_restricts_to_warm_window():
     lake = frame([0, 1, 2, 3], [100, 100, 105, 105], [1] * 4, [101, 101, 106, 106], [1] * 4)
     capi = frame([0, 1, 2, 3], [100, 100, 100, 100], [1] * 4, [101, 101, 101, 101], [1] * 4)

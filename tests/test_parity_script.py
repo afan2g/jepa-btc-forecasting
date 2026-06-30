@@ -129,3 +129,118 @@ def test_json_safe_sanitizes_non_finite_and_numpy():
                           "c": [np.int64(3), float("inf")], "d": "x"})
     assert out == {"a": None, "b": 1.5, "c": [3, None], "d": "x"}
     assert math.isfinite(out["b"])
+
+
+# --------------------------------------------------------------------------- Lake seed/reseed (§5a-Recon)
+def _stranded_lake_df():
+    """A Lake book_delta_v2 day that, cold-started, strands a level and crosses ~all day:
+    bid100/ask101 at +1s, then a bid lands at 102 with NO ask clear → best bid 102 ≥ ask 101."""
+    rows = [
+        (DAY_OPEN + 1 * S, 1, True, 100.0, 1.0),
+        (DAY_OPEN + 1 * S, 2, False, 101.0, 1.0),
+        (DAY_OPEN + 2 * S, 3, True, 102.0, 1.0),   # strands ask101 → crossed from +2s onward
+    ]
+    df = pd.DataFrame(rows, columns=["origin_time", "sequence_number", "side_is_bid",
+                                     "price", "size"])
+    df["origin_time"] = pd.to_datetime(df["origin_time"])
+    return df
+
+
+def _seed_snapshots():
+    from recon.reseed import book_snapshot
+    # day-open seed + a later vendor snapshot showing the true (uncrossed) book bid102/ask103.
+    return [book_snapshot(DAY_OPEN + 1, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)]),
+            book_snapshot(DAY_OPEN + 3 * S, bids=[(102.0, 1.0)], asks=[(103.0, 1.0)])]
+
+
+def test_run_parity_core_lake_reseed_repairs_crossing_and_reports_before_after():
+    report, lake, capi = rcp.run_parity_core(
+        _stranded_lake_df(), [_coinapi_rows()], day=DAY, k=1,
+        lake_book_snapshots=_seed_snapshots(), reseed=True,
+        reseed_after_crossed_s=0.0, seed_min_levels=1)
+    lr = report["lake_reseed"]
+    assert lr["applied"] is True and lr["seed_accepted"] is True and lr["seed_ts"] is not None
+    assert lr["reseed_count"] >= 1
+    assert lr["crossed_rate_before"] > 0.9          # cold-start crosses ~the whole day
+    assert lr["crossed_rate_after"] < 0.01          # reseed clears the stranded level
+    assert lr["crossed_rate_after"] < lr["crossed_rate_before"]
+    # lake_quality reports the seeded (post-reseed) FULL-grid crossed rate, not the cold-start one
+    assert report["lake_quality"]["crossed_rate"] == lr["crossed_rate_after"]
+
+
+def test_run_parity_core_no_reseed_ab_arm_seeds_but_does_not_repair():
+    report, _, _ = rcp.run_parity_core(
+        _stranded_lake_df(), [_coinapi_rows()], day=DAY, k=1,
+        lake_book_snapshots=_seed_snapshots(), reseed=False,
+        reseed_after_crossed_s=0.0, seed_min_levels=1)
+    lr = report["lake_reseed"]
+    assert lr["seed_accepted"] is True and lr["reseed_count"] == 0
+    assert lr["crossed_rate_after"] > 0.9           # seeded but no intraday repair → still crosses
+    # reseed disabled ⇒ the crossing is permanent, NOT a residual awaiting a reseed → not excluded.
+    assert lr["excluded_crossed_samples"] == 0
+
+
+def test_crossed_samples_not_excluded_when_seed_is_rejected():
+    # Snapshots present but ALL invalid (crossed) → seed REJECTED → book cold-starts and crosses.
+    # Those crossed samples are a genuine reconstruction FAILURE and must NOT be excluded from the
+    # gate — excluding them would make a failed Lake reconstruction look clean (Codex P2). This is
+    # the crossed-`book`-product day case (e.g. 2026-04-01) that multi-day validation must catch.
+    from recon.reseed import book_snapshot
+    bad = [book_snapshot(DAY_OPEN + 1, bids=[(101.0, 1.0)], asks=[(100.0, 1.0)])]  # crossed → rejected
+    report, _, _ = rcp.run_parity_core(
+        _stranded_lake_df(), [_coinapi_rows()], day=DAY, k=1, lake_book_snapshots=bad,
+        reseed=True, reseed_after_crossed_s=0.0, seed_min_levels=1)
+    lr = report["lake_reseed"]
+    assert lr["seed_accepted"] is False
+    assert lr["excluded_crossed_samples"] == 0           # failure surfaced, not masked
+    assert report["parity"]["n_excluded_crossed"] == 0
+    assert lr["crossed_rate_after"] > 0.9                # the 67%-style crossing stays visible
+
+
+def test_run_parity_core_without_snapshots_is_unchanged_cold_start():
+    report, _, _ = rcp.run_parity_core(_lake_df(), [_coinapi_rows()], day=DAY, k=5)
+    assert report["lake_reseed"]["applied"] is False
+    assert report["lake_reseed"]["seed_accepted"] is False
+    assert report["parity"]["mid_diff"]["max"] == 0.0   # same-book parity preserved
+
+
+def test_seeded_report_is_strict_json_serializable(tmp_path):
+    # The lake_reseed block adds nested dicts (snapshot_reason_codes, policy), a list (reseed_ts)
+    # and Nones — ensure _json_safe + allow_nan=False still yields valid JSON (jq empty contract).
+    report, lake, capi = rcp.run_parity_core(
+        _stranded_lake_df(), [_coinapi_rows()], day=DAY, k=1,
+        lake_book_snapshots=_seed_snapshots(), reseed=True,
+        reseed_after_crossed_s=0.0, seed_min_levels=1)
+    paths = rcp.write_report(report, lake, capi, str(tmp_path), DAY, 1, dump_grid=False)
+    txt = pathlib.Path(paths["json"]).read_text()
+    loaded = json.loads(txt)
+    assert loaded["lake_reseed"]["reseed_count"] >= 1
+    assert "NaN" not in txt and "Infinity" not in txt
+
+
+def test_warmup_cutoff_is_clamped_to_the_accepted_seed():
+    # Cold-started deltas can look two-sided/uncrossed BEFORE the validated seed lands; the parity
+    # cutoff must clamp to seed_ts so the gate never compares pre-seed cold-started Lake state
+    # (Codex P2 / §5a-Recon). Here deltas at +1s establish a clean book, but the seed is at +5s.
+    from recon.reseed import book_snapshot
+    df = pd.DataFrame(
+        [(DAY_OPEN + 1 * S, 1, True, 100.0, 1.0), (DAY_OPEN + 1 * S, 2, False, 101.0, 1.0)],
+        columns=["origin_time", "sequence_number", "side_is_bid", "price", "size"])
+    df["origin_time"] = pd.to_datetime(df["origin_time"])
+    seed = [book_snapshot(DAY_OPEN + 5 * S, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+    report, _, _ = rcp.run_parity_core(
+        df, [_coinapi_rows()], day=DAY, k=1, lake_book_snapshots=seed, reseed=True,
+        reseed_after_crossed_s=0.0, seed_min_levels=1, warmup_consecutive=3)
+    seed_ts = report["lake_reseed"]["seed_ts"]
+    assert seed_ts == DAY_OPEN + 5 * S
+    # cold-start alone would establish ~+3s; the clamp pushes the cutoff to the seed.
+    assert report["parity"]["since_ts"] == seed_ts
+    assert report["warmup"]["cutoff_ts"] == seed_ts
+
+
+def test_cli_exposes_reseed_flags_with_safe_defaults():
+    a = rcp.parse_args([])
+    assert a.no_reseed is False and a.no_lake_seed is False   # reseed ON by default
+    assert a.reseed_after_crossed_s == 2.0 and a.seed_min_levels >= 1
+    assert rcp.parse_args(["--no-reseed"]).no_reseed is True
+    assert rcp.parse_args(["--no-lake-seed"]).no_lake_seed is True

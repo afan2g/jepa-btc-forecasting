@@ -24,6 +24,8 @@ DAY = dt.date.fromisoformat(os.environ.get("PARITY_DAY", "2025-06-01"))
 CAPI_PARQUET = (ROOT / "data" / "raw" / "limitbook_full" / "exchange=COINBASE"
                 / "symbol=BTC-USD" / f"dt={DAY.isoformat()}" / "data.parquet")
 LAKE_FIXTURE = ROOT / "tests" / "fixtures" / f"coinbase_book_delta_v2_{DAY.isoformat()}.parquet"
+# Optional Lake `book` (snapshot) fixture: if present, the test seeds/reseeds (§5a-Recon).
+LAKE_BOOK_FIXTURE = ROOT / "tests" / "fixtures" / f"coinbase_book_{DAY.isoformat()}.parquet"
 
 pytestmark = pytest.mark.skipif(
     not (CAPI_PARQUET.exists() and LAKE_FIXTURE.exists()),
@@ -41,16 +43,40 @@ _SPEC.loader.exec_module(rcp)
 def test_real_one_day_parity_runs_and_is_well_formed(tmp_path):
     lake_df = pd.read_parquet(LAKE_FIXTURE)
     chunks = rcp.iter_coinapi_chunks(str(CAPI_PARQUET), chunk_rows=2_000_000)
-    report, lake, capi = rcp.run_parity_core(lake_df, chunks, day=DAY, k=10, grid_ms=1000)
 
-    # Full grid spans the day; the parity comparison runs on the post-warm-up subset
-    # (gate_warmup defaults True), so n_grid is the FULL grid minus the Lake cold-start window.
+    # If a Lake `book` snapshot fixture is present, exercise the §5a-Recon seed/reseed path; the
+    # report's lake_reseed block must show the before/after crossed rate and a valid seed.
+    snaps = None
+    if LAKE_BOOK_FIXTURE.exists():
+        from recon.ingest import shared_engine_time_col
+        from recon.reseed import snapshots_from_lake_book_df
+        bdf = pd.read_parquet(LAKE_BOOK_FIXTURE)
+        snaps = snapshots_from_lake_book_df(
+            bdf, engine_time_col=shared_engine_time_col(bdf), max_levels=20,
+            stride_ns=1_000_000_000)
+
+    report, lake, capi = rcp.run_parity_core(
+        lake_df, chunks, day=DAY, k=10, grid_ms=1000, lake_book_snapshots=snaps)
+
+    lr = report["lake_reseed"]
+    if snaps:
+        assert lr["applied"] is True and lr["snapshot_candidates"] == len(snaps)
+        assert 0.0 <= lr["crossed_rate_after"] <= 1.0 and 0.0 <= lr["crossed_rate_before"] <= 1.0
+        # the reseed must not make things worse than cold-start
+        assert lr["crossed_rate_after"] <= lr["crossed_rate_before"] + 1e-9
+    else:
+        assert lr["applied"] is False
+
+    # Full grid spans the day; n_grid_full stays the TRUE grid even when warm-up + residual crossed
+    # Lake samples are excluded from the compared subset (they are dropped via since_ts/exclude_ts,
+    # not by undercounting the grid). The accounting identity ties the three together.
     assert report["parity"]["n_grid_full"] == 86400
     assert report["meta"]["grid_points"] == 86400
     assert 0 < report["parity"]["n_grid"] <= 86400
     if report["warmup"]["established"]:
         assert report["parity"]["since_ts"] == report["warmup"]["cutoff_ts"]
-        assert report["parity"]["n_grid"] == 86400 - report["warmup"]["excluded_samples"]
+    assert (report["parity"]["n_grid"] == 86400 - report["warmup"]["excluded_samples"]
+            - report["parity"]["n_excluded_crossed"])
     assert report["meta"]["coinapi_event_rows"] > 0
     for q in (report["lake_quality"], report["coinapi_quality"]):
         assert 0.0 <= q["crossed_rate"] <= 1.0

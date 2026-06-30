@@ -15,9 +15,17 @@ unlimited) and reads a LOCAL CoinAPI parquet for the day — it never triggers a
 download. If the CoinAPI parquet is missing it prints the exact one-day download command and
 exits 3.
 
+Lake `book_delta_v2` is reconstructed with the §5a-Recon SEED/RESEED policy by default: it seeds
+from the validated Lake `book` snapshot product and reseeds when the book stays crossed (the cure
+for the 2025-06-01 ~67% intraday-crossing failure). The report's `lake_reseed` block carries the
+before(cold)/after(reseed) crossed rate. `--no-reseed` keeps the seed but disables intraday repair
+(A/B); `--no-lake-seed` is the pre-§5a-Recon pure cold-start.
+
 Usage:
-  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10   # size_policy=decrement (default)
-  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10 --size-policy absolute  # A/B alt
+  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10   # seed+reseed; size_policy=decrement
+  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10 --no-reseed       # seed-only A/B
+  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10 --no-lake-seed    # cold-start A/B
+  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10 --size-policy absolute  # CoinAPI A/B
   .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --dump-grid   # full aligned grid CSV
 
 Credentials: Crypto Lake AWS keys in .env (Lake-only — COINAPI_KEY is NOT required to read a
@@ -43,6 +51,9 @@ from recon.ingest import shared_engine_time_col                      # noqa: E40
 from recon.parity import compare_topk, frame_quality, lake_warmup_cutoff  # noqa: E402
 from recon.reconstruct import (                                      # noqa: E402
     reconstruct_book_at_samples, reconstruct_lake_l2_at_samples,
+)
+from recon.reseed import (                                           # noqa: E402
+    ReseedPolicy, reconstruct_lake_l2_at_samples_seeded, snapshots_from_lake_book_df,
 )
 
 NS_PER_MS = 1_000_000
@@ -94,6 +105,38 @@ def load_lake_book_delta_v2(sess, day: dt.date, exchange: str, symbol: str) -> p
     )
 
 
+def load_lake_book_snapshots(sess, day: dt.date, exchange: str, symbol: str, *,
+                             max_levels: int = 20, stride_ms: int = 1000):
+    """Load the Crypto Lake `book` (20-level snapshot) product for `day` as validated-candidate
+    reseed sources (docs/data.md §5a-Recon), thinned to ~one snapshot per `stride_ms`.
+
+    ONE day-aligned `load_data` call: lakeapi raises NoFilesFound on a SUB-day window for the `book`
+    table (verified), and the Coinbase `book` product is small (~275k rows/day ≈ 180 MB, 83 cols),
+    so a single-day load is memory-safe — reseeds only need a sparse validated set, not every row.
+    The `book` product is NOT used for features; it is a reseed source only, and only on days where
+    it is verified uncrossed (2025-06-01: 0% crossed; 2026-04-01: 31.75% crossed → rejected by
+    `classify_snapshot`). Projects the RAW level columns (`bid_i_price/size`, `ask_i_price/size`).
+
+    Single-clock invariant: snapshots, deltas, and the grid share ONE engine clock (origin_time — the
+    grid is origin-time midnight). Projecting only `timestamp` resolves to origin_time when populated
+    (100% for Coinbase, docs §5) or RAISES — the caller catches it and falls back to cold-start, so a
+    clock split can never silently corrupt the merge."""
+    import lakeapi  # local import: keep module import side-effect-free / vendor-free
+    cols = ["timestamp"]
+    for i in range(max_levels):
+        cols += [f"bid_{i}_price", f"bid_{i}_size", f"ask_{i}_price", f"ask_{i}_size"]
+    start = dt.datetime.combine(day, dt.time())
+    end = start + dt.timedelta(days=1)
+    df = lakeapi.load_data(table="book", start=start, end=end, symbols=[symbol],
+                           exchanges=[exchange], columns=cols, boto3_session=sess,
+                           drop_partition_cols=True)
+    if not len(df):
+        return []
+    etc = shared_engine_time_col(df)
+    return snapshots_from_lake_book_df(df, engine_time_col=etc, max_levels=max_levels,
+                                       stride_ns=stride_ms * NS_PER_MS)
+
+
 def coinapi_parquet_path(out_root: str, day: dt.date, exchange: str, symbol: str) -> str:
     return os.path.join(out_root, "limitbook_full", f"exchange={exchange}",
                         f"symbol={symbol}", f"dt={day.isoformat()}", "data.parquet")
@@ -121,47 +164,97 @@ def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date
                     grid_ms: int = 1000, size_policy: str = "decrement",
                     on_unknown: str = "count", horizons_s=DEFAULT_HORIZONS_S,
                     band_bps: float = 0.0, n_spikes: int = 25, gate_warmup: bool = True,
-                    warmup_consecutive: int = 3, warmup_min_levels: int = 1):
+                    warmup_consecutive: int = 3, warmup_min_levels: int = 1,
+                    lake_book_snapshots=None, reseed: bool = True,
+                    reseed_after_crossed_s: float = 2.0, seed_min_levels: int = 5,
+                    max_spread_frac: float | None = None, exclude_lake_crossed: bool = True):
     """Reconstruct both vendors onto one grid and compare. Pure w.r.t. its inputs (a Lake
-    delta DataFrame and an iterable of CoinAPI chunks) — no vendor I/O — so the skip-guarded
-    integration test can drive the exact production path from local fixtures.
+    delta DataFrame, an iterable of CoinAPI chunks, and optional pre-loaded Lake `book`
+    snapshots) — no vendor I/O — so the skip-guarded integration test can drive the exact
+    production path from local fixtures.
 
-    Lake `book_delta_v2` has no per-day snapshot, so its reconstruction cold-starts and the
-    early top-K is warm-up (docs/data.md §5a-Recon). When `gate_warmup`, samples before the
-    Lake seed-established cutoff are EXCLUDED from the parity comparison so the gate reflects
-    true vendor divergence, not Lake warm-up; the per-vendor quality blocks still report the
-    FULL grid so the warm-up magnitude stays visible.
+    Lake `book_delta_v2` is a mid-stream incremental feed with no per-day snapshot. Cold-started
+    it strands levels and crosses (~67% of 2025-06-01 — docs/data.md §5a). When
+    `lake_book_snapshots` is supplied, the Lake side is reconstructed with the §5a-Recon
+    seed/reseed policy: seed from the first validated `book` snapshot, then reseed whenever the
+    book stays crossed past `reseed_after_crossed_s`. The cold-start reconstruction is ALSO run
+    (snapshots=None, byte-identical code path) to report the before/after crossed rate — the A/B
+    that shows the reseed effect. `reseed=False` keeps the seed but disables intraday repair (the
+    seed-once A/B arm). Residual crossed Lake samples (awaiting a reseed) are EXCLUDED from the
+    parity comparison when `exclude_lake_crossed` — a crossed mid is not a real vendor mid — and
+    counted transparently; the per-vendor `lake_quality` always reports the FULL-grid crossed rate.
+
+    When `gate_warmup`, pre-seed samples (before the Lake book establishes) are also excluded.
 
     Returns `(report, lake_frame, coinapi_frame)`."""
     grid = build_grid(day, grid_ms)
     grid_s = grid_ms / 1000.0
+    have_lake = lake_delta_df is not None and len(lake_delta_df) > 0
+    have_snaps = have_lake and bool(lake_book_snapshots)
 
-    if lake_delta_df is None or len(lake_delta_df) == 0:
+    reseed_meta = None
+    cold_meta = None
+    if not have_lake:
         lake = reconstruct_book_at_samples([], grid, k=k)  # empty book → all-missing frame
         engine_col = None
     else:
         engine_col = shared_engine_time_col(lake_delta_df)
-        lake = reconstruct_lake_l2_at_samples(lake_delta_df, grid, k=k, engine_time_col=engine_col)
+        if have_snaps:
+            policy = ReseedPolicy(enabled=reseed, min_levels_per_side=seed_min_levels,
+                                  reseed_after_crossed_s=reseed_after_crossed_s,
+                                  max_spread_frac=max_spread_frac)
+            lake, reseed_meta = reconstruct_lake_l2_at_samples_seeded(
+                lake_delta_df, grid, k=k, engine_time_col=engine_col,
+                snapshots=lake_book_snapshots, policy=policy)
+            # A/B "before": the SAME reconstruction cold-started (no seed/reseed). Metrics-only
+            # (frame_out=False) — we need just its crossed rate, so no second 86,400-row frame is
+            # built/discarded on the multi-GB day (the per-delta replay is intrinsic to the A/B).
+            _, cold_meta = reconstruct_lake_l2_at_samples_seeded(
+                lake_delta_df, grid, k=k, engine_time_col=engine_col, snapshots=None,
+                frame_out=False)
+        else:
+            lake = reconstruct_lake_l2_at_samples(lake_delta_df, grid, k=k, engine_time_col=engine_col)
 
     capi, capi_q = reconstruct_coinapi_l2_at_samples(
         coinapi_chunks, k=k, day=day, sample_ts=grid,
         size_policy=size_policy, on_unknown=on_unknown,
     )
-    lake_q = frame_quality(lake, source_rows=(0 if lake_delta_df is None else len(lake_delta_df)))
+    lake_q = frame_quality(lake, source_rows=(0 if not have_lake else len(lake_delta_df)))
 
     cutoff = (lake_warmup_cutoff(lake, min_consecutive=warmup_consecutive,
                                  min_levels_per_side=warmup_min_levels) if gate_warmup else None)
+    # A validated seed defines the true "book established" time. Samples before seed_ts are pre-seed
+    # COLD-STARTED state (§5a-Recon warm-up) — and cold-started deltas can look two-sided/uncrossed
+    # before the seed lands, so lake_warmup_cutoff alone could place the cutoff earlier and let the
+    # gate compare unseeded Lake state. Clamp the cutoff to the accepted seed (only when warm-up
+    # gating is on; --no-warmup-gate deliberately compares the full grid incl. cold-start).
+    if gate_warmup and reseed_meta and reseed_meta.get("seed_accepted") and \
+            reseed_meta.get("seed_ts") is not None:
+        st = int(reseed_meta["seed_ts"])
+        cutoff = st if cutoff is None else max(int(cutoff), st)
     excluded = sum(1 for t in grid if cutoff is not None and t < cutoff)
-    parity = compare_topk(lake, capi, k=k, grid_s=grid_s, horizons_s=horizons_s,
-                          band_bps=band_bps, n_spikes=n_spikes, since_ts=cutoff)
 
+    # Exclude residual crossed Lake samples (awaiting a reseed) from the comparison — a crossed mid
+    # is not a real vendor mid — but keep n_grid_full = the TRUE full grid (compare_topk drops them
+    # via exclude_ts, not by pre-filtering the frame, so the honest grid size is never undercounted).
+    # ONLY when a valid seed was accepted AND reseed is active: otherwise the crossed samples are a
+    # genuine reconstruction FAILURE (a rejected seed on a crossed-`book` day, or the seed-only A/B
+    # arm) and must surface as crossed in the gate, not be masked into a clean-looking parity.
+    seed_active = bool(reseed_meta and reseed_meta.get("seed_accepted") and reseed)
+    excluded_crossed = (set(reseed_meta["crossed_sample_ts"])
+                        if (exclude_lake_crossed and seed_active) else set())
+    parity = compare_topk(lake, capi, k=k, grid_s=grid_s, horizons_s=horizons_s,
+                          band_bps=band_bps, n_spikes=n_spikes, since_ts=cutoff,
+                          exclude_ts=excluded_crossed)
+
+    crossed_before = (cold_meta["crossed_rate"] if cold_meta is not None else lake_q["crossed_rate"])
     report = {
         "meta": {
             "day": day.isoformat(), "k": int(k), "grid_ms": int(grid_ms),
             "grid_points": len(grid), "size_policy": size_policy, "on_unknown": on_unknown,
             "horizons_s": list(horizons_s), "band_bps": float(band_bps),
             "lake_engine_time_col": engine_col,
-            "lake_delta_rows": (0 if lake_delta_df is None else int(len(lake_delta_df))),
+            "lake_delta_rows": (0 if not have_lake else int(len(lake_delta_df))),
             "coinapi_event_rows": int(capi_q.get("total_rows", 0)),
             "note": "PILOT — synthetic-validated tooling; live measured results only when run "
                     "against real vendor data (docs/data.md §5a hard gate #1).",
@@ -175,10 +268,37 @@ def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date
             "excluded_samples": int(excluded),
             "excluded_fraction": (float(excluded / len(grid)) if grid else 0.0),
             "note": "Lake book_delta_v2 cold-starts with no per-day snapshot (docs/data.md "
-                    "§5a-Recon); pre-seed samples are excluded from the parity gate. Full "
-                    "validated-seed from the Lake `book` snapshot is a deferred follow-up. "
-                    "established=False ⇒ Lake never seeded (e.g. a gap day) → parity is on the "
-                    "full grid and reads as fully missing.",
+                    "§5a-Recon); pre-seed samples are excluded from the parity gate. With a "
+                    "validated Lake `book` seed the book establishes at day-open so this window "
+                    "collapses. established=False ⇒ Lake never seeded (e.g. a gap day) → parity "
+                    "is on the full grid and reads as fully missing.",
+        },
+        "lake_reseed": {
+            "applied": bool(have_snaps),
+            "reseed_enabled": bool(reseed),
+            "snapshot_candidates": (int(len(lake_book_snapshots)) if have_snaps else 0),
+            "seed_accepted": (bool(reseed_meta["seed_accepted"]) if reseed_meta else False),
+            "seed_ts": (reseed_meta["seed_ts"] if reseed_meta else None),
+            "seed_reason": (reseed_meta["seed_reason"] if reseed_meta else "no_snapshots"),
+            "reseed_count": (int(reseed_meta["reseed_count"]) if reseed_meta else 0),
+            "reseed_ts": (reseed_meta["reseed_ts"][:100] if reseed_meta else []),
+            "reseed_blocked_invalid_snapshot": (
+                int(reseed_meta["reseed_blocked_invalid_snapshot"]) if reseed_meta else 0),
+            "snapshot_reason_codes": (reseed_meta["snapshot_reason_codes"] if reseed_meta else {}),
+            "crossed_rate_before": float(crossed_before),
+            "crossed_rate_after": float(lake_q["crossed_rate"]),
+            "crossed_samples_after": int(lake_q["crossed_samples"]),
+            "crossed_duration_s_after": (
+                float(reseed_meta["crossed_duration_s"]) if reseed_meta else None),
+            "missing_book_fraction_after": float(lake_q["missing_book_fraction"]),
+            "thin_depth_fraction_after": (
+                float(reseed_meta["thin_depth_fraction"]) if reseed_meta else None),
+            "excluded_crossed_samples": int(len(excluded_crossed)),
+            "policy": (reseed_meta["policy"] if reseed_meta else None),
+            "note": "Seed from the validated Lake `book` snapshot, reseed on sustained crossing "
+                    "(docs/data.md §5a-Recon). crossed_rate_before = cold-start (no seed/reseed); "
+                    "crossed_rate_after = this run. seq is NOT used as a gap detector (it is "
+                    "per-event, duplicated ~91% of rows); crossing is the reseed trigger.",
         },
         "lake_quality": lake_q,
         "coinapi_quality": capi_q,
@@ -235,6 +355,16 @@ def print_summary(report: dict, paths: dict) -> None:
     print("=" * 74)
     print(f"  Lake delta rows: {m['lake_delta_rows']:,} | CoinAPI event rows: "
           f"{m['coinapi_event_rows']:,}")
+    lr = report.get("lake_reseed", {})
+    if lr.get("applied"):
+        seed = (f"OK@{lr['seed_ts']}" if lr.get("seed_accepted")
+                else f"REJECTED({lr.get('seed_reason')})")
+        print(f"  Lake seed/reseed  : seed {seed} | candidates {lr.get('snapshot_candidates', 0):,}"
+              f" | reseeds {lr.get('reseed_count', 0)}"
+              f" (blocked {lr.get('reseed_blocked_invalid_snapshot', 0)})")
+        print(f"  Lake crossed A/B  : before(cold) {lr.get('crossed_rate_before', 0):.4%} → "
+              f"after(reseed) {lr.get('crossed_rate_after', 0):.4%} | "
+              f"excluded {lr.get('excluded_crossed_samples', 0):,} crossed samples")
     w = report.get("warmup", {})
     if w.get("gated"):
         cut = "established" if w.get("established") else "NEVER established (gap day?)"
@@ -291,6 +421,27 @@ def parse_args(argv=None):
                     help="consecutive seeded samples required before the Lake book is trusted")
     ap.add_argument("--warmup-min-levels", type=int, default=1,
                     help="min levels per side for the Lake seed-established gate")
+    ap.add_argument("--no-lake-seed", action="store_true",
+                    help="do NOT load the Lake `book` snapshot product; pure cold-start "
+                         "reconstruction (the pre-§5a-Recon behavior, for A/B). Default: seed.")
+    ap.add_argument("--no-reseed", action="store_true",
+                    help="seed once at day-open but DISABLE intraday reseed-on-crossing "
+                         "(the seed-only A/B arm; docs/data.md §5a-Recon)")
+    ap.add_argument("--reseed-after-crossed-s", type=float, default=2.0,
+                    help="reseed only once the Lake book has been crossed continuously ≥ this many "
+                         "seconds (default 2.0; a transient one-tick cross does not force a reseed)")
+    ap.add_argument("--seed-min-levels", type=int, default=5,
+                    help="min levels per side for a Lake `book` snapshot to be a VALID seed/reseed "
+                         "source (rejects thin/broken snapshots; default 5)")
+    ap.add_argument("--seed-max-spread-frac", type=float, default=None,
+                    help="optional sane-spread guard for seed validation (spread/mid; off by default)")
+    ap.add_argument("--book-stride-ms", type=int, default=1000,
+                    help="thin the Lake `book` product to ~one seed candidate per N ms (default 1000)")
+    ap.add_argument("--book-max-levels", type=int, default=20,
+                    help="Lake `book` snapshot depth to load/seed from (default 20, the product depth)")
+    ap.add_argument("--no-exclude-crossed", action="store_true",
+                    help="keep residual crossed Lake samples in the parity comparison instead of "
+                         "excluding them (default: exclude crossed Lake samples, report separately)")
     ap.add_argument("--exchange", default="COINBASE", help="Crypto Lake / partition exchange")
     ap.add_argument("--symbol", default="BTC-USD", help="Crypto Lake / partition symbol")
     ap.add_argument("--coinapi-root", default="data/raw", help="root of the CoinAPI parquet tree")
@@ -322,12 +473,30 @@ def main(argv=None) -> int:
         print(f"  WARNING: Crypto Lake has no book_delta_v2 for {day} (a gap day?) — the parity "
               "report will show the Lake book as fully missing.", file=sys.stderr)
 
+    snaps = None
+    if not args.no_lake_seed and len(lake_df):
+        print(f"Loading Crypto Lake {args.symbol} `book` snapshots for seeding/reseeding "
+              f"(stride {args.book_stride_ms}ms, {args.book_max_levels} levels) …")
+        try:
+            snaps = load_lake_book_snapshots(
+                sess, day, args.exchange, args.symbol,
+                max_levels=args.book_max_levels, stride_ms=args.book_stride_ms)
+            print(f"  Lake book seed candidates: {len(snaps):,}")
+        except Exception as e:  # noqa: BLE001 — graceful fallback to cold-start
+            print(f"  WARNING: could not load Lake `book` snapshots ({e!r}); falling back to "
+                  "cold-start (no seed/reseed). The Lake side will read as crossed (docs/data.md "
+                  "§5a). Re-run with the `book` product available to seed.", file=sys.stderr)
+            snaps = None
+
     print(f"Replaying CoinAPI L3 {capi_path} (streaming, {args.chunk_rows:,} rows/chunk) …")
     report, lake, capi = run_parity_core(
         lake_df, iter_coinapi_chunks(capi_path, args.chunk_rows), day=day, k=args.k,
         grid_ms=args.grid_ms, size_policy=args.size_policy, on_unknown=args.on_unknown,
         horizons_s=horizons, band_bps=args.band_bps, gate_warmup=not args.no_warmup_gate,
         warmup_consecutive=args.warmup_consecutive, warmup_min_levels=args.warmup_min_levels,
+        lake_book_snapshots=snaps, reseed=not args.no_reseed,
+        reseed_after_crossed_s=args.reseed_after_crossed_s, seed_min_levels=args.seed_min_levels,
+        max_spread_frac=args.seed_max_spread_frac, exclude_lake_crossed=not args.no_exclude_crossed,
     )
     paths = write_report(report, lake, capi, args.out_dir, day, args.k, args.dump_grid)
     print_summary(report, paths)
