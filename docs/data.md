@@ -313,8 +313,9 @@ true vendor disagreement**:
 
 The reseed clears the stranded levels: the cold-start 67 % crossing collapses to **0.015 %** (12.3 s
 total residual crossed time across the 3 episodes), and the Lake mid now matches CoinAPI to a **$0.00
-median** with **0.99999778** correlation. Parity ran on **86,385 / 86,400** grid points (2 pre-seed
-warm-up + 13 residual-crossed samples excluded; `n_grid_full` stays the true 86,400). The A/B confirms
+median** with **0.99999778** correlation. Parity ran on **86,383 / 86,400** grid points (4 pre-seed
+warm-up samples — the cutoff is clamped to the accepted seed at 00:00:03.18 — plus 13 residual-crossed
+samples excluded; `n_grid_full` stays the true 86,400). The A/B confirms
 the fix is the reseed, not a code-path change — the cold arm is the byte-identical reconstruction.
 The known rare second-scale spikes survive as a small, *characterized* tail (2 samples >$50, max
 $66.59), not assumed to wash out. Report artifacts (git-ignored):
@@ -349,7 +350,8 @@ We don't use that product for features, but if it's used as a reseed source it m
 Whether the underlying `book_delta_v2` *reconstruction* is also degraded on such days is **unknown until
 recon exists** — that feeds the quality-map TODO (§10); degraded present-days get CoinAPI fill like gaps.
 
-**Implementation (`recon/reseed.py`, synthetic-unit-validated — live re-run pending).** The policy is:
+**Implementation (`recon/reseed.py`, synthetic-unit-validated + live-validated 2025-06-01:
+67% → 0.015% crossed).** The policy is:
 - **Seed:** parse the Lake `book` product into time-sorted candidates (`snapshots_from_lake_book_df`,
   thinned by a stride so the large product never fully materializes), validate each
   (`classify_snapshot`: two-sided, finite/positive, ≥N levels/side, uncrossed, optional sane spread),

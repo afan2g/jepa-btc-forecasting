@@ -223,6 +223,15 @@ def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date
 
     cutoff = (lake_warmup_cutoff(lake, min_consecutive=warmup_consecutive,
                                  min_levels_per_side=warmup_min_levels) if gate_warmup else None)
+    # A validated seed defines the true "book established" time. Samples before seed_ts are pre-seed
+    # COLD-STARTED state (§5a-Recon warm-up) — and cold-started deltas can look two-sided/uncrossed
+    # before the seed lands, so lake_warmup_cutoff alone could place the cutoff earlier and let the
+    # gate compare unseeded Lake state. Clamp the cutoff to the accepted seed (only when warm-up
+    # gating is on; --no-warmup-gate deliberately compares the full grid incl. cold-start).
+    if gate_warmup and reseed_meta and reseed_meta.get("seed_accepted") and \
+            reseed_meta.get("seed_ts") is not None:
+        st = int(reseed_meta["seed_ts"])
+        cutoff = st if cutoff is None else max(int(cutoff), st)
     excluded = sum(1 for t in grid if cutoff is not None and t < cutoff)
 
     # Exclude residual crossed Lake samples (awaiting a reseed) from the comparison — a crossed mid

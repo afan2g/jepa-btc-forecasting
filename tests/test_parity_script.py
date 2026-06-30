@@ -199,6 +199,26 @@ def test_seeded_report_is_strict_json_serializable(tmp_path):
     assert "NaN" not in txt and "Infinity" not in txt
 
 
+def test_warmup_cutoff_is_clamped_to_the_accepted_seed():
+    # Cold-started deltas can look two-sided/uncrossed BEFORE the validated seed lands; the parity
+    # cutoff must clamp to seed_ts so the gate never compares pre-seed cold-started Lake state
+    # (Codex P2 / §5a-Recon). Here deltas at +1s establish a clean book, but the seed is at +5s.
+    from recon.reseed import book_snapshot
+    df = pd.DataFrame(
+        [(DAY_OPEN + 1 * S, 1, True, 100.0, 1.0), (DAY_OPEN + 1 * S, 2, False, 101.0, 1.0)],
+        columns=["origin_time", "sequence_number", "side_is_bid", "price", "size"])
+    df["origin_time"] = pd.to_datetime(df["origin_time"])
+    seed = [book_snapshot(DAY_OPEN + 5 * S, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+    report, _, _ = rcp.run_parity_core(
+        df, [_coinapi_rows()], day=DAY, k=1, lake_book_snapshots=seed, reseed=True,
+        reseed_after_crossed_s=0.0, seed_min_levels=1, warmup_consecutive=3)
+    seed_ts = report["lake_reseed"]["seed_ts"]
+    assert seed_ts == DAY_OPEN + 5 * S
+    # cold-start alone would establish ~+3s; the clamp pushes the cutoff to the seed.
+    assert report["parity"]["since_ts"] == seed_ts
+    assert report["warmup"]["cutoff_ts"] == seed_ts
+
+
 def test_cli_exposes_reseed_flags_with_safe_defaults():
     a = rcp.parse_args([])
     assert a.no_reseed is False and a.no_lake_seed is False   # reseed ON by default
