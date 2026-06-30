@@ -244,8 +244,10 @@ decision (`--no-warmup-gate` to disable); it also reports **per-level both-prese
 thin/one-sided top-K depths are marked, not silently dropped. The full validated seed from Lake's
 `book` snapshot product stays the deferred §5a-Recon follow-up. The CoinAPI **SUB/MATCH size
 convention** was an A/B assumption (absolute-size vs `--size-policy decrement`); the live run below
-**resolved it: `decrement` is correct for Coinbase `limitbook_full`** (see "Measured results"). Run
-(after enabling CoinAPI Spend Management, §8):
+**resolved the MATCH path: `decrement` is correct for Coinbase `limitbook_full` MATCH events**.
+⚠️ **SUB is NOT yet verified** — 2025-06-01 had **0 SUB events**, so the `decrement` default also
+applies to SUB by family analogy only; a future day with partial-fill `SUB` rows must confirm it
+(see "Measured results"). Run (after enabling CoinAPI Spend Management, §8):
 
 ```bash
 .venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01            # one overlap day
@@ -264,8 +266,12 @@ true vendor disagreement**:
    touch → CoinAPI book **crossed 99.99%** of samples (−$708 deep by mid-morning, ~3.8k stale ask
    levels under the best bid). Under `--size-policy decrement` the CoinAPI book is **0.00% crossed**,
    clean (spread +$0.01, no stale levels). DELETEs (cancels, 12.9M/day) were always fine; only the
-   MATCH path (275k fills, all at top-of-book) was affected. ⇒ **`decrement` should be the Coinbase
-   default** (the `absolute` path stays available for other venues / A/B).
+   MATCH path (275k fills, all at top-of-book) was affected. ⇒ **`decrement` is the Coinbase default**
+   (the `absolute` path stays available for other venues / A/B). **Scope of the evidence:** this day
+   had **0 `SUB` events** (event mix: SNAPSHOT 102,694 · ADD 13.0M · DELETE 12.9M · MATCH 275,247 ·
+   SET 8,091), so only the MATCH size convention is *verified*. `decrement` decrements SUB under the
+   same policy by analogy; that must be re-checked on a day that actually contains `SUB` rows before
+   trusting partial-fill reconstruction there.
 
 2. **Lake `book_delta_v2` crosses 67% — intraday level-stranding, NOT cold-start (the blocker).**
    The seed-established warm-up gate excluded only 2 pre-seed samples, yet the Lake book is crossed
@@ -282,8 +288,11 @@ true vendor disagreement**:
 **Parity after the CoinAPI fix, with Lake still crossing (the residual gap is entirely the Lake side):**
 `|Δmid|` median **$55.96** / p95 $345 / corr **0.977**; directional label agreement **0.90 / 0.93 /
 0.95** at 2 s / 10 s / 60 s; per-level both-present coverage 100% to L9. Decision: **do not backfill**;
-the gate cannot pass until the Lake `book_delta_v2` reseed policy (§5a-Recon) lands. Report artifacts:
-`data/reports/parity_coinbase_2025-06-01_k10*.{json,csv}` (the on-disk JSON is the `decrement` run).
+the gate cannot pass until the Lake `book_delta_v2` reseed policy (§5a-Recon) lands. This decision is
+**enforced in code**: `ingest/download_coinapi.py` refuses a multi-day full pull (exit 4) until the
+gate passes — single-day parity pulls and `--sample-mb` smoke tests are allowed, `--allow-backfill`
+overrides. Report artifacts: `data/reports/parity_coinbase_2025-06-01_k10*.{json,csv}` (the on-disk
+JSON is the `decrement` run).
 
 ### 5a-Recon. `book_delta_v2` reconstruction & reseed policy
 `book_delta_v2` is a **mid-stream incremental feed** (no per-day snapshot, absolute-size/`0`=remove), so
@@ -395,7 +404,10 @@ END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap str
 .venv/bin/python ingest/verify_trades_and_calendar.py --end 2026-06-22 --verify-backfill  # trades + usable calendar + CoinAPI fill check -> data/usable_calendar.json
 .venv/bin/python ingest/coinapi_rest.py                          # CoinAPI coverage dates (REST $25 credit)
 .venv/bin/python ingest/coinapi_flatfiles.py 14                  # CoinAPI flat-files coverage + 8 MB schema
-.venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31   # CoinAPI → Parquet
+.venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01   # CoinAPI → Parquet (ONE day)
+# NOTE: multi-day BULK pulls are the backfill and are GATED — download_coinapi.py refuses a >1-day full
+# pull (exit 4) until the §5a parity + reseed gates pass. Single days + --sample-mb smoke always allowed;
+# --allow-backfill overrides once the gate passes (with CoinAPI Spend Management on, §8).
 ```
 Coverage windows are **anchored on the `END` env var** (default `2026-06-22`); without it they reproduce
 the original snapshot. (The `coinapi_flatfiles.py`/`download_coinapi.py` day arguments are explicit

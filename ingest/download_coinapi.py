@@ -141,6 +141,35 @@ def now_iso():
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
+# Backfill is GATED on the §5a recon-parity + reseed gates passing (docs/data.md §5a/§8). As of the
+# 2025-06-01 live run the Lake-side gate FAILS (book_delta_v2 crosses ~67% intraday), so a paid bulk
+# Coinbase pull must not proceed. A single overlap day (the parity pilot) and `--sample-mb` smoke
+# tests are always allowed; a multi-day full pull requires an explicit `--allow-backfill` override so
+# the documented "do not backfill" decision is actually enforced at the point of action, not just in
+# prose. Pure + importable so it can be unit-tested without any vendor I/O.
+BACKFILL_GATE_EXIT = 4  # mirrors run_coinbase_parity.py's small-int exit-code convention
+
+
+def check_backfill_gate(start: dt.date, end: dt.date, *, sample_mb: int, allow_backfill: bool) -> None:
+    """Block a multi-day full pull before the §5a gates pass. Prints the reason to stderr and
+    raises SystemExit(4) (a string SystemExit would exit 1 and skip the int-code contract). A
+    single day, a `--sample-mb` smoke, or an explicit `--allow-backfill` override returns cleanly."""
+    n_days = (end - start).days + 1
+    if n_days <= 1 or sample_mb or allow_backfill:
+        return
+    print(
+        f"REFUSING multi-day backfill pull ({n_days} days {start}..{end}): the §5a Coinbase "
+        "vendor-parity gate has NOT passed (Lake book_delta_v2 reseed pending — docs/data.md §5a). "
+        "Bulk backfill is blocked until parity + reseed pass.\n"
+        "  • For the parity pilot, pull ONE overlap day at a time: --start D --end D\n"
+        "  • For a cheap smoke test, add --sample-mb 8\n"
+        "  • To override once the gate passes (or for a deliberate, budgeted pull), pass "
+        "--allow-backfill (ensure CoinAPI Spend Management is enabled, §8).",
+        file=sys.stderr,
+    )
+    raise SystemExit(BACKFILL_GATE_EXIT)
+
+
 def cleanup_tmp(out_root):
     """Remove stale *.tmp / *.gz left by an interrupted run (keeps resume clean)."""
     removed = 0
@@ -231,12 +260,16 @@ def main():
     ap.add_argument("--keep-raw", action="store_true", help="archive the source .csv.gz")
     ap.add_argument("--overwrite", action="store_true", help="re-download existing days")
     ap.add_argument("--sample-mb", type=int, default=0, help="dev: parse only first N MB (smoke test)")
+    ap.add_argument("--allow-backfill", action="store_true",
+                    help="override the §5a backfill gate for a multi-day full pull (blocked by "
+                         "default until recon parity + reseed pass — docs/data.md §5a/§8)")
     args = ap.parse_args()
 
     start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end)
     if end < start:
         raise SystemExit("--end is before --start")
+    check_backfill_gate(start, end, sample_mb=args.sample_mb, allow_backfill=args.allow_backfill)
 
     api_key = load_env()["COINAPI_KEY"]
     os.makedirs(args.out, exist_ok=True)
