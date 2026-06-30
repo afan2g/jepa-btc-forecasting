@@ -379,6 +379,61 @@ A single day-open seed is **not** sufficient (the live failure is intraday level
 cold-start); reseed-on-crossing is the fix. Prior-day seed carry-across and the vendor-switch-seam
 reseed (Lake↔CoinAPI) remain follow-ups beyond this one-day pilot.
 
+### 5a-QualityMap. Multi-day Coinbase quality map (quota-aware)
+`scripts/run_coinbase_quality_map.py` generalizes the one-day parity gate's **Lake side** across many
+days to answer the §10 open question — *how many PRESENT Coinbase days reconstruct to a usable
+`book_delta_v2` after seed/reseed, and which present-but-degraded or missing days need CoinAPI fill?*
+It runs the same `recon/reseed.py` seed/reseed reconstruction-quality path per day
+(`reconstruct_lake_l2_at_samples_seeded` + `recon/parity.py::frame_quality`) — **Lake-only, no CoinAPI
+replay, so no CoinAPI download** — and classifies each day with explicit thresholds (emitted in the
+report JSON):
+
+| class | meaning | rule (default thresholds) |
+|---|---|---|
+| `lake_usable` | present, seed accepted + trusted source, clean reconstruction | crossed ≤ **1%**, missing ≤ **2%**, thin ≤ **10%** (after reseed), seed-source crossed ≤ **5%** |
+| `lake_present_degraded` | present, seed accepted + trusted source, a quality metric over the bar → CoinAPI fill | any usable crossed/missing/thin threshold exceeded |
+| `missing_needs_coinapi` | no Lake `book_delta_v2` for the day (a gap) → CoinAPI fill | 0 delta rows (or lakeapi `NoFilesFound`) |
+| `excluded` | out of the usable calendar for a non-Coinbase reason (e.g. a Binance gap) | day in `excluded_days_by_reason` (skipped before any Lake load) |
+| `inconclusive` | cannot validate the reconstruction | no/all-rejected seed, **or** an accepted seed whose `book` source is itself crossed > **5%**, **or** the Lake load failed |
+
+A confident `lake_usable`/`lake_present_degraded` verdict **requires both an accepted seed and a
+trustworthy seed source**: on 2026-04-01 the `book` product is **31.75% crossed**, so although ~68% of
+candidates are valid and a seed IS accepted, the source exceeds the **5%** crossed-candidate bar → the
+day is `inconclusive`, not silently usable (a clean-looking reconstruction off a flaky seed source can't
+be trusted). The classifier keys off missing `book_delta_v2`, no/rejected seed snapshots, the crossed
+seed-source fraction, the crossed rate after reseed, the missing-book fraction, and thin top-K depth; the
+per-day record additionally **records** (it does not classify on) whether CoinAPI parity — a local
+parquet or a calendar-verified flat-files `book` — was available, for downstream fill planning.
+
+**Quota-aware (docs §2.1/§6/§8).** It prints `lakeapi.used_data(sess)` before/after, estimates the
+request from measured per-day sizes (`book_delta_v2` ~0.30 GB/day from §6; the `book` 20-level snapshot
+product ~0.18 GB/day ≈ 275k rows → ~0.48 GB/day, a conservative upper bound), and **refuses a broad
+pull** (> `--max-auto-gb`, default 5 GB) unless `--allow-broad` — and *always* refuses a pull that would
+breach the 300 GB/month quota headroom, override or not (and refuses the whole run, fail-safe, if
+`used_data` is unreadable). The default day set is small: **2025-06-01** (the validated clean day →
+`lake_usable`) and **2026-04-01** (31.75%-crossed `book` seed source → `inconclusive`); add more with
+`--days` / `--days-file` / `--include-gap-days N`. The full report is written to
+`data/reports/coinbase_quality_map.json` (git-ignored). One per-day record (illustrative schema — the
+multi-day runner is not yet run live; reasons shown in full, seed/quality blocks abbreviated; values
+mirror the §5a 2025-06-01 measured parity):
+
+```json
+{"day": "2025-06-01", "classification": "lake_usable",
+ "reasons": ["seed_accepted", "crossed_rate_after=0.0002", "missing_book_fraction=0.0000",
+             "thin_depth_fraction=0.0000"],
+ "lake_book_delta_v2_present": true, "lake_delta_rows": 16500000,
+ "seed": {"seed_accepted": true, "reseed_count": 3, "snapshot_reason_codes": {"ok": 65466}},
+ "quality": {"crossed_rate_after": 0.00015, "crossed_rate_cold": 0.6704,
+             "missing_book_fraction": 0.0, "thin_depth_fraction": 0.0},
+ "coinapi": {"parquet_local": false, "fillable": null},
+ "calendar": {"in_usable_days": true, "is_coinbase_fill_day": false, "excluded_reason": null}}
+```
+
+**Backfill stays LOCKED.** This is a validation/quality-map tool: it does not download CoinAPI and does
+not unlock the §5a backfill gate (still enforced in `ingest/download_coinapi.py` / `ingest/_common.py`).
+Bulk backfill remains gated until the multi-day quality map (and the §10 multi-day reseed validation)
+passes.
+
 ---
 
 ## 6. Per-day sizes & storage budget (measured)
@@ -480,6 +535,7 @@ END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap str
 .venv/bin/python ingest/coinapi_rest.py                          # CoinAPI coverage dates (REST $25 credit)
 .venv/bin/python ingest/coinapi_flatfiles.py 14                  # CoinAPI flat-files coverage + 8 MB schema
 .venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01   # CoinAPI → Parquet (ONE day)
+.venv/bin/python scripts/run_coinbase_quality_map.py    # multi-day Lake quality map (§5a-QualityMap; quota-aware, prints used_data, refuses broad pulls without --allow-broad) -> data/reports/
 # NOTE: multi-day BULK pulls are the backfill and are GATED — download_coinapi.py refuses a >1-day full
 # pull (exit 4) until the §5a parity + reseed gates pass. A single day, or a multi-day range with a small
 # --sample-mb smoke (≤64MB), is allowed; --allow-backfill overrides once the gate passes (Spend Mgmt on, §8).
@@ -525,6 +581,10 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       real `SUB` events. Prior-day seed carry + vendor-switch-seam reseed still deferred.
 - [ ] **Crypto Lake Coinbase quality map** — how many *present* days have a degraded `book_delta_v2`
       *reconstruction* (not just the `book` snapshot product)? Degraded present-days get CoinAPI fill.
+      *(Tooling: `scripts/run_coinbase_quality_map.py` — §5a-QualityMap, quota-aware, classifies
+      lake_usable / lake_present_degraded / missing_needs_coinapi / excluded / inconclusive. The
+      multi-day MAP itself is the remaining gate — not yet run live; backfill stays locked until it
+      passes.)*
 
 Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.

@@ -21,21 +21,25 @@ Ordering rule (mandatory — docs/data.md §4.3):
     non-decreasing watermark over the label time drives sampling, so a stray backward
     time stamp can never sort the snapshot to the end of the day.
 
-⚠️ VENDOR-SEMANTICS ASSUMPTION — pending live validation (docs/data.md §5a hard gate).
+⚠️ VENDOR-SEMANTICS — `MATCH`=`decrement` VERIFIED for Coinbase; `SUB` still UNVERIFIED (§5a).
 `update_type` is an OPEN string set {SNAPSHOT, ADD, DELETE, MATCH, SET, SUB, …} (store as
 string, never an enum). Their book meaning (CoinAPI L3): SNAPSHOT seeds the book, ADD posts
 a resting order, DELETE cancels it, SET sets its state, SUB is a partial fill (size reduced),
-MATCH is an execution against it. The exact *size convention* of the reducing events
-(SUB/MATCH) is NOT yet confirmed against real Coinbase data, so it is selectable:
+MATCH is an execution against it. The *size convention* of the reducing events is selectable;
+the 2025-06-01 live gate RESOLVED `MATCH`=`decrement` for Coinbase `limitbook_full` (`entry_sx`
+is the traded amount; under `absolute`, filled MATCH orders left stale residue and crossed the
+book ~100% — docs/data.md §5a). `SUB` is **NOT yet verified for Coinbase** — that day had 0 `SUB`
+events, so `decrement` applies to `SUB` by family analogy only until a day with real partial-fill
+`SUB` rows confirms it (a multi-day quality-map / parity follow-up, docs/data.md §10):
 
-  * `size_policy="absolute"` (DEFAULT): every row reports the order's resulting resting size
-    at `entry_px` (size 0 ⇒ remove). Self-consistent with ADD/SET/SNAPSHOT and with the Lake
-    `book_delta_v2` "size is absolute, 0 removes" rule, and drift-free.
-  * `size_policy="decrement"`: SUB/MATCH carry the amount REMOVED (subtract from the order's
-    current size; ≤0 ⇒ remove).
+  * `size_policy="absolute"` (this function's DEFAULT, kept for OTHER venues and the A/B): every
+    row reports the order's resulting resting size at `entry_px` (size 0 ⇒ remove). Self-consistent
+    with ADD/SET/SNAPSHOT and with the Lake `book_delta_v2` "size is absolute, 0 removes" rule.
+  * `size_policy="decrement"` (the VERIFIED Coinbase policy — `scripts/run_coinbase_parity.py`
+    defaults to it): SUB/MATCH carry the amount REMOVED (subtract from the order's current size;
+    ≤0 ⇒ remove).
 
-The one-day pilot can run BOTH and keep whichever yields an uncrossed, parity-matching book —
-that empirical A/B is exactly what this gate exists to resolve. State-defining events
+State-defining events
 (SNAPSHOT/ADD/SET) on an unseen `order_id` create it; reducing events (SUB/MATCH/DELETE) on
 an unseen `order_id` are a missing-seed signal — counted as `missing_order` and skipped, never
 fabricated. Unknown update types are counted (`unknown:<TYPE>`) and skipped, or raise under
@@ -145,7 +149,8 @@ class L3Book:
                     self._set_order(oid, side, price, size)
                 else:
                     self.q["missing_order"] += 1  # reducing op on unseen order: skip
-            else:  # decrement: entry_sx = amount removed
+            else:  # decrement: entry_sx = amount removed (MATCH verified for Coinbase 2025-06-01;
+                   # SUB decremented by family analogy only — unverified until a real SUB day, §5a/§10)
                 self._decrement_order(oid, size)
         else:
             self.q["unknown_total"] += 1
