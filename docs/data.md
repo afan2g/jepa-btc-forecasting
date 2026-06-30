@@ -206,7 +206,7 @@ Reproduce: `ingest/verify_trades_and_calendar.py --verify-backfill` (anchor via 
 
 ---
 
-## 5a. Vendor stitching (Coinbase gap-fill) — unit/timestamp sanity PASSED; recon parity PENDING
+## 5a. Vendor stitching (Coinbase gap-fill) — unit/timestamp sanity PASSED; recon parity RUN 2025-06-01 (CoinAPI side resolved, Lake side FAILS → gate not passed)
 
 **Status: NOT production-validated.** The hybrid is promising but two hard gates remain (recon-level
 parity, snapshot/day-boundary semantics). What we have shown so far:
@@ -229,8 +229,8 @@ parity, snapshot/day-boundary semantics). What we have shown so far:
 2. **Snapshot/day-boundary semantics:** apply the §4.3 / §5a-Recon ordering rules and confirm the
    reconstructed book is uncrossed across the day boundary.
 
-**Tooling status (parity gate) — added, live run PENDING.** The one-day parity gate is now
-implemented and **synthetic-unit-validated** (no measured vendor results yet): `recon/coinapi.py`
+**Tooling status (parity gate) — implemented, synthetic-unit-validated, and RUN LIVE on 2025-06-01
+(measured results below; gate NOT yet passed — Lake side).** The one-day parity gate: `recon/coinapi.py`
 replays CoinAPI `limitbook_full` L3 → top-K L2 (seq-order, snapshot-first day-open clamp,
 defensive `SNAPSHOT/ADD/DELETE/MATCH/SET/SUB` with `order_id` state and quality counters);
 `recon/reconstruct.py::reconstruct_lake_l2_at_samples` reconstructs Lake `book_delta_v2` → top-K
