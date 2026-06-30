@@ -16,8 +16,8 @@ download. If the CoinAPI parquet is missing it prints the exact one-day download
 exits 3.
 
 Usage:
-  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10
-  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10 --size-policy decrement
+  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10   # size_policy=decrement (default)
+  .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10 --size-policy absolute  # A/B alt
   .venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --dump-grid   # full aligned grid CSV
 
 Credentials: Crypto Lake AWS keys in .env (Lake-only — COINAPI_KEY is NOT required to read a
@@ -118,7 +118,7 @@ def build_grid(day: dt.date, grid_ms: int) -> list[int]:
 
 
 def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date, k: int,
-                    grid_ms: int = 1000, size_policy: str = "absolute",
+                    grid_ms: int = 1000, size_policy: str = "decrement",
                     on_unknown: str = "count", horizons_s=DEFAULT_HORIZONS_S,
                     band_bps: float = 0.0, n_spikes: int = 25, gate_warmup: bool = True,
                     warmup_consecutive: int = 3, warmup_min_levels: int = 1):
@@ -274,8 +274,12 @@ def parse_args(argv=None):
     ap.add_argument("--day", default="2025-06-01", help="overlap day YYYY-MM-DD (default 2025-06-01)")
     ap.add_argument("--k", type=int, default=10, help="top-K levels (default 10)")
     ap.add_argument("--grid-ms", type=int, default=1000, help="sample-grid spacing ms (default 1000)")
-    ap.add_argument("--size-policy", choices=("absolute", "decrement"), default="absolute",
-                    help="CoinAPI SUB/MATCH size convention (default absolute; see recon/coinapi.py)")
+    ap.add_argument("--size-policy", choices=("absolute", "decrement"), default="decrement",
+                    help="CoinAPI SUB/MATCH size convention. Default 'decrement': the 2025-06-01 "
+                         "live gate proved MATCH.entry_sx is the traded amount for Coinbase "
+                         "limitbook_full, so 'absolute' leaves filled orders as stale residue and "
+                         "crosses the book ~100%% (docs/data.md §5a). 'absolute' kept as the A/B "
+                         "alternative for other venues (see recon/coinapi.py).")
     ap.add_argument("--on-unknown", choices=("count", "raise"), default="count",
                     help="policy for unknown CoinAPI update_type (default count+skip)")
     ap.add_argument("--band-bps", type=float, default=0.0, help="no-trade band for label agreement (bps)")
