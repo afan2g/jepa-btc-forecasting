@@ -590,11 +590,16 @@ def main(argv=None) -> int:
     to_load = [d for d in days if d.isoformat() not in excluded_set]
     excluded = [d for d in days if d.isoformat() in excluded_set]
 
-    est_gb = estimate_lake_gb(len(to_load))
+    # --no-lake-seed skips the `book` snapshot load (see the per-day loop below), so estimate ONLY the
+    # products actually pulled — otherwise a cold-start run is over-estimated by the `book` size and can
+    # be wrongly refused at the auto cap / quota headroom.
+    products = ("book_delta_v2",) if args.no_lake_seed else LAKE_PRODUCTS
+    per_day_gb = sum(LAKE_GB_PER_DAY[p] for p in products)
+    est_gb = estimate_lake_gb(len(to_load), products=products)
     print(f"Quality map: {len(days)} day(s) requested — {len(to_load)} to load, "
           f"{len(excluded)} excluded by calendar.")
     print(f"Estimated Crypto Lake download: ~{est_gb:.2f} GB "
-          f"({len(to_load)} day(s) × {sum(LAKE_GB_PER_DAY[p] for p in LAKE_PRODUCTS):.2f} GB/day, "
+          f"({len(to_load)} day(s) × {per_day_gb:.2f} GB/day [{'+'.join(products)}], "
           "conservative upper bound).")
 
     sess = lake_session()

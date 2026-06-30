@@ -491,3 +491,16 @@ def test_main_unreadable_used_data_refuses_run(monkeypatch, tmp_path):
     out = str(tmp_path / "rep")
     rc = qm.main(["--days", "2025-06-01", "--out-dir", out, "--allow-broad"])
     assert rc == qm.QUOTA_REFUSED_EXIT                   # fail-safe: refuse even with --allow-broad
+
+
+def test_main_no_lake_seed_estimate_excludes_book_product(monkeypatch, tmp_path):
+    # --no-lake-seed skips the `book` snapshot pull, so the quota estimate must drop the `book` size
+    # (else a cold-start run is over-estimated and can be wrongly refused — Codex P2).
+    df = _clean_lake_df()
+    _patch_vendor(monkeypatch, delta_for={dt.date(2025, 6, 1): df})
+    out = str(tmp_path / "rep")
+    rc = qm.main(["--days", "2025-06-01", "--no-lake-seed", "--out-dir", out])
+    assert rc == 0
+    rep = _run_report(tmp_path, ["--out-dir", out])
+    assert rep["meta"]["quota"]["est_gb"] == qm.LAKE_GB_PER_DAY["book_delta_v2"]   # book NOT counted
+    assert rep["days"][0]["classification"] == qm.INCONCLUSIVE   # no seed source → can't validate
