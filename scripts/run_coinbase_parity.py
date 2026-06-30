@@ -237,8 +237,12 @@ def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date
     # Exclude residual crossed Lake samples (awaiting a reseed) from the comparison — a crossed mid
     # is not a real vendor mid — but keep n_grid_full = the TRUE full grid (compare_topk drops them
     # via exclude_ts, not by pre-filtering the frame, so the honest grid size is never undercounted).
+    # ONLY when a valid seed was accepted AND reseed is active: otherwise the crossed samples are a
+    # genuine reconstruction FAILURE (a rejected seed on a crossed-`book` day, or the seed-only A/B
+    # arm) and must surface as crossed in the gate, not be masked into a clean-looking parity.
+    seed_active = bool(reseed_meta and reseed_meta.get("seed_accepted") and reseed)
     excluded_crossed = (set(reseed_meta["crossed_sample_ts"])
-                        if (exclude_lake_crossed and reseed_meta) else set())
+                        if (exclude_lake_crossed and seed_active) else set())
     parity = compare_topk(lake, capi, k=k, grid_s=grid_s, horizons_s=horizons_s,
                           band_bps=band_bps, n_spikes=n_spikes, since_ts=cutoff,
                           exclude_ts=excluded_crossed)

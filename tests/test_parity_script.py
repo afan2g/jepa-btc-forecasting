@@ -176,6 +176,25 @@ def test_run_parity_core_no_reseed_ab_arm_seeds_but_does_not_repair():
     lr = report["lake_reseed"]
     assert lr["seed_accepted"] is True and lr["reseed_count"] == 0
     assert lr["crossed_rate_after"] > 0.9           # seeded but no intraday repair → still crosses
+    # reseed disabled ⇒ the crossing is permanent, NOT a residual awaiting a reseed → not excluded.
+    assert lr["excluded_crossed_samples"] == 0
+
+
+def test_crossed_samples_not_excluded_when_seed_is_rejected():
+    # Snapshots present but ALL invalid (crossed) → seed REJECTED → book cold-starts and crosses.
+    # Those crossed samples are a genuine reconstruction FAILURE and must NOT be excluded from the
+    # gate — excluding them would make a failed Lake reconstruction look clean (Codex P2). This is
+    # the crossed-`book`-product day case (e.g. 2026-04-01) that multi-day validation must catch.
+    from recon.reseed import book_snapshot
+    bad = [book_snapshot(DAY_OPEN + 1, bids=[(101.0, 1.0)], asks=[(100.0, 1.0)])]  # crossed → rejected
+    report, _, _ = rcp.run_parity_core(
+        _stranded_lake_df(), [_coinapi_rows()], day=DAY, k=1, lake_book_snapshots=bad,
+        reseed=True, reseed_after_crossed_s=0.0, seed_min_levels=1)
+    lr = report["lake_reseed"]
+    assert lr["seed_accepted"] is False
+    assert lr["excluded_crossed_samples"] == 0           # failure surfaced, not masked
+    assert report["parity"]["n_excluded_crossed"] == 0
+    assert lr["crossed_rate_after"] > 0.9                # the 67%-style crossing stays visible
 
 
 def test_run_parity_core_without_snapshots_is_unchanged_cold_start():
