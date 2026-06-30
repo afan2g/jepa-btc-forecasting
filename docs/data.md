@@ -42,7 +42,10 @@ History span: **12–24 months** for SSL pretrain; recent 3–6 mo for head fine
   Not requester-pays (reads succeed without `RequestPayer`), so **we pay no S3 egress** — Crypto
   Lake bears it. Capture is in **AWS Tokyo** *(vendor; consistent with the 4.4 ms Binance feed lag
   measured below)*.
-- **Cost:** flat ~$64/mo individual plan, effectively unlimited download.
+- **Cost/quota:** flat ~$64/mo individual plan with a **300 GB/month download limit** (pricing
+  page checked 2026-06-30). We still pay no separate AWS egress, but broad raw Lake pulls consume
+  the subscription quota. Check `lakeapi.used_data(sess)` before live Lake runs; usage at the
+  2026-06-30 check was **0.26 GB / 31 days**.
 
 ### 2.2 CoinAPI — Coinbase gap backfill (and L3 option)
 - **One shared credit balance, two access products** (the $25 trial works across both; it unlocks only
@@ -393,14 +396,21 @@ Crypto Lake parquet, BTC, 2026-04-01:
 CoinAPI Coinbase (csv.gz): `limitbook_full` (L3) **2266 MB/day**, `quotes` 74, `trades` 68. Note the
 L3 csv.gz is ~8× Crypto Lake's L2 parquet — another reason the hybrid keeps Coinbase on Crypto Lake.
 
-| Span | Crypto Lake (all feeds) | + CoinAPI backfill (~52 fill days, L3) | **Total raw** |
-|---|---|---|---|
-| 12 mo | 427 GB | ~120 GB | **~0.55 TB** |
-| 18 mo | 643 GB | ~120 GB | **~0.76 TB** |
-| 24 mo | 858 GB | ~120 GB | **~0.98 TB** |
+| Span | Crypto Lake (all feeds) | Individual-plan quota implication | + CoinAPI backfill (~52 fill days, L3) | **Total raw** |
+|---|---|---|---|---|
+| 12 mo | 427 GB | >1 monthly cap; stage across **2** quota windows or upgrade | ~120 GB | **~0.55 TB** |
+| 18 mo | 643 GB | >2 monthly caps; stage across **3** quota windows or upgrade | ~120 GB | **~0.76 TB** |
+| 24 mo | 858 GB | ~3 monthly caps exactly; use **3-4** windows with headroom or upgrade | ~120 GB | **~0.98 TB** |
 
 (Backfilled L3 is transient — it aggregates to top-K L2 at ~10 GB after recon. Fill-day count scales
 with the chosen span; ~52 is the full 2-yr usable-calendar set, §5b.)
+
+**Crypto Lake quota constraint:** the measured all-feed Lake footprint is ~1.17 GB/day, so the
+300 GB/month individual-plan cap covers at most ~256 all-feed days before any safety margin. Small
+validation pulls (single-day parity, multi-day Coinbase quality map, metadata coverage checks) are
+fine. A full 12-24 mo Lake archive is **not** a one-shot pull on this plan: stage by month/quota
+window, project only needed columns, process/recon day-by-day, and keep resumable manifests so a
+run can stop before the quota is tight.
 
 After `recon` + bar building, the **training set collapses to GB-scale** (§7).
 
@@ -438,12 +448,16 @@ capture is in Tokyo), never a persistent cluster.
 
 | Item | Cost |
 |---|---|
-| Crypto Lake subscription | ~$64/mo (flat, unlimited) |
+| Crypto Lake subscription | ~$64/mo individual plan, **300 GB/month download limit** |
 | CoinAPI Coinbase backfill (§5b, all verified), book 47 d / trades 52 d | **~$92** (book 84.6 GB≈$85 + trades 2.6 GB≈$8) at $1/$3 per GB; −$25 ≈ **$67 OOP** |
 | ↳ if only the single 33-day hole is filled | ~$82 |
 | Compute | $0 (local); optional one-off same-region (**eu-west-1**) spot for recon |
 | Storage | $0 (existing 2 TB SSD) |
 
+- **Crypto Lake quota:** pricing checked 2026-06-30; individual plan is 300 GB/month. The planned
+  18-mo all-feed Lake pull is ~643 GB, so either stage it across ~3 monthly quota windows (with
+  headroom) or use a higher plan. Do not schedule broad raw Lake downloads as if the plan were
+  unlimited.
 - Backfill GB is **measured** (split by product, summed from `data/usable_calendar.json`): 47 book days
   = **84.6 GB** L3 (~$85), 52 trade days = **2.6 GB** (~$8 at $3/GB) → **~$92**, mostly the Dec'24 cluster.
   If the WebSocket "Tier-1" tiered GB discount applies to flat files (unconfirmed), it'd be **less**.
@@ -472,8 +486,11 @@ END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap str
 ```
 Coverage windows are **anchored on the `END` env var** (default `2026-06-22`); without it they reproduce
 the original snapshot. (The `coinapi_flatfiles.py`/`download_coinapi.py` day arguments are explicit
-already.) Scripts are throttled, resumable, and exit cleanly on quota/billing gates. Secrets in `.env`
-(git-ignored). **Figures in this doc are the 2026-06-22 snapshot** — re-run with a new `END` to refresh.
+already.) Scripts are throttled, resumable, and exit cleanly on quota/billing gates. Before any broad
+Crypto Lake `load_data` run, check current monthly usage with `lakeapi.used_data(sess)` and leave quota
+headroom. Secrets in `.env` (git-ignored). **Coverage/size/timestamp figures in this doc are the
+2026-06-22 snapshot** — re-run with a new `END` to refresh; Crypto Lake pricing/quota was checked
+2026-06-30.
 
 ---
 
@@ -518,5 +535,5 @@ Other open items:
 
 ---
 
-*Last verified 2026-06-22. All coverage/size/timestamp figures measured against live vendor data on
-that date; re-run §9 to refresh.*
+*Last verified 2026-06-22 for coverage/size/timestamp figures; Crypto Lake pricing/quota checked
+2026-06-30. Re-run §9 to refresh vendor measurements.*

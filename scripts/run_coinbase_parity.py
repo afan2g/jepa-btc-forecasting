@@ -10,10 +10,10 @@ distribution (the known rare large-divergence concern — characterized, not ass
 out), and directional label agreement at the project horizons. A small JSON report (+ a
 top-spikes CSV) is written under data/reports/.
 
-This is a bounded PILOT, NOT a backfill. It pulls ONE Crypto Lake day (subscription is flat,
-unlimited) and reads a LOCAL CoinAPI parquet for the day — it never triggers a CoinAPI bulk
-download. If the CoinAPI parquet is missing it prints the exact one-day download command and
-exits 3.
+This is a bounded PILOT, NOT a backfill. It pulls ONE Crypto Lake day (the individual plan has a
+300 GB/month download limit) and reads a LOCAL CoinAPI parquet for the day — it never triggers a
+CoinAPI bulk download. If the CoinAPI parquet is missing it prints the exact one-day download
+command and exits 3.
 
 Lake `book_delta_v2` is reconstructed with the §5a-Recon SEED/RESEED policy by default: it seeds
 from the validated Lake `book` snapshot product and reseeds when the book stays crossed (the cure
