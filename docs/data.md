@@ -206,7 +206,7 @@ Reproduce: `ingest/verify_trades_and_calendar.py --verify-backfill` (anchor via 
 
 ---
 
-## 5a. Vendor stitching (Coinbase gap-fill) — unit/timestamp sanity PASSED; recon parity RUN 2025-06-01 (CoinAPI side resolved, Lake side FAILS → gate not passed)
+## 5a. Vendor stitching (Coinbase gap-fill) — unit/timestamp sanity PASSED; recon parity RUN 2025-06-01 (CoinAPI + Lake seed/reseed RESOLVED on this day; multi-day validation pending before backfill unlock)
 
 **Status: NOT production-validated.** The hybrid is promising but two hard gates remain (recon-level
 parity, snapshot/day-boundary semantics). What we have shown so far:
@@ -241,8 +241,11 @@ it on real data. Because `book_delta_v2` cold-starts with no per-day snapshot (�
 applies a **seed-established warm-up cutoff** (best bid/ask present, uncrossed, sustained) and
 **excludes the Lake warm-up window** from the comparison so warm-up artifacts don't drive the
 decision (`--no-warmup-gate` to disable); it also reports **per-level both-present coverage** so
-thin/one-sided top-K depths are marked, not silently dropped. The full validated seed from Lake's
-`book` snapshot product stays the deferred §5a-Recon follow-up. The CoinAPI **SUB/MATCH size
+thin/one-sided top-K depths are marked, not silently dropped. The full validated seed/reseed from
+Lake's `book` snapshot product is now **implemented** (`recon/reseed.py`, wired into the parity
+script; synthetic-unit-validated — see §5a-Recon "Implementation") and **live-validated on 2025-06-01
+(2026-06-30): cold-start 67% crossed → reseed 0.015%, `|Δmid|` median $55.96 → $0.00** (see Measured
+results). The CoinAPI **SUB/MATCH size
 convention** was an A/B assumption (absolute-size vs `--size-policy decrement`); the live run below
 **resolved the MATCH path: `decrement` is correct for Coinbase `limitbook_full` MATCH events**.
 ⚠️ **SUB is NOT yet verified** — 2025-06-01 had **0 SUB events**, so the `decrement` default also
@@ -284,15 +287,38 @@ true vendor disagreement**:
    vs 16.5M rows — and Coinbase's channel sequence also counts trades, so naive `seq`-diff ≠ dropped
    book data; the exact increment semantics must be confirmed there. Note the Lake `book` snapshot is
    **0% crossed on 2025-06-01**, so it is a valid seed candidate for this day.)
+   **➜ RESOLVED (2026-06-30)** by the §5a-Recon seed/reseed policy (`recon/reseed.py`) — see the
+   reseed A/B below.
 
-**Parity after the CoinAPI fix, with Lake still crossing (the residual gap is entirely the Lake side):**
-`|Δmid|` median **$55.96** / p95 $345 / corr **0.977**; directional label agreement **0.90 / 0.93 /
-0.95** at 2 s / 10 s / 60 s; per-level both-present coverage 100% to L9. Decision: **do not backfill**;
-the gate cannot pass until the Lake `book_delta_v2` reseed policy (§5a-Recon) lands. This decision is
-**enforced in code**: `ingest/download_coinapi.py` refuses a backfill-scale pull (exit 4) until the
-gate passes — a single parity day, or a multi-day range with a small `--sample-mb` smoke (≤64 MB), is
-allowed; a multi-day full pull (or an oversized `--sample-mb`) is blocked, `--allow-backfill` overrides. Report artifacts: `data/reports/parity_coinbase_2025-06-01_k10*.{json,csv}` (the on-disk
-JSON is the `decrement` run).
+**Seed/reseed A/B — live re-run, 2025-06-01, k=10 (2026-06-30).** Same day, same CoinAPI parquet
+(`decrement`), now with the §5a-Recon Lake seed/reseed policy. Seeded from the Lake `book` product
+(**65,466/65,467 candidates valid** at min-5-levels; 1 one-sided skipped), seed accepted at
+00:00:03.18, **3 intraday reseeds** fired (crossed-beyond-2 s episodes), 0 blocked:
+
+| metric (k=10) | **before** (cold-start) | **after** (seed + reseed) |
+|---|---|---|
+| Lake crossed-book rate (full grid) | **67.04 %** | **0.015 %** (13 samples) |
+| `\|Δmid\|` median / p95 / p99 / max | $55.96 / $345 / — / — | **$0.00** / $0.48 / $4.35 / $66.59 |
+| mid correlation | 0.977 | **0.99999778** |
+| label agreement 2 s / 10 s / 60 s | 0.90 / 0.93 / 0.95 | **0.951 / 0.983 / 0.995** |
+| `\|Δmid\|` spikes >$1 / >$10 / >$50 / >$100 | — | 3127 / 199 / 2 / 0 |
+
+The reseed clears the stranded levels: the cold-start 67 % crossing collapses to **0.015 %** (12.3 s
+total residual crossed time across the 3 episodes), and the Lake mid now matches CoinAPI to a **$0.00
+median** with **0.99999778** correlation. Parity ran on **86,385 / 86,400** grid points (2 pre-seed
+warm-up + 13 residual-crossed samples excluded; `n_grid_full` stays the true 86,400). The A/B confirms
+the fix is the reseed, not a code-path change — the cold arm is the byte-identical reconstruction.
+The known rare second-scale spikes survive as a small, *characterized* tail (2 samples >$50, max
+$66.59), not assumed to wash out. Report artifacts (git-ignored):
+`data/reports/parity_coinbase_2025-06-01_k10*.{json,csv}`.
+
+**Gate status & backfill.** The Lake-side blocker is **resolved on 2025-06-01**; with the CoinAPI
+`decrement` fix and Lake seed/reseed, the day's recon-level parity is clean. Backfill stays **gated**
+pending multi-day validation — other days (gaps, vendor seams), a day where the Lake `book` product is
+itself crossed (e.g. 2026-04-01: the seed must be *rejected* and CoinAPI fill used), and a day with
+real `SUB` events. This is **enforced in code**: `ingest/download_coinapi.py` refuses a backfill-scale
+pull (exit 4) — a single parity day, or a multi-day range with a small `--sample-mb` smoke (≤64 MB), is
+allowed; a multi-day full pull (or an oversized `--sample-mb`) is blocked, `--allow-backfill` overrides.
 
 ### 5a-Recon. `book_delta_v2` reconstruction & reseed policy
 `book_delta_v2` is a **mid-stream incremental feed** (no per-day snapshot, absolute-size/`0`=remove), so
@@ -314,6 +340,31 @@ large vendor-filled holes. Required policy:
 We don't use that product for features, but if it's used as a reseed source it must be checked first.
 Whether the underlying `book_delta_v2` *reconstruction* is also degraded on such days is **unknown until
 recon exists** — that feeds the quality-map TODO (§10); degraded present-days get CoinAPI fill like gaps.
+
+**Implementation (`recon/reseed.py`, synthetic-unit-validated — live re-run pending).** The policy is:
+- **Seed:** parse the Lake `book` product into time-sorted candidates (`snapshots_from_lake_book_df`,
+  thinned by a stride so the large product never fully materializes), validate each
+  (`classify_snapshot`: two-sided, finite/positive, ≥N levels/side, uncrossed, optional sane spread),
+  and seed the `OrderBook` from the first valid one. An invalid candidate (crossed/thin/one-sided) is
+  skipped with a reason code; if none is valid the book cold-starts and `seed_accepted=False`.
+- **Reseed:** snapshots are merged into the time-ordered delta stream as reseed events at their OWN
+  timestamp; when the reconstructed book stays crossed continuously for ≥ `reseed_after_crossed_s`, the
+  next valid snapshot REPLACES the whole state (dropping the stranded levels). Because a reseed event is
+  applied at its own ts, a sample at grid `g` only ever reflects a reseed with `ts ≤ g` — **no
+  look-ahead**; samples inside the crossed window (before the fixing snapshot) stay crossed and are
+  reported/excluded, never silently back-patched.
+- **Not a `seq` gap detector:** the trigger is the observable crossed book, NOT a `sequence_number`
+  diff. Coinbase `book_delta_v2` duplicates `seq` across ~91% of rows (per-event, and the channel
+  counts trades too), so a naive row-to-row `seq` diff is meaningless as a dropped-data signal;
+  `OrderBook.apply()`'s monotonicity flag is informational only and is never consumed.
+- **Reported:** `scripts/run_coinbase_parity.py` carries a `lake_reseed` block — seed accepted/rejected
+  + reason, seed ts, reseed count/timestamps, snapshot reason codes, crossed-duration, and the
+  **before(cold)/after(reseed) crossed rate A/B** (`--no-reseed` = seed-only arm, `--no-lake-seed` =
+  pure cold-start). Residual crossed Lake samples are excluded from the parity comparison and counted.
+
+A single day-open seed is **not** sufficient (the live failure is intraday level-stranding, not
+cold-start); reseed-on-crossing is the fix. Prior-day seed carry-across and the vendor-switch-seam
+reseed (Lake↔CoinAPI) remain follow-ups beyond this one-day pilot.
 
 ---
 
@@ -438,9 +489,14 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       `scripts/run_coinbase_parity.py`. **Live run done 2025-06-01 (see §5a "Measured results"):**
       CoinAPI side RESOLVED (`MATCH`=`decrement`, 0% crossed); gate still blocked by Lake
       `book_delta_v2` 67% intraday crossing → needs the reseed policy below.)*
-- [ ] **`book_delta_v2` continuous reconstruction + reseed policy** (§5a-Recon) — apply `seq`-order +
-      snapshot-first rules; confirm reconstructed book uncrossed across day boundaries and on a day where
-      the `book` snapshot product is crossed (e.g. 2026-04-01).
+- [x] **`book_delta_v2` continuous reconstruction + reseed policy** (§5a-Recon) — seed/reseed IMPLEMENTED
+      (`recon/reseed.py`, synthetic-unit-validated: valid-seed-usable, crossed-seed-rejected,
+      stranded-recovers-on-reseed, no-look-ahead, tolerance-window, `seq`-duplicates-don't-trigger,
+      cold-start-equivalence) and **LIVE-VALIDATED 2025-06-01 (2026-06-30): 67.04% → 0.015% crossed,
+      `|Δmid|` median $0.00, corr 0.99999778, 3 reseeds** (see §5a Measured results / seed-reseed A/B).
+- [ ] **Multi-day reseed validation before backfill unlock** — a day where the `book` product is itself
+      crossed (e.g. 2026-04-01: seed must be REJECTED → CoinAPI fill), a vendor-seam day, and a day with
+      real `SUB` events. Prior-day seed carry + vendor-switch-seam reseed still deferred.
 - [ ] **Crypto Lake Coinbase quality map** — how many *present* days have a degraded `book_delta_v2`
       *reconstruction* (not just the `book` snapshot product)? Degraded present-days get CoinAPI fill.
 

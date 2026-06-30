@@ -141,25 +141,35 @@ def lake_warmup_cutoff(frame: pd.DataFrame, *, min_consecutive: int = 3,
 
 def compare_topk(lake: pd.DataFrame, capi: pd.DataFrame, *, k: int, grid_s: float = 1.0,
                  horizons_s=DEFAULT_HORIZONS_S, band_bps: float = 0.0,
-                 n_spikes: int = 25, since_ts: int | None = None) -> dict:
+                 n_spikes: int = 25, since_ts: int | None = None,
+                 exclude_ts=None) -> dict:
     """Compare two top-K L2 frames and return a JSON-serializable parity report dict.
 
     `since_ts` (optional): restrict the comparison to samples with `sample_ts >= since_ts`,
     used to exclude the Lake cold-start warm-up window (see `lake_warmup_cutoff`) so the gate
-    reflects true Lake↔CoinAPI parity, not warm-up. Per-level `coverage` always reports the
-    both-present / one-vendor-only counts so thin or one-sided depths are visibly marked rather
-    than silently dropped by the NaN-skipping diff stats."""
+    reflects true Lake↔CoinAPI parity, not warm-up. `exclude_ts` (optional): a set of `sample_ts`
+    to drop from the comparison — used for residual crossed Lake samples awaiting a reseed
+    (docs/data.md §5a-Recon); a crossed mid is not a real vendor mid. `n_grid_full` is ALWAYS the
+    true full-grid intersection (before BOTH filters), so the honest grid size is never undercounted;
+    `n_excluded_crossed` reports how many `exclude_ts` samples were dropped from the compared window.
+    Per-level `coverage` always reports the both-present / one-vendor-only counts so thin or
+    one-sided depths are visibly marked rather than silently dropped by the NaN-skipping diff stats."""
     L, C = align_grids(lake, capi)
     n_full = len(L)
     if since_ts is not None:
         L = L[L.index >= since_ts]
         C = C[C.index >= since_ts]
+    n_after_since = len(L)
+    if exclude_ts:
+        keep = ~L.index.isin(list(exclude_ts))
+        L, C = L[keep], C[keep]
     n = len(L)
     out: dict = {"n_grid": int(n), "n_grid_full": int(n_full), "k": int(k),
                  "grid_s": float(grid_s),
-                 "since_ts": (int(since_ts) if since_ts is not None else None)}
+                 "since_ts": (int(since_ts) if since_ts is not None else None),
+                 "n_excluded_crossed": int(n_after_since - n)}
     if n == 0:
-        out["error"] = "no overlapping grid points after warm-up cutoff"
+        out["error"] = "no overlapping grid points after warm-up + crossed-exclusion"
         return out
 
     lake_present = L["bid_0_price"].notna() & L["ask_0_price"].notna()
