@@ -289,9 +289,9 @@ true vendor disagreement**:
 `|Δmid|` median **$55.96** / p95 $345 / corr **0.977**; directional label agreement **0.90 / 0.93 /
 0.95** at 2 s / 10 s / 60 s; per-level both-present coverage 100% to L9. Decision: **do not backfill**;
 the gate cannot pass until the Lake `book_delta_v2` reseed policy (§5a-Recon) lands. This decision is
-**enforced in code**: `ingest/download_coinapi.py` refuses a multi-day full pull (exit 4) until the
-gate passes — single-day parity pulls and `--sample-mb` smoke tests are allowed, `--allow-backfill`
-overrides. Report artifacts: `data/reports/parity_coinbase_2025-06-01_k10*.{json,csv}` (the on-disk
+**enforced in code**: `ingest/download_coinapi.py` refuses a backfill-scale pull (exit 4) until the
+gate passes — a single parity day, or a multi-day range with a small `--sample-mb` smoke (≤64 MB), is
+allowed; a multi-day full pull (or an oversized `--sample-mb`) is blocked, `--allow-backfill` overrides. Report artifacts: `data/reports/parity_coinbase_2025-06-01_k10*.{json,csv}` (the on-disk
 JSON is the `decrement` run).
 
 ### 5a-Recon. `book_delta_v2` reconstruction & reseed policy
@@ -406,8 +406,8 @@ END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap str
 .venv/bin/python ingest/coinapi_flatfiles.py 14                  # CoinAPI flat-files coverage + 8 MB schema
 .venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01   # CoinAPI → Parquet (ONE day)
 # NOTE: multi-day BULK pulls are the backfill and are GATED — download_coinapi.py refuses a >1-day full
-# pull (exit 4) until the §5a parity + reseed gates pass. Single days + --sample-mb smoke always allowed;
-# --allow-backfill overrides once the gate passes (with CoinAPI Spend Management on, §8).
+# pull (exit 4) until the §5a parity + reseed gates pass. A single day, or a multi-day range with a small
+# --sample-mb smoke (≤64MB), is allowed; --allow-backfill overrides once the gate passes (Spend Mgmt on, §8).
 ```
 Coverage windows are **anchored on the `END` env var** (default `2026-06-22`); without it they reproduce
 the original snapshot. (The `coinapi_flatfiles.py`/`download_coinapi.py` day arguments are explicit
