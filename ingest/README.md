@@ -39,12 +39,17 @@ Pulls `limitbook_full` day-by-day into Hive-partitioned Parquet (spec §12.1):
 data/raw/limitbook_full/exchange=COINBASE/symbol=BTC-USD/dt=YYYY-MM-DD/data.parquet
 ```
 ```bash
+# one parity day (the §5a pilot; a single full day is always allowed)
+.venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01
+
 # smoke test (cheap — parses first 8 MB only, writes to data/raw/_sample/)
 .venv/bin/python ingest/download_coinapi.py --start 2026-05-28 --end 2026-05-28 --sample-mb 8
 
-# real pull (resumable — re-run after interruption and it skips finished days)
-.venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-06-30
-.venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31 --keep-raw
+# BULK backfill (resumable — re-run after interruption and it skips finished days).
+# GATED: a >1-day full pull (or a >64 MB --sample-mb) exits 4 until the §5a parity+reseed
+# gates pass; pass --allow-backfill to override (with CoinAPI Spend Management on — docs/data.md §8).
+.venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-06-30 --allow-backfill
+.venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31 --allow-backfill --keep-raw
 ```
 Key properties:
 - **Throttled**: every S3 call via the shared 8/min `RateLimiter`; one `get_object`
@@ -59,6 +64,9 @@ Key properties:
 - Targets **consolidated daily** partitions; the recent ~3-week hourly tail is out of scope
   (that's live capture). `--sample-mb` output is isolated under `_sample/` so it never
   shadows a real partition.
+- **Backfill-gated**: a multi-day full pull (or a `--sample-mb` > 64 MB) exits 4 until the §5a
+  recon-parity + reseed gates pass (`check_backfill_gate`, `docs/data.md` §5a/§8). A single
+  parity day and small smoke samples are always allowed; `--allow-backfill` overrides.
 
 > Heads-up: BTC-USD `limitbook_full` is ~1.9 GB/day compressed (L3) → ~1 TB / 18 mo.
 > See `coinapi-coinbase-fit` memory for the size mitigation options.

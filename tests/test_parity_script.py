@@ -51,6 +51,15 @@ def _coinapi_rows():
     ])
 
 
+def test_cli_default_size_policy_is_decrement():
+    """The Coinbase parity CLI must default to size_policy=decrement: the 2025-06-01 live gate
+    proved MATCH.entry_sx is the traded amount for Coinbase limitbook_full, so 'absolute' crosses
+    the book ~100% (docs/data.md §5a). 'absolute' stays selectable as the A/B alternative."""
+    assert rcp.parse_args([]).size_policy == "decrement"
+    assert rcp.parse_args(["--day", "2025-06-01", "--k", "10"]).size_policy == "decrement"
+    assert rcp.parse_args(["--size-policy", "absolute"]).size_policy == "absolute"
+
+
 def test_build_grid_spans_the_day():
     grid = rcp.build_grid(DAY, grid_ms=1000)
     assert len(grid) == 86400

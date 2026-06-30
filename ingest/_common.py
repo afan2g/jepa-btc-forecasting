@@ -1,7 +1,14 @@
-"""Shared CoinAPI helpers: env loading, REST GET, and quota-gate handling."""
+"""Shared CoinAPI helpers: env loading, REST GET, quota-gate, and the backfill gate.
+
+Stdlib-only on purpose: the backfill gate lives here (not in download_coinapi.py) so a CI-safe
+unit test can import it without pulling the downloader's pyarrow/boto3/coinapi_flatfiles deps,
+which are NOT in pyproject's default dependencies.
+"""
 from __future__ import annotations
+import datetime as dt
 import os
 import json
+import sys
 import urllib.request
 import urllib.error
 
@@ -38,6 +45,39 @@ def load_env(path: str = ".env") -> dict:
 
 def is_quota_error(body: str) -> bool:
     return "Insufficient Usage Credits" in body or "Quota exceeded" in body
+
+
+# --- backfill gate (docs/data.md §5a/§8) ---------------------------------------------------------
+BACKFILL_GATE_EXIT = 4        # mirrors run_coinbase_parity.py's small-int exit-code convention
+SMOKE_SAMPLE_CAP_MB = 64      # a multi-day "sample" larger than this is a near-full (billable) pull,
+                              # not a smoke test — process_day uses --sample-mb directly as the per-day
+                              # S3 byte range, so an uncapped sample would bypass the gate.
+
+
+def check_backfill_gate(start: dt.date, end: dt.date, *, sample_mb: int, allow_backfill: bool) -> None:
+    """Block a backfill-scale CoinAPI pull before the §5a parity + reseed gates pass. Prints the
+    reason to stderr and raises SystemExit(4) (a string SystemExit would exit 1 and skip the int-code
+    contract). Allowed without override: a single day (the parity pilot), or a multi-day range whose
+    `--sample-mb` is a small smoke (1..SMOKE_SAMPLE_CAP_MB). Blocked: a multi-day FULL pull, or a
+    multi-day `--sample-mb` large enough to fetch near-full daily files. `--allow-backfill` overrides."""
+    n_days = (end - start).days + 1
+    if n_days <= 1 or allow_backfill:
+        return
+    if 0 < sample_mb <= SMOKE_SAMPLE_CAP_MB:
+        return
+    why = (f"--sample-mb {sample_mb} exceeds the {SMOKE_SAMPLE_CAP_MB}MB smoke cap (≈ a near-full "
+           f"per-day pull across {n_days} days)" if sample_mb else f"a full pull across {n_days} days")
+    print(
+        f"REFUSING multi-day backfill pull ({start}..{end}): {why}. The §5a Coinbase vendor-parity "
+        "gate has NOT passed (Lake book_delta_v2 reseed pending — docs/data.md §5a); bulk backfill is "
+        "blocked until parity + reseed pass.\n"
+        "  • For the parity pilot, pull ONE overlap day at a time: --start D --end D\n"
+        f"  • For a cheap smoke test, use a multi-day range with --sample-mb ≤ {SMOKE_SAMPLE_CAP_MB}\n"
+        "  • To override once the gate passes (or for a deliberate, budgeted pull), pass "
+        "--allow-backfill (ensure CoinAPI Spend Management is enabled, §8).",
+        file=sys.stderr,
+    )
+    raise SystemExit(BACKFILL_GATE_EXIT)
 
 
 def rest_get(key: str, path: str, timeout: int = 45):

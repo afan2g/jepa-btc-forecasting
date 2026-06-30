@@ -30,9 +30,11 @@ Targets CONSOLIDATED daily partitions (D-YYYYMMDD). The most recent ~3 weeks liv
 as an hourly tail / in coinapi-daily-tail and are out of scope here (live capture).
 
 Usage:
-  python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31
-  python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-03 --keep-raw
-  python ingest/download_coinapi.py --start 2026-05-28 --end 2026-05-28 --sample-mb 8   # cheap smoke test
+  python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01               # one parity day
+  python ingest/download_coinapi.py --start 2026-05-28 --end 2026-05-28 --sample-mb 8 # cheap smoke test
+  # Multi-day BULK = backfill, GATED until the §5a parity+reseed gates pass (docs/data.md §5a/§8):
+  # a >1-day full pull exits 4 unless you pass --allow-backfill (with CoinAPI Spend Management on).
+  python ingest/download_coinapi.py --start 2025-01-01 --end 2025-06-30 --allow-backfill --keep-raw
 """
 from __future__ import annotations
 import argparse
@@ -47,7 +49,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _common import load_env, is_quota_error, QUOTA_HINT          # noqa: E402
+from _common import load_env, is_quota_error, QUOTA_HINT, check_backfill_gate  # noqa: E402
 import coinapi_flatfiles as ff                                    # noqa: E402
 from botocore.exceptions import ClientError                       # noqa: E402
 
@@ -231,12 +233,16 @@ def main():
     ap.add_argument("--keep-raw", action="store_true", help="archive the source .csv.gz")
     ap.add_argument("--overwrite", action="store_true", help="re-download existing days")
     ap.add_argument("--sample-mb", type=int, default=0, help="dev: parse only first N MB (smoke test)")
+    ap.add_argument("--allow-backfill", action="store_true",
+                    help="override the §5a backfill gate for a multi-day full pull (blocked by "
+                         "default until recon parity + reseed pass — docs/data.md §5a/§8)")
     args = ap.parse_args()
 
     start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end)
     if end < start:
         raise SystemExit("--end is before --start")
+    check_backfill_gate(start, end, sample_mb=args.sample_mb, allow_backfill=args.allow_backfill)
 
     api_key = load_env()["COINAPI_KEY"]
     os.makedirs(args.out, exist_ok=True)

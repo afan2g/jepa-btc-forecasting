@@ -206,7 +206,7 @@ Reproduce: `ingest/verify_trades_and_calendar.py --verify-backfill` (anchor via 
 
 ---
 
-## 5a. Vendor stitching (Coinbase gap-fill) — unit/timestamp sanity PASSED; recon parity PENDING
+## 5a. Vendor stitching (Coinbase gap-fill) — unit/timestamp sanity PASSED; recon parity RUN 2025-06-01 (CoinAPI side resolved, Lake side FAILS → gate not passed)
 
 **Status: NOT production-validated.** The hybrid is promising but two hard gates remain (recon-level
 parity, snapshot/day-boundary semantics). What we have shown so far:
@@ -229,8 +229,8 @@ parity, snapshot/day-boundary semantics). What we have shown so far:
 2. **Snapshot/day-boundary semantics:** apply the §4.3 / §5a-Recon ordering rules and confirm the
    reconstructed book is uncrossed across the day boundary.
 
-**Tooling status (parity gate) — added, live run PENDING.** The one-day parity gate is now
-implemented and **synthetic-unit-validated** (no measured vendor results yet): `recon/coinapi.py`
+**Tooling status (parity gate) — implemented, synthetic-unit-validated, and RUN LIVE on 2025-06-01
+(measured results below; gate NOT yet passed — Lake side).** The one-day parity gate: `recon/coinapi.py`
 replays CoinAPI `limitbook_full` L3 → top-K L2 (seq-order, snapshot-first day-open clamp,
 defensive `SNAPSHOT/ADD/DELETE/MATCH/SET/SUB` with `order_id` state and quality counters);
 `recon/reconstruct.py::reconstruct_lake_l2_at_samples` reconstructs Lake `book_delta_v2` → top-K
@@ -242,16 +242,57 @@ applies a **seed-established warm-up cutoff** (best bid/ask present, uncrossed, 
 **excludes the Lake warm-up window** from the comparison so warm-up artifacts don't drive the
 decision (`--no-warmup-gate` to disable); it also reports **per-level both-present coverage** so
 thin/one-sided top-K depths are marked, not silently dropped. The full validated seed from Lake's
-`book` snapshot product stays the deferred §5a-Recon follow-up. ⚠️ The CoinAPI **SUB/MATCH size convention is an unverified assumption** —
-absolute-size by default, `--size-policy decrement` as the A/B alternative; the live run decides
-which yields an uncrossed, parity-matching book. Run (after enabling CoinAPI Spend Management, §8):
+`book` snapshot product stays the deferred §5a-Recon follow-up. The CoinAPI **SUB/MATCH size
+convention** was an A/B assumption (absolute-size vs `--size-policy decrement`); the live run below
+**resolved the MATCH path: `decrement` is correct for Coinbase `limitbook_full` MATCH events**.
+⚠️ **SUB is NOT yet verified** — 2025-06-01 had **0 SUB events**, so the `decrement` default also
+applies to SUB by family analogy only; a future day with partial-fill `SUB` rows must confirm it
+(see "Measured results"). Run (after enabling CoinAPI Spend Management, §8):
 
 ```bash
-.venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01   # one overlap day
-.venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10           # -> data/reports/
+.venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01            # one overlap day
+.venv/bin/python scripts/run_coinbase_parity.py --day 2025-06-01 --k 10 --size-policy decrement   # -> data/reports/
 ```
 
-No measured parity numbers are recorded here until that run is executed against live data.
+**Measured results — first live run, 2025-06-01 (2026-06-29). Gate NOT yet passed (Lake side).**
+Pulled the full CoinAPI day (26.3M L3 events, 800MB→588MB parquet) and loaded the live Crypto Lake
+Coinbase `book_delta_v2` day (16.5M delta rows). Two reconstruction issues surfaced — **neither is
+true vendor disagreement**:
+
+1. **CoinAPI `MATCH` size convention = `decrement` (RESOLVED).** A `MATCH` event's `entry_sx` is the
+   *traded* quantity (amount removed), not the resting remainder — confirmed by tracing order
+   histories (e.g. ADD `sx=9.64e-06` then MATCH `sx=9.64e-06` ⇒ fully filled). Under the old default
+   `size_policy="absolute"`, MATCH re-set the order to the traded size and left stale residue at the
+   touch → CoinAPI book **crossed 99.99%** of samples (−$708 deep by mid-morning, ~3.8k stale ask
+   levels under the best bid). Under `--size-policy decrement` the CoinAPI book is **0.00% crossed**,
+   clean (spread +$0.01, no stale levels). DELETEs (cancels, 12.9M/day) were always fine; only the
+   MATCH path (275k fills, all at top-of-book) was affected. ⇒ **`decrement` is the Coinbase default**
+   (the `absolute` path stays available for other venues / A/B). **Scope of the evidence:** this day
+   had **0 `SUB` events** (event mix: SNAPSHOT 102,694 · ADD 13.0M · DELETE 12.9M · MATCH 275,247 ·
+   SET 8,091), so only the MATCH size convention is *verified*. `decrement` decrements SUB under the
+   same policy by analogy; that must be re-checked on a day that actually contains `SUB` rows before
+   trusting partial-fill reconstruction there.
+
+2. **Lake `book_delta_v2` crosses 67% — intraday level-stranding, NOT cold-start (the blocker).**
+   The seed-established warm-up gate excluded only 2 pre-seed samples, yet the Lake book is crossed
+   67% of the day. By hour: h00 7% (genuine warm-up), several whole hours **0% (clean)**, but
+   h01–h13 / h16–h17 run **80–100% crossed with median spread −$60 to −$695** (mean −$306). Signature:
+   a price level is stranded (its `size=0` clearing update never lands), best bid/ask freeze and
+   cross, then recover when a later delta hits that exact price. A single day-open seed would **not**
+   fix this — it needs the gap-aware seed/reseed policy in §5a-Recon. (Caveat for that work:
+   `sequence_number` is **per-event, not per-row** — ~91% of consecutive rows duplicate it, max 6.2M
+   vs 16.5M rows — and Coinbase's channel sequence also counts trades, so naive `seq`-diff ≠ dropped
+   book data; the exact increment semantics must be confirmed there. Note the Lake `book` snapshot is
+   **0% crossed on 2025-06-01**, so it is a valid seed candidate for this day.)
+
+**Parity after the CoinAPI fix, with Lake still crossing (the residual gap is entirely the Lake side):**
+`|Δmid|` median **$55.96** / p95 $345 / corr **0.977**; directional label agreement **0.90 / 0.93 /
+0.95** at 2 s / 10 s / 60 s; per-level both-present coverage 100% to L9. Decision: **do not backfill**;
+the gate cannot pass until the Lake `book_delta_v2` reseed policy (§5a-Recon) lands. This decision is
+**enforced in code**: `ingest/download_coinapi.py` refuses a backfill-scale pull (exit 4) until the
+gate passes — a single parity day, or a multi-day range with a small `--sample-mb` smoke (≤64 MB), is
+allowed; a multi-day full pull (or an oversized `--sample-mb`) is blocked, `--allow-backfill` overrides. Report artifacts: `data/reports/parity_coinbase_2025-06-01_k10*.{json,csv}` (the on-disk
+JSON is the `decrement` run).
 
 ### 5a-Recon. `book_delta_v2` reconstruction & reseed policy
 `book_delta_v2` is a **mid-stream incremental feed** (no per-day snapshot, absolute-size/`0`=remove), so
@@ -363,7 +404,10 @@ END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap str
 .venv/bin/python ingest/verify_trades_and_calendar.py --end 2026-06-22 --verify-backfill  # trades + usable calendar + CoinAPI fill check -> data/usable_calendar.json
 .venv/bin/python ingest/coinapi_rest.py                          # CoinAPI coverage dates (REST $25 credit)
 .venv/bin/python ingest/coinapi_flatfiles.py 14                  # CoinAPI flat-files coverage + 8 MB schema
-.venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31   # CoinAPI → Parquet
+.venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01   # CoinAPI → Parquet (ONE day)
+# NOTE: multi-day BULK pulls are the backfill and are GATED — download_coinapi.py refuses a >1-day full
+# pull (exit 4) until the §5a parity + reseed gates pass. A single day, or a multi-day range with a small
+# --sample-mb smoke (≤64MB), is allowed; --allow-backfill overrides once the gate passes (Spend Mgmt on, §8).
 ```
 Coverage windows are **anchored on the `END` env var** (default `2026-06-22`); without it they reproduce
 the original snapshot. (The `coinapi_flatfiles.py`/`download_coinapi.py` day arguments are explicit
@@ -391,7 +435,9 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       `limitbook_full`→top-K on the same overlap day; compare per-level price/size **and labels** at the
       bar/label horizons. Characterize the ~$249 second-scale spike population (do **not** assume wash-out).
       *(Tooling added & synthetic-validated — `recon/coinapi.py`, `recon/parity.py`,
-      `scripts/run_coinbase_parity.py`; see §5a "Tooling status". Live measured run still pending.)*
+      `scripts/run_coinbase_parity.py`. **Live run done 2025-06-01 (see §5a "Measured results"):**
+      CoinAPI side RESOLVED (`MATCH`=`decrement`, 0% crossed); gate still blocked by Lake
+      `book_delta_v2` 67% intraday crossing → needs the reseed policy below.)*
 - [ ] **`book_delta_v2` continuous reconstruction + reseed policy** (§5a-Recon) — apply `seq`-order +
       snapshot-first rules; confirm reconstructed book uncrossed across day boundaries and on a day where
       the `book` snapshot product is crossed (e.g. 2026-04-01).
