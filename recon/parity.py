@@ -160,9 +160,15 @@ def compare_topk(lake: pd.DataFrame, capi: pd.DataFrame, *, k: int, grid_s: floa
         L = L[L.index >= since_ts]
         C = C[C.index >= since_ts]
     n_after_since = len(L)
-    if exclude_ts:
-        keep = ~L.index.isin(list(exclude_ts))
-        L, C = L[keep], C[keep]
+    # Keep the regular (contiguous) post-warm-up grid for TIME-based labels; point-wise stats drop
+    # the excluded crossed samples. Compacting the grid before labels would make _signed_labels'
+    # positional shift(-step) jump the gaps → wrong physical horizon (Codex P2). For labels we mask
+    # the excluded points to NaN on the regular grid instead, so a label whose origin or target is
+    # excluded is undefined, not horizon-stretched.
+    Lreg, Creg = L, C
+    excl_mask = Lreg.index.isin(list(exclude_ts)) if exclude_ts else None
+    if excl_mask is not None and excl_mask.any():
+        L, C = Lreg[~excl_mask], Creg[~excl_mask]
     n = len(L)
     out: dict = {"n_grid": int(n), "n_grid_full": int(n_full), "k": int(k),
                  "grid_s": float(grid_s),
@@ -232,7 +238,13 @@ def compare_topk(lake: pd.DataFrame, capi: pd.DataFrame, *, k: int, grid_s: floa
         for ts, v in top.items()
     ]
 
+    # Labels on the REGULAR grid (excluded points masked to NaN) so horizons span true physical time.
+    if excl_mask is not None and excl_mask.any():
+        lake_mid_lbl = Lreg["mid"].mask(excl_mask)
+        capi_mid_lbl = Creg["mid"].mask(excl_mask)
+    else:
+        lake_mid_lbl, capi_mid_lbl = L["mid"], C["mid"]
     out["label_agreement"] = label_agreement(
-        L["mid"], C["mid"], grid_s=grid_s, horizons_s=horizons_s, band_bps=band_bps
+        lake_mid_lbl, capi_mid_lbl, grid_s=grid_s, horizons_s=horizons_s, band_bps=band_bps
     )
     return out
