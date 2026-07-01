@@ -26,14 +26,6 @@ from recon.ingest import _pick, _require_populated
 from recon.reconstruct import _decode_sides
 from recon.reseed import BookSnapshot, ReseedPolicy, classify_snapshot
 
-try:  # the extension is optional — never fail import if it is not built
-    import recon_native as _rn
-
-    _IMPORT_ERROR: Exception | None = None
-except Exception as exc:  # noqa: BLE001 — ImportError, or an ABI/version mismatch, must not crash import
-    _rn = None
-    _IMPORT_ERROR = exc
-
 # Snapshot reason-code enum — the ORDER is load-bearing: the u8 index passed to Rust and mapped back
 # to a string here must agree with the Rust side (`recon_native.N_REASONS == len(REASON_CODES)`).
 REASON_CODES: tuple[str, ...] = (
@@ -42,6 +34,36 @@ REASON_CODES: tuple[str, ...] = (
 _REASON_INDEX = {r: i for i, r in enumerate(REASON_CODES)}
 # Sentinel matching Rust `NO_SNAPSHOTS` — seed_reason before any snapshot is seen ("no_snapshots").
 _NO_SNAPSHOTS = 255
+
+
+def _validate_native(mod) -> None:
+    """Reject a stale/incompatible `recon_native` at import time. A build on `PYTHONPATH` that is
+    missing the entry point or — worse — carries a DIFFERENT reason-code enum (e.g. an old
+    `maturin develop`) would otherwise pass the `--engine native` pre-load guard and then either fail
+    AFTER a Lake load or SILENTLY mis-reconstruct with misaligned seed/reseed reason codes. Verifying
+    the ABI surface here makes such a module fall into the import `except` (→ treated as unavailable
+    with a precise reason), preserving the "fail before any Lake load" contract."""
+    missing = [a for a in ("reconstruct_seeded", "N_REASONS", "NO_SNAPSHOTS") if not hasattr(mod, a)]
+    if missing:
+        raise ImportError(f"recon_native is missing required attributes {missing} "
+                          "(stale/incompatible build — rebuild: maturin develop --release "
+                          "-m native/recon_native/Cargo.toml)")
+    if mod.N_REASONS != len(REASON_CODES):
+        raise ImportError(f"recon_native.N_REASONS={mod.N_REASONS} != len(REASON_CODES)="
+                          f"{len(REASON_CODES)} — reason-code enum mismatch; rebuild the extension")
+    if mod.NO_SNAPSHOTS != _NO_SNAPSHOTS:
+        raise ImportError(f"recon_native.NO_SNAPSHOTS={mod.NO_SNAPSHOTS} != {_NO_SNAPSHOTS} — "
+                          "stale/incompatible build; rebuild the extension")
+
+
+try:  # the extension is optional — never fail import if it is not built (or is stale/incompatible)
+    import recon_native as _rn
+
+    _validate_native(_rn)
+    _IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # noqa: BLE001 — absent, ImportError, or an ABI/version mismatch, must not crash import
+    _rn = None
+    _IMPORT_ERROR = exc
 
 # Verified (exchange, symbol) -> price_scale, where native tick = round(price * price_scale). A symbol
 # is only eligible for native mode if its true tick size is KNOWN and every price is an exact multiple
@@ -55,7 +77,9 @@ _TICK_SCALE: dict[tuple[str, str], int] = {
 
 
 def native_available() -> bool:
-    """True iff the `recon_native` extension imported successfully."""
+    """True iff the `recon_native` extension imported AND passed the ABI capability check
+    (`_validate_native`) — a stale/incompatible build reports False, with the reason in
+    `native_import_error()`."""
     return _rn is not None
 
 

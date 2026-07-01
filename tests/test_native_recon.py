@@ -99,6 +99,44 @@ def test_tick_scale_for_known_and_unknown():
     assert rn.tick_scale_for("COINBASE", "ETH-USD") is None
 
 
+# --------------------------------------------------------------------------- capability gate (stale build)
+# A stale/incompatible recon_native must be rejected at import time so `--engine native` fails BEFORE
+# any Lake load (not later at reconstruct, or — worse — with silently-misaligned reason codes).
+def _fake_native(*, with_fn=True, n_reasons=None, no_snapshots=255):
+    import types
+    n = len(rn.REASON_CODES) if n_reasons is None else n_reasons
+    ns = types.SimpleNamespace(N_REASONS=n, NO_SNAPSHOTS=no_snapshots)
+    if with_fn:
+        ns.reconstruct_seeded = lambda *a, **k: None
+    return ns
+
+
+def test_validate_native_accepts_matching_abi():
+    rn._validate_native(_fake_native())  # no raise
+
+
+def test_validate_native_rejects_missing_entrypoint():
+    with pytest.raises(ImportError):
+        rn._validate_native(_fake_native(with_fn=False))
+
+
+def test_validate_native_rejects_reason_enum_mismatch():
+    with pytest.raises(ImportError):
+        rn._validate_native(_fake_native(n_reasons=len(rn.REASON_CODES) + 1))
+
+
+def test_validate_native_rejects_sentinel_mismatch():
+    with pytest.raises(ImportError):
+        rn._validate_native(_fake_native(no_snapshots=7))
+
+
+@native
+def test_real_native_module_passes_capability_gate():
+    import recon_native
+    rn._validate_native(recon_native)          # the built extension satisfies the ABI contract
+    assert rn.native_available() is True
+
+
 # --------------------------------------------------------------------------- valid seed
 @native
 def test_valid_seed_day_frame_and_meta_match_python():
