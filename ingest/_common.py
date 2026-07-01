@@ -69,8 +69,8 @@ def check_backfill_gate(start: dt.date, end: dt.date, *, sample_mb: int, allow_b
            f"per-day pull across {n_days} days)" if sample_mb else f"a full pull across {n_days} days")
     print(
         f"REFUSING multi-day backfill pull ({start}..{end}): {why}. The §5a Coinbase vendor-parity "
-        "gate has NOT passed (Lake book_delta_v2 reseed pending — docs/data.md §5a); bulk backfill is "
-        "blocked until parity + reseed pass.\n"
+        "gate passed a one-day reseed pass (2025-06-01); multi-day validation pending — docs/data.md "
+        "§5a/§10. Bulk backfill stays blocked until the multi-day parity + reseed/quality map passes.\n"
         "  • For the parity pilot, pull ONE overlap day at a time: --start D --end D\n"
         f"  • For a cheap smoke test, use a multi-day range with --sample-mb ≤ {SMOKE_SAMPLE_CAP_MB}\n"
         "  • To override once the gate passes (or for a deliberate, budgeted pull), pass "
