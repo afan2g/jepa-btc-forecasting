@@ -8,8 +8,13 @@ import pathlib
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from recon import native as _p_native
 from recon.coinapi import coinapi_frame_from_rows
+
+native = pytest.mark.skipif(not _p_native.native_available(),
+                            reason="recon_native extension not built (maturin develop)")
 
 # scripts/ is not a package — load the script module by path.
 _SPEC = importlib.util.spec_from_file_location(
@@ -244,3 +249,39 @@ def test_cli_exposes_reseed_flags_with_safe_defaults():
     assert a.reseed_after_crossed_s == 2.0 and a.seed_min_levels >= 1
     assert rcp.parse_args(["--no-reseed"]).no_reseed is True
     assert rcp.parse_args(["--no-lake-seed"]).no_lake_seed is True
+
+
+# --------------------------------------------------------------------------- engine selection (§5a native)
+def test_cli_engine_default_is_auto():
+    assert rcp.parse_args([]).engine == "auto"
+    assert rcp.parse_args(["--engine", "native"]).engine == "native"
+    assert rcp.parse_args(["--engine", "python"]).engine == "python"
+
+
+def test_run_parity_core_records_lake_engine_python_by_default():
+    # The parity report must record which Lake engine produced the measured results (auditability).
+    report, _, _ = rcp.run_parity_core(
+        _stranded_lake_df(), [_coinapi_rows()], day=DAY, k=1,
+        lake_book_snapshots=_seed_snapshots(), reseed=True,
+        reseed_after_crossed_s=0.0, seed_min_levels=1)
+    assert report["meta"]["lake_engine"] == "python"
+    assert report["meta"]["lake_engine_price_scale"] is None
+
+
+@native
+def test_run_parity_core_native_lake_engine_matches_python():
+    # Native Lake engine must reproduce the Python parity report (crossed A/B, mid diffs) and record
+    # itself as the selected Lake engine. CoinAPI L3 replay stays Python either way.
+    kw = dict(day=DAY, k=1, lake_book_snapshots=_seed_snapshots(), reseed=True,
+              reseed_after_crossed_s=0.0, seed_min_levels=1)
+    py_report, _, _ = rcp.run_parity_core(_stranded_lake_df(), [_coinapi_rows()], **kw)
+    nat_report, _, _ = rcp.run_parity_core(_stranded_lake_df(), [_coinapi_rows()],
+                                           engine="native", price_scale=100, **kw)
+    assert nat_report["meta"]["lake_engine"] == "native"
+    assert nat_report["meta"]["lake_engine_price_scale"] == 100
+    lr_n, lr_p = nat_report["lake_reseed"], py_report["lake_reseed"]
+    assert lr_n["reseed_count"] == lr_p["reseed_count"]
+    assert lr_n["crossed_rate_before"] == lr_p["crossed_rate_before"]
+    assert lr_n["crossed_rate_after"] == lr_p["crossed_rate_after"]
+    assert nat_report["parity"]["mid_diff"]["max"] == py_report["parity"]["mid_diff"]["max"]
+    assert nat_report["parity"]["n_grid"] == py_report["parity"]["n_grid"]

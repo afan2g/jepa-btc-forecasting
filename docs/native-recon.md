@@ -1,0 +1,97 @@
+# Native reconstruction engine (`recon_native`)
+
+The native Rust/PyO3 replay core for Crypto Lake `book_delta_v2` seed/reseed reconstruction
+(docs/data.md §5a-Recon). Python remains the correctness **oracle** and orchestrator; the native path
+is the throughput implementation needed before multi-day / multi-year data work is viable. Plan:
+`docs/superpowers/plans/2026-07-01-native-recon-engine.md`.
+
+## What it is (and is not)
+
+* **Is:** a drop-in accelerator for `recon.reseed.reconstruct_lake_l2_at_samples_seeded`. The native
+  `(frame, meta)` is schema-identical, so `scripts/run_coinbase_quality_map.py` and
+  `scripts/run_coinbase_parity.py` select it with `--engine {auto,python,native}` transparently.
+* **Is not:** a reimplementation of snapshot validation. Python owns snapshot parse/thin/**classify**
+  (`snapshots_from_lake_book_df` + `classify_snapshot`) and hands Rust compact arrays with a
+  precomputed `reason_code` + `is_valid` per snapshot. Rust only accumulates those reason codes and
+  consults `is_valid` for seed/reseed gating (plan §"Native API"). CoinAPI L3 replay stays Python.
+
+## Design (preserved semantics)
+
+The Rust core (`native/recon_native/src/lib.rs`) matches the Python replay exactly:
+
+* Deltas STABLE-sorted by `(engine_time, sequence_number)` → equal `(ts, seq)` rows keep source order,
+  reproducing NumPy `np.lexsort((seq, ts))` (Coinbase duplicates `sequence_number` heavily).
+* At equal timestamp a delta is applied **before** a snapshot (a same-ts snapshot is authoritative).
+* Samples are "as of" `sample_ts`; `size == 0` removes a level; sizes are absolute.
+* The book is keyed by **integer ticks** (`round(price * price_scale)`) for O(log L) best-bid/ask and
+  ordered top-K — the algorithmic fix over Python's `max(dict)/min(dict)` full-book touch scans. Each
+  level carries its **original source float price**, so emitted `bid_i_price`/`ask_i_price` are
+  byte-identical to Python (never reconstructed as `tick / scale`).
+* Crossed-duration is accounted only once seeded and the trailing open run closes at
+  `max(last_event_ts, final_sample_ts)`.
+
+### Verified tick contract (required for native)
+
+Native mode needs a verified `(exchange, symbol) → price_scale` where every price is an exact multiple
+of the tick (so tick ordering == float ordering and same-ts crossing decisions cannot drift). The
+registry lives in `recon/native.py::_TICK_SCALE`:
+
+| exchange | symbol  | tick    | price_scale |
+|----------|---------|---------|-------------|
+| COINBASE | BTC-USD | \$0.01  | 100         |
+
+Unknown symbols **fail** under `--engine native` (before any Lake load) and **fall back to Python**
+under `--engine auto`. Extend the registry only after a product's tick size is verified.
+
+## Build
+
+A recent Rust toolchain (built/tested with rustc 1.94) and `maturin` (>=1.7) are required to build the
+extension. The plain Python test suite does **not** need it — native tests skip cleanly when absent.
+
+```bash
+# one-time: install maturin into the venv
+.venv/bin/pip install maturin
+
+# build + install the extension into the active venv (rebuild after editing src/lib.rs)
+.venv/bin/maturin develop --release -m native/recon_native/Cargo.toml
+```
+
+Confirm:
+
+```bash
+.venv/bin/python -c "import recon_native; print(recon_native.N_REASONS)"          # -> 7
+.venv/bin/python -c "from recon import native; print(native.native_available())"  # -> True
+```
+
+Unit-test the pure-Rust core (no Python link needed):
+
+```bash
+cargo test --no-default-features --manifest-path native/recon_native/Cargo.toml
+```
+
+## Validate
+
+```bash
+.venv/bin/python -m pytest -q tests/test_native_recon.py             # native-vs-Python conformance
+.venv/bin/python scripts/bench_recon_engine.py --rows 1000000 --samples 10000 --levels 10000 \
+    --churn 0.20 --engine both
+```
+
+## Benchmark result (synthetic; recorded, not a live claim)
+
+Machine: 12th Gen Intel i5-12400F (12 threads), 31 GiB RAM, Linux 6.17, Python 3.12.3, rustc 1.94.0,
+numpy 2.4.6 / pandas 2.3.3. Synthetic 1M-row fixture, 10 000 levels/side, 20% churn, 10 000 samples,
+k=10:
+
+| engine | time     | rows/s      | samples/s | peak RSS |
+|--------|----------|-------------|-----------|----------|
+| python | 244.35 s | 4 093       | 41        | —        |
+| native | 0.189 s  | 5 293 140   | 52 931    | ~288 MB  |
+
+**native speedup ≈ 1293×** (floor is 10×); native output matched Python on the fixture. The large
+factor is expected: native replaces the Python O(N·L) best-bid/ask scans + per-row object boxing with
+an O(N·log L) tick-tree replay.
+
+The live Coinbase quality-map / parity runs are **not** included here — they are quota-gated and
+require explicit approval (docs/data.md §5a-QualityMap, §9). This file records only the synthetic
+benchmark; no live vendor result is claimed.

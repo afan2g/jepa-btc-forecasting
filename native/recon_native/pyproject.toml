@@ -1,0 +1,22 @@
+# maturin build config for the OPTIONAL native replay extension `recon_native`.
+#
+# This is a SEPARATE package from the repo's top-level `jepa-btc` (setuptools) project on
+# purpose: building the Rust extension must never be required to run the plain Python test
+# suite (`python -m pytest -q`). Build/install it explicitly with:
+#
+#     .venv/bin/maturin develop --release -m native/recon_native/Cargo.toml
+#
+# See docs/native-recon.md.
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "recon_native"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "Native Crypto Lake book_delta_v2 seed/reseed replay core (docs/data.md §5a-Recon)"
+
+[tool.maturin]
+# Pure Rust extension; no accompanying Python sources in this package.
+module-name = "recon_native"

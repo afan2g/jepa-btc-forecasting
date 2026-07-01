@@ -46,6 +46,7 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from recon import native as _native                                 # noqa: E402 (import-safe; no Rust needed)
 from recon.coinapi import reconstruct_coinapi_l2_at_samples          # noqa: E402
 from recon.ingest import shared_engine_time_col                      # noqa: E402
 from recon.parity import compare_topk, frame_quality, lake_warmup_cutoff  # noqa: E402
@@ -59,6 +60,19 @@ from recon.reseed import (                                           # noqa: E40
 NS_PER_MS = 1_000_000
 DAY_MS = 86_400_000
 DEFAULT_HORIZONS_S = (2, 10, 60)
+NATIVE_UNAVAILABLE_EXIT = 6  # explicit --engine native but the native extension/tick scale is unavailable
+
+
+def _seeded_reconstruct(engine, price_scale, *, df, grid, k, engine_col, snapshots, policy, frame_out):
+    """Dispatch the Lake seed/reseed reconstruction to the native or Python engine (identical
+    `(frame, meta)` schema). CoinAPI L3 replay stays Python in this PR."""
+    if engine == "native":
+        return _native.reconstruct_lake_l2_at_samples_seeded_native(
+            df, grid, k=k, engine_time_col=engine_col, snapshots=snapshots, policy=policy,
+            frame_out=frame_out, price_scale=price_scale)
+    return reconstruct_lake_l2_at_samples_seeded(
+        df, grid, k=k, engine_time_col=engine_col, snapshots=snapshots, policy=policy,
+        frame_out=frame_out)
 
 
 # ----------------------------------------------------------------------------- credentials
@@ -167,7 +181,8 @@ def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date
                     warmup_consecutive: int = 3, warmup_min_levels: int = 1,
                     lake_book_snapshots=None, reseed: bool = True,
                     reseed_after_crossed_s: float = 2.0, seed_min_levels: int = 5,
-                    max_spread_frac: float | None = None, exclude_lake_crossed: bool = True):
+                    max_spread_frac: float | None = None, exclude_lake_crossed: bool = True,
+                    engine: str = "python", price_scale: int | None = None):
     """Reconstruct both vendors onto one grid and compare. Pure w.r.t. its inputs (a Lake
     delta DataFrame, an iterable of CoinAPI chunks, and optional pre-loaded Lake `book`
     snapshots) — no vendor I/O — so the skip-guarded integration test can drive the exact
@@ -203,15 +218,17 @@ def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date
             policy = ReseedPolicy(enabled=reseed, min_levels_per_side=seed_min_levels,
                                   reseed_after_crossed_s=reseed_after_crossed_s,
                                   max_spread_frac=max_spread_frac)
-            lake, reseed_meta = reconstruct_lake_l2_at_samples_seeded(
-                lake_delta_df, grid, k=k, engine_time_col=engine_col,
-                snapshots=lake_book_snapshots, policy=policy)
+            # Parity needs the top-K Lake frame (compare_topk reads `mid`), so the seeded reconstruction
+            # runs with frame_out=True on the selected engine (native or Python — identical schema).
+            lake, reseed_meta = _seeded_reconstruct(
+                engine, price_scale, df=lake_delta_df, grid=grid, k=k, engine_col=engine_col,
+                snapshots=lake_book_snapshots, policy=policy, frame_out=True)
             # A/B "before": the SAME reconstruction cold-started (no seed/reseed). Metrics-only
             # (frame_out=False) — we need just its crossed rate, so no second 86,400-row frame is
             # built/discarded on the multi-GB day (the per-delta replay is intrinsic to the A/B).
-            _, cold_meta = reconstruct_lake_l2_at_samples_seeded(
-                lake_delta_df, grid, k=k, engine_time_col=engine_col, snapshots=None,
-                frame_out=False)
+            _, cold_meta = _seeded_reconstruct(
+                engine, price_scale, df=lake_delta_df, grid=grid, k=k, engine_col=engine_col,
+                snapshots=None, policy=policy, frame_out=False)
         else:
             lake = reconstruct_lake_l2_at_samples(lake_delta_df, grid, k=k, engine_time_col=engine_col)
 
@@ -254,6 +271,7 @@ def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date
             "grid_points": len(grid), "size_policy": size_policy, "on_unknown": on_unknown,
             "horizons_s": list(horizons_s), "band_bps": float(band_bps),
             "lake_engine_time_col": engine_col,
+            "lake_engine": engine, "lake_engine_price_scale": price_scale,
             "lake_delta_rows": (0 if not have_lake else int(len(lake_delta_df))),
             "coinapi_event_rows": int(capi_q.get("total_rows", 0)),
             "note": "PILOT — synthetic-validated tooling; live measured results only when run "
@@ -442,6 +460,12 @@ def parse_args(argv=None):
     ap.add_argument("--no-exclude-crossed", action="store_true",
                     help="keep residual crossed Lake samples in the parity comparison instead of "
                          "excluding them (default: exclude crossed Lake samples, report separately)")
+    ap.add_argument("--engine", choices=("auto", "python", "native"), default="auto",
+                    help="Lake replay engine (docs/data.md §5a-Recon native engine). 'python' = the "
+                         "correctness reference; 'native' = the recon_native Rust core (fails before "
+                         "any Lake load if unavailable or the symbol lacks a verified tick scale); "
+                         "'auto' (default) = native when available+verified, else Python. CoinAPI L3 "
+                         "replay stays Python.")
     ap.add_argument("--exchange", default="COINBASE", help="Crypto Lake / partition exchange")
     ap.add_argument("--symbol", default="BTC-USD", help="Crypto Lake / partition symbol")
     ap.add_argument("--coinapi-root", default="data/raw", help="root of the CoinAPI parquet tree")
@@ -455,6 +479,18 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     day = dt.date.fromisoformat(args.day)
     horizons = tuple(int(x) for x in str(args.horizons_s).split(",") if x.strip())
+
+    # Resolve the Lake replay engine BEFORE any vendor load. An explicit --engine native must fail
+    # cleanly (nonzero, no I/O) when the extension or a verified tick scale is unavailable.
+    engine, price_scale, engine_note = _native.resolve_engine(
+        args.engine, exchange=args.exchange, symbol=args.symbol)
+    if args.engine == "native" and engine != "native":
+        print(f"ERROR: {engine_note}", file=sys.stderr)
+        return NATIVE_UNAVAILABLE_EXIT
+    if engine_note:
+        print(f"NOTE: {engine_note}", file=sys.stderr)
+    print(f"Lake reconstruction engine: {engine}"
+          + (f" (native tick scale {price_scale})" if engine == "native" else ""))
 
     capi_path = coinapi_parquet_path(args.coinapi_root, day, args.exchange, args.symbol)
     if not os.path.exists(capi_path):
@@ -497,6 +533,7 @@ def main(argv=None) -> int:
         lake_book_snapshots=snaps, reseed=not args.no_reseed,
         reseed_after_crossed_s=args.reseed_after_crossed_s, seed_min_levels=args.seed_min_levels,
         max_spread_frac=args.seed_max_spread_frac, exclude_lake_crossed=not args.no_exclude_crossed,
+        engine=engine, price_scale=price_scale,
     )
     paths = write_report(report, lake, capi, args.out_dir, day, args.k, args.dump_grid)
     print_summary(report, paths)

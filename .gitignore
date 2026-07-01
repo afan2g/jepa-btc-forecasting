@@ -6,6 +6,11 @@
 __pycache__/
 *.pyc
 
+# rust / native extension build artifacts (Cargo.lock IS tracked for reproducible builds)
+target/
+*.so
+*.rs.bk
+
 # caches
 .lake_cache/
 .coinapi_cache/

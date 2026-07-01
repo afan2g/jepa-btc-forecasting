@@ -58,6 +58,7 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from recon import native as _native                                  # noqa: E402 (import-safe; no Rust needed)
 from recon.ingest import shared_engine_time_col                       # noqa: E402
 from recon.parity import frame_quality                               # noqa: E402
 from recon.reseed import (                                           # noqa: E402
@@ -80,6 +81,7 @@ QUOTA_GB = 300.0           # Crypto Lake individual-plan monthly download cap (d
 DEFAULT_MAX_AUTO_GB = 5.0  # a request larger than this is a "broad" pull → needs --allow-broad
 DEFAULT_HEADROOM_GB = 10.0  # never plan to use the last N GB of the monthly quota (used_data lags ~60 min)
 QUOTA_REFUSED_EXIT = 5     # small-int exit-code convention (cf. parity exit 3, backfill gate exit 4)
+NATIVE_UNAVAILABLE_EXIT = 6  # explicit --engine native but the native extension/tick scale is unavailable
 
 # Conservative per-day Lake footprint by product, GB (docs/data.md §6: Coinbase book_delta_v2+trades
 # ~303 MB/day; the `book` 20-level snapshot product ~180 MB/day). We load book_delta_v2 (projected to
@@ -233,14 +235,44 @@ def _default_calendar_block() -> dict:
             "excluded_reason": None}
 
 
+def _seeded_reconstruct(engine, price_scale, *, df, grid, k, engine_col, snapshots, policy, frame_out):
+    """Dispatch to the native or Python seeded reconstruction (identical `(frame, meta)` schema).
+    Native mode consumes the verified `price_scale` (tick multiplier); Python ignores it."""
+    if engine == "native":
+        return _native.reconstruct_lake_l2_at_samples_seeded_native(
+            df, grid, k=k, engine_time_col=engine_col, snapshots=snapshots, policy=policy,
+            frame_out=frame_out, price_scale=price_scale)
+    return reconstruct_lake_l2_at_samples_seeded(
+        df, grid, k=k, engine_time_col=engine_col, snapshots=snapshots, policy=policy,
+        frame_out=frame_out)
+
+
+def _lake_quality_from_meta(meta, *, source_rows) -> dict:
+    """`frame_quality(...)`-shaped dict from native metrics-only `meta` — the native quality-map path
+    classifies WITHOUT materializing the top-K frame. `meta.crossed_*`/`missing_*` are pinned equal to
+    `frame_quality(frame)` by the conformance tests (test_native_recon), so classification is engine-
+    independent."""
+    return {"n_samples": int(meta["n_samples"]),
+            "crossed_samples": int(meta["crossed_samples"]),
+            "crossed_rate": float(meta["crossed_rate"]),
+            "missing_book_samples": int(meta["missing_book_samples"]),
+            "missing_book_fraction": float(meta["missing_book_fraction"]),
+            "source_rows": int(source_rows)}
+
+
 def assess_lake_day(lake_delta_df, lake_book_snapshots, *, day: dt.date, k: int = 10,
                     grid_ms: int = 1000, reseed: bool = True, reseed_after_crossed_s: float = 2.0,
                     seed_min_levels: int = 5, max_spread_frac: float | None = None,
                     cold_ab: bool = True, thresholds: Thresholds = THRESHOLDS,
-                    coinapi: dict | None = None, calendar: dict | None = None) -> dict:
+                    coinapi: dict | None = None, calendar: dict | None = None,
+                    engine: str = "python", price_scale: int | None = None) -> dict:
     """Run the seed/reseed Lake reconstruction-quality path for one day and classify it. PURE w.r.t.
     its inputs (a pre-loaded Lake `book_delta_v2` DataFrame + optional pre-parsed `book` snapshots) —
-    no vendor I/O — so the offline tests drive the exact production classification path."""
+    no vendor I/O — so the offline tests drive the exact production classification path.
+
+    `engine` selects the replay engine: `"python"` (default; the correctness oracle, builds the top-K
+    frame + `frame_quality`) or `"native"` (metrics-only — classifies from native `meta` without the
+    frame, `price_scale` required). Classification is identical either way."""
     have_lake = lake_delta_df is not None and len(lake_delta_df) > 0
     n_rows = (0 if lake_delta_df is None else int(len(lake_delta_df)))
     snaps = list(lake_book_snapshots or [])
@@ -265,18 +297,27 @@ def assess_lake_day(lake_delta_df, lake_book_snapshots, *, day: dt.date, k: int 
     policy = ReseedPolicy(enabled=reseed, min_levels_per_side=seed_min_levels,
                           reseed_after_crossed_s=reseed_after_crossed_s,
                           max_spread_frac=max_spread_frac)
-    frame, meta = reconstruct_lake_l2_at_samples_seeded(
-        lake_delta_df, grid, k=k, engine_time_col=engine_col,
-        snapshots=(snaps or None), policy=policy)
-    lake_q = frame_quality(frame, source_rows=n_rows)
+    # Native mode classifies from metrics-only meta (no top-K frame materialized); Python builds the
+    # frame and derives frame_quality. The two are pinned equal by the conformance tests.
+    if engine == "native":
+        _, meta = _seeded_reconstruct(engine, price_scale, df=lake_delta_df, grid=grid, k=k,
+                                      engine_col=engine_col, snapshots=(snaps or None), policy=policy,
+                                      frame_out=False)
+        lake_q = _lake_quality_from_meta(meta, source_rows=n_rows)
+    else:
+        frame, meta = _seeded_reconstruct(engine, price_scale, df=lake_delta_df, grid=grid, k=k,
+                                          engine_col=engine_col, snapshots=(snaps or None),
+                                          policy=policy, frame_out=True)
+        lake_q = frame_quality(frame, source_rows=n_rows)
 
     cold_rate = None
     if cold_ab and have_snaps:
         # A/B "before": the byte-identical reconstruction cold-started (no seed/reseed); metrics-only
         # (frame_out=False) so the 86,400-row frame is not re-materialized. Doubles the per-day delta
         # replay — disable with --no-cold-ab on a multi-GB-day sweep where only the after-rate matters.
-        _, cold_meta = reconstruct_lake_l2_at_samples_seeded(
-            lake_delta_df, grid, k=k, engine_time_col=engine_col, snapshots=None, frame_out=False)
+        _, cold_meta = _seeded_reconstruct(engine, price_scale, df=lake_delta_df, grid=grid, k=k,
+                                           engine_col=engine_col, snapshots=None, policy=policy,
+                                           frame_out=False)
         cold_rate = float(cold_meta["crossed_rate"])
 
     cls, reasons = classify_day(have_lake=True, meta=meta, lake_q=lake_q, thresholds=thresholds)
@@ -553,6 +594,11 @@ def parse_args(argv=None):
                          "present day then classifies inconclusive — no validated seed)")
     ap.add_argument("--no-cold-ab", action="store_true",
                     help="skip the cold-start A/B crossed-rate (halves per-day reconstruction cost)")
+    ap.add_argument("--engine", choices=("auto", "python", "native"), default="auto",
+                    help="Lake replay engine (docs/data.md §5a-Recon native engine). 'python' = the "
+                         "correctness reference; 'native' = the recon_native Rust core (fails before "
+                         "any Lake load if unavailable or the symbol lacks a verified tick scale); "
+                         "'auto' (default) = native when available+verified, else Python.")
     ap.add_argument("--reseed-after-crossed-s", type=float, default=2.0,
                     help="reseed only after the book is crossed continuously ≥ this many seconds")
     ap.add_argument("--seed-min-levels", type=int, default=5,
@@ -590,6 +636,18 @@ def main(argv=None) -> int:
         print(f"NOTE: usable calendar {args.usable_calendar} not found — excluded/gap/fill context "
               "will be null (run ingest/verify_trades_and_calendar.py to produce it).",
               file=sys.stderr)
+
+    # Resolve the replay engine BEFORE any Lake session/load. An explicit --engine native must fail
+    # cleanly (nonzero, no vendor I/O) when the extension or a verified tick scale is unavailable.
+    engine, price_scale, engine_note = _native.resolve_engine(
+        args.engine, exchange=args.exchange, symbol=args.symbol)
+    if args.engine == "native" and engine != "native":
+        print(f"ERROR: {engine_note}", file=sys.stderr)
+        return NATIVE_UNAVAILABLE_EXIT
+    if engine_note:
+        print(f"NOTE: {engine_note}", file=sys.stderr)
+    print(f"Reconstruction engine: {engine}"
+          + (f" (native tick scale {price_scale})" if engine == "native" else ""))
 
     excluded_set = set((cal or {}).get("excluded_days_by_reason", {}))
     to_load = [d for d in days if d.isoformat() not in excluded_set]
@@ -664,7 +722,8 @@ def main(argv=None) -> int:
                     # returning an empty frame, so this is missing_needs_coinapi, NOT a load failure.
                     print(f"  Lake book_delta_v2 absent for {di} (gap) → missing_needs_coinapi.")
                     results.append(assess_lake_day(pd.DataFrame(), None, day=d, k=args.k,
-                                                   grid_ms=args.grid_ms, coinapi=cctx, calendar=calctx))
+                                                   grid_ms=args.grid_ms, coinapi=cctx, calendar=calctx,
+                                                   engine=engine, price_scale=price_scale))
                 else:
                     print(f"  WARNING: Lake book_delta_v2 load failed for {di} ({e!r}) — inconclusive.",
                           file=sys.stderr)
@@ -690,7 +749,8 @@ def main(argv=None) -> int:
                 lake_df, snaps, day=d, k=args.k, grid_ms=args.grid_ms, reseed=not args.no_reseed,
                 reseed_after_crossed_s=args.reseed_after_crossed_s,
                 seed_min_levels=args.seed_min_levels, max_spread_frac=args.seed_max_spread_frac,
-                cold_ab=not args.no_cold_ab, coinapi=cctx, calendar=calctx))
+                cold_ab=not args.no_cold_ab, coinapi=cctx, calendar=calctx,
+                engine=engine, price_scale=price_scale))
 
         try:
             used_after = float(lake_used_data(sess).get("downloaded_gb", 0.0))
@@ -700,6 +760,8 @@ def main(argv=None) -> int:
     meta = {
         "k": int(args.k), "grid_ms": int(args.grid_ms),
         "exchange": args.exchange, "symbol": args.symbol,
+        "engine": engine, "engine_requested": args.engine,
+        "engine_price_scale": price_scale,
         "thresholds": THRESHOLDS.as_dict(),
         "policy": {"reseed": not args.no_reseed, "reseed_after_crossed_s": args.reseed_after_crossed_s,
                    "seed_min_levels": args.seed_min_levels, "no_lake_seed": args.no_lake_seed,
