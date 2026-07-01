@@ -413,9 +413,19 @@ breach the 300 GB/month quota headroom, override or not (and refuses the whole r
 `used_data` is unreadable). The default day set is small: **2025-06-01** (the validated clean day →
 `lake_usable`) and **2026-04-01** (31.75%-crossed `book` seed source → `inconclusive`); add more with
 `--days` / `--days-file` / `--include-gap-days N`. The full report is written to
-`data/reports/coinbase_quality_map.json` (git-ignored). One per-day record (illustrative schema — the
-multi-day runner is not yet run live; reasons shown in full, seed/quality blocks abbreviated; values
-mirror the §5a 2025-06-01 measured parity):
+`data/reports/coinbase_quality_map.json` (git-ignored).
+
+**Live native smoke — default two-day set, 2026-07-01 (`--engine native --no-cold-ab`).** This validates
+the native quality-map path and the quota guard, but it is **not** the broad production quality map.
+Report summary: `lake_usable=1`, `inconclusive=1`, estimated Lake download 0.96 GB, usage before/after
+0.26 GB / 31 days (quota 300 GB; provider usage may lag), native engine selected.
+
+| day | class | key metrics / reason |
+|---|---|---|
+| 2025-06-01 | `lake_usable` | 16,517,806 delta rows; crossed_rate_after 0.000150 (13/86,400 samples); missing 0.000023; thin 0.000012; 3 reseeds |
+| 2026-04-01 | `inconclusive` | 34,657,476 delta rows; accepted seed but seed source unreliable (`seed_source_crossed_frac=0.3751>0.05`); crossed_rate_after 0.391; 6 reseeds |
+
+One per-day record shape:
 
 ```json
 {"day": "2025-06-01", "classification": "lake_usable",
@@ -449,8 +459,9 @@ the Python seed/reseed semantics exactly (pinned by native-vs-Python conformance
 quality-map mode, classifies from metrics-only meta without materializing the top-K frame. On a
 synthetic 1M-row / 10 000-level / 20%-churn fixture the native engine is **~1293× faster than Python**
 (244.35 s → 0.189 s) with byte-identical output (`scripts/bench_recon_engine.py`; 12th Gen i5-12400F,
-Python 3.12, rustc 1.94). The multi-day quality map has **not** been re-run live here (still quota-gated,
-§9); backfill stays locked until it passes.
+Python 3.12, rustc 1.94). The default two-day live quality-map smoke has run successfully with the
+native engine (2026-07-01), but the broad multi-day quality map is still quota-gated (§9); backfill
+stays locked until that broader map passes.
 
 ---
 
@@ -600,9 +611,10 @@ Hard gates before the hybrid Coinbase plan is production-validated:
 - [ ] **Crypto Lake Coinbase quality map** — how many *present* days have a degraded `book_delta_v2`
       *reconstruction* (not just the `book` snapshot product)? Degraded present-days get CoinAPI fill.
       *(Tooling: `scripts/run_coinbase_quality_map.py` — §5a-QualityMap, quota-aware, classifies
-      lake_usable / lake_present_degraded / missing_needs_coinapi / excluded / inconclusive. The
-      multi-day MAP itself is the remaining gate — not yet run live; backfill stays locked until it
-      passes.)*
+      lake_usable / lake_present_degraded / missing_needs_coinapi / excluded / inconclusive. Default
+      two-day live smoke run completed 2026-07-01 with native engine: 2025-06-01 `lake_usable`,
+      2026-04-01 `inconclusive` because the seed source was crossed. The broad multi-day MAP itself is
+      still the remaining gate; backfill stays locked until it passes.)*
 
 Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
