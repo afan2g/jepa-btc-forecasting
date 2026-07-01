@@ -14,8 +14,13 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from recon import native as _qm_native
 from recon.reseed import book_snapshot
+
+native = pytest.mark.skipif(not _qm_native.native_available(),
+                            reason="recon_native extension not built (maturin develop)")
 
 # scripts/ is not a package — load the script module by path (same pattern as test_parity_script).
 # Register it in sys.modules before exec so the module-level @dataclass (Thresholds) can resolve its
@@ -533,6 +538,75 @@ def test_main_unreadable_used_data_refuses_run(monkeypatch, tmp_path):
     out = str(tmp_path / "rep")
     rc = qm.main(["--days", "2025-06-01", "--out-dir", out, "--allow-broad"])
     assert rc == qm.QUOTA_REFUSED_EXIT                   # fail-safe: refuse even with --allow-broad
+
+
+# --------------------------------------------------------------------------- engine selection (§5a native)
+def test_main_engine_python_records_python_engine(monkeypatch, tmp_path):
+    _patch_vendor(monkeypatch, delta_for={dt.date(2025, 6, 1): _clean_lake_df()}, snaps=_valid_seed())
+    out = str(tmp_path / "rep")
+    rc = qm.main(["--days", "2025-06-01", "--engine", "python", "--k", "1", "--seed-min-levels", "1",
+                  "--out-dir", out, "--max-auto-gb", "10"])
+    assert rc == 0
+    rep = _run_report(tmp_path, ["--out-dir", out])
+    assert rep["meta"]["engine"] == "python" and rep["meta"]["engine_requested"] == "python"
+    assert rep["days"][0]["classification"] == qm.LAKE_USABLE
+
+
+@native
+def test_main_engine_native_runs_and_matches_python(monkeypatch, tmp_path):
+    # --engine native must actually use the native core AND land on the same classification as Python
+    # (the conformance guarantee). BTC-USD has a verified tick scale, so native is selected.
+    argv = ["--days", "2025-06-01", "--k", "1", "--seed-min-levels", "1", "--max-auto-gb", "10"]
+
+    def _run(engine, sub):
+        _patch_vendor(monkeypatch, delta_for={dt.date(2025, 6, 1): _clean_lake_df()},
+                      snaps=_valid_seed())
+        out = str(tmp_path / sub)
+        rc = qm.main(argv + ["--engine", engine, "--out-dir", out])
+        assert rc == 0
+        return _run_report(tmp_path, ["--out-dir", out])
+
+    nat = _run("native", "nat")
+    py = _run("python", "py")
+    assert nat["meta"]["engine"] == "native"
+    assert nat["meta"]["engine_price_scale"] == 100
+    assert nat["days"][0]["classification"] == py["days"][0]["classification"]
+    assert nat["days"][0]["quality"]["crossed_rate_after"] == py["days"][0]["quality"]["crossed_rate_after"]
+    assert nat["days"][0]["quality"]["missing_book_fraction"] == py["days"][0]["quality"]["missing_book_fraction"]
+
+
+def test_main_engine_native_unavailable_fails_before_load(monkeypatch, tmp_path):
+    # Simulate the extension being absent: an explicit --engine native must exit nonzero BEFORE any
+    # Lake load (it must never silently fall back — plan Review Checklist).
+    loaded = _patch_vendor(monkeypatch, delta_for={dt.date(2025, 6, 1): _clean_lake_df()},
+                           snaps=_valid_seed())
+    monkeypatch.setattr(qm._native, "native_available", lambda: False)
+    out = str(tmp_path / "rep")
+    rc = qm.main(["--days", "2025-06-01", "--engine", "native", "--out-dir", out, "--max-auto-gb", "10"])
+    assert rc == qm.NATIVE_UNAVAILABLE_EXIT
+    assert loaded == []                                          # aborted before any Lake load
+    assert not (tmp_path / "rep" / "coinbase_quality_map.json").exists()
+
+
+def test_main_engine_native_unverified_symbol_fails_before_load(monkeypatch, tmp_path):
+    # Native extension present but the symbol has NO verified tick scale => explicit native must abort.
+    loaded = _patch_vendor(monkeypatch, delta_for={dt.date(2025, 6, 1): _clean_lake_df()})
+    out = str(tmp_path / "rep")
+    rc = qm.main(["--days", "2025-06-01", "--engine", "native", "--symbol", "FOO-BAR",
+                  "--out-dir", out, "--max-auto-gb", "10"])
+    assert rc == qm.NATIVE_UNAVAILABLE_EXIT
+    assert loaded == []
+
+
+def test_main_engine_auto_falls_back_cleanly_for_unverified_symbol(monkeypatch, tmp_path):
+    # auto + a symbol without a verified tick scale => Python, run completes, engine recorded.
+    _patch_vendor(monkeypatch, delta_for={dt.date(2025, 6, 1): _clean_lake_df()}, snaps=_valid_seed())
+    out = str(tmp_path / "rep")
+    rc = qm.main(["--days", "2025-06-01", "--engine", "auto", "--symbol", "FOO-BAR", "--k", "1",
+                  "--seed-min-levels", "1", "--out-dir", out, "--max-auto-gb", "10"])
+    assert rc == 0
+    rep = _run_report(tmp_path, ["--out-dir", out])
+    assert rep["meta"]["engine"] == "python" and rep["meta"]["engine_requested"] == "auto"
 
 
 def test_main_no_lake_seed_estimate_excludes_book_product(monkeypatch, tmp_path):

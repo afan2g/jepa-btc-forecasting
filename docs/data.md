@@ -434,6 +434,24 @@ not unlock the §5a backfill gate (still enforced in `ingest/download_coinapi.py
 Bulk backfill remains gated until the multi-day quality map (and the §10 multi-day reseed validation)
 passes.
 
+**Replay engine (Python reference vs native).** The pure-Python seed/reseed replay
+(`recon/reseed.py`) is the **correctness reference/oracle**, but it is single-process and its per-event
+`max(dict)/min(dict)` best-bid/ask scans make it O(N·L) — the 2026-07-01 Python-only quality-map smoke
+run was still CPU-bound after hours on the 16.5M/34.7M-row default days and cannot support multi-day
+(let alone Binance ~109M rows/day) work. The **native engine** (`recon_native`, Rust/PyO3 —
+docs/native-recon.md) is the throughput implementation required for operational multi-day runs: an
+integer-tick order book with O(log L) best-bid/ask and no per-row object boxing. Both
+`scripts/run_coinbase_quality_map.py` and `scripts/run_coinbase_parity.py` take
+`--engine {auto,python,native}` (default `auto` = native when the extension is built and the symbol has
+a verified tick scale, else Python; explicit `--engine native` fails before any Lake load if
+unavailable/unverified), and record the selected engine in the report JSON. The native path preserves
+the Python seed/reseed semantics exactly (pinned by native-vs-Python conformance tests) and, in
+quality-map mode, classifies from metrics-only meta without materializing the top-K frame. On a
+synthetic 1M-row / 10 000-level / 20%-churn fixture the native engine is **~1293× faster than Python**
+(244.35 s → 0.189 s) with byte-identical output (`scripts/bench_recon_engine.py`; 12th Gen i5-12400F,
+Python 3.12, rustc 1.94). The multi-day quality map has **not** been re-run live here (still quota-gated,
+§9); backfill stays locked until it passes.
+
 ---
 
 ## 6. Per-day sizes & storage budget (measured)

@@ -1,0 +1,27 @@
+[package]
+name = "recon_native"
+version = "0.1.0"
+edition = "2021"
+description = "Native Crypto Lake book_delta_v2 seed/reseed replay core (docs/data.md §5a-Recon)"
+license = "MIT"
+
+[lib]
+name = "recon_native"
+# cdylib -> a Python extension module (import recon_native); rlib -> the pure-Rust
+# `replay` core can be unit-tested with `cargo test` without a Python interpreter.
+crate-type = ["cdylib", "rlib"]
+
+# `extension-module` is DEFAULT-ON so `maturin develop` / `pip` builds a self-contained Python
+# extension (no libpython link). Disable it to unit-test the pure-Rust core:
+#     cargo test --no-default-features
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = "0.29"
+numpy = "0.29"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
