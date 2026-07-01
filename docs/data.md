@@ -460,14 +460,17 @@ Three quota-gated runs, each estimated under the 5 GB auto cap (no `--allow-broa
 
 Generated 2026-07-01 (20:09:11Z / 20:11:06Z / 20:17:13Z), native engine (tick scale 100) on all three
 runs; per-day metrics identical across runs (deterministic replay). Quota: `used_data` read 0.26 GB /
-31 days before and after every run (the vendor counter may lag ~60 min). **Measured** actual pull —
+31 days before and after every run (the vendor counter may lag ~60 min). **Measured wire transfer** —
 the S3 objects the runs fetched (metadata-only `ListObjectsV2` sizes, 7 present days, both products):
 **1.48 GB `book_delta_v2` (173 M rows) + 0.36 GB `book` = 1.84 GB**, vs the 4.80 GB conservative
-unique-day estimate; gap days cost ~0. The `book` estimator constant (0.18 GB/day) is ~3.5× the
-measured ~0.05 GB/day — the auto-cap gate over-estimates, as designed. A fresh `used_data` re-read
-at 21:20Z still returned 0.26 GB with vendor `update_time` 19:20:30Z (pre-run) — the vendor counter
-refreshes on a slower cadence than its "~60 min" hint, so the measured S3 sizes above are the
-authoritative spend record for these runs.
+unique-day estimate; gap days cost ~0. Object sizes equal bytes transferred here because lakeapi
+(0.22.3) `_download_one` GETs each partition object whole (the `columns=` projection is applied
+after download), but they are **not yet vendor-confirmed spend**: cache-busted `used_data` re-reads
+at 21:20Z and 21:39Z still returned 0.26 GB with vendor `update_time` 19:20:30Z (pre-run), so what
+Crypto Lake ultimately counts against the quota for these runs is pending — treat 1.84 GB as the
+wire-transfer measurement and re-check `used_data` before the next sizeable pull. The `book`
+estimator constant (0.18 GB/day) is ~3.5× the measured ~0.05 GB/day — the auto-cap gate
+over-estimates, as designed.
 
 Counts (n=10): **lake_usable 2, lake_present_degraded 1, missing_needs_coinapi 3, excluded 0,
 inconclusive 4.** Per-day (rates are fractions of the 86,400 1 s grid samples):
@@ -512,8 +515,9 @@ from Lake alone) and 1 is a degraded seam day needing a partial-day CoinAPI fill
 unlock: (a) CoinAPI cross-validation (or another trusted seed source) for the crossed-seed-source
 days — the §10 multi-day reseed validation; (b) partial-day fill handling for seam days; (c) the broad
 production map over all 652 present days — ~313 GB at the tool's conservative 0.48 GB/day gate
-estimate (refused as a one-shot, by design), ~170 GB at the measured ~0.26 GB/day — either way a
-stage-across-quota-windows pull alongside the archive downloads (§6).
+estimate (refused as a one-shot, by design), ~170 GB at the measured wire rate of ~0.26 GB/day
+(vendor-counter confirmation pending) — either way a stage-across-quota-windows pull alongside the
+archive downloads (§6).
 
 **Backfill stays LOCKED.** This is a validation/quality-map tool: it does not download CoinAPI and does
 not unlock the §5a backfill gate (still enforced in `ingest/download_coinapi.py` / `ingest/_common.py`).
@@ -568,9 +572,9 @@ with the chosen span; ~52 is the full 2-yr usable-calendar set, §5b.)
 **Crypto Lake quota constraint:** the measured all-feed Lake footprint is ~1.17 GB/day, so the
 300 GB/month individual-plan cap covers at most ~256 all-feed days before any safety margin. Small
 validation pulls (single-day parity, the *sampled* multi-day Coinbase quality map — the 2026-07-01
-10-day run measured 1.84 GB actual — metadata coverage checks) are fine; the **full-window** quality
-map over all 652 present days is *not* small (~313 GB conservative / ~170 GB measured-rate,
-§5a-QualityMap) and must be staged like the archive. A full 12-24 mo Lake archive is **not** a
+10-day run measured 1.84 GB of wire transfer — metadata coverage checks) are fine; the **full-window**
+quality map over all 652 present days is *not* small (~313 GB conservative / ~170 GB measured
+wire-rate, §5a-QualityMap) and must be staged like the archive. A full 12-24 mo Lake archive is **not** a
 one-shot pull on this plan: stage by month/quota
 window, project only needed columns, process/recon day-by-day, and keep resumable manifests so a
 run can stop before the quota is tight.
@@ -698,8 +702,8 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       4 `inconclusive` — the crossed seed source recurs on 4 of 7 sampled present days
       (8.4–37.5% crossed candidates, Aug '24–Apr '26), and seam days lose the leading 61–67% of the
       day. Remaining gate: CoinAPI cross-validation for crossed-seed-source days, partial-day fill
-      handling for seam days, plus the full-window map (~313 GB conservative / ~170 GB measured-rate →
-      staged across quota windows); backfill stays locked until it passes.)*
+      handling for seam days, plus the full-window map (~313 GB conservative / ~170 GB measured
+      wire-rate → staged across quota windows); backfill stays locked until it passes.)*
 
 Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
