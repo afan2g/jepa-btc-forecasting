@@ -548,11 +548,16 @@ if less than ~40 GB is already used that month).
   --max-gb-per-batch 250 \
   --gb-per-day 0.48
 
-# 2) run ONE batch this quota window (the runner re-checks used_data + quota headroom)
+# 2) run ONE batch this quota window (the runner re-checks used_data + quota headroom).
+#    Per-batch --out-dir: the runner writes a fixed coinbase_quality_map.json under --out-dir, so
+#    staged batches would otherwise overwrite each other's report; --usable-calendar pins the
+#    exact calendar the plan was built from. Both are already baked into the manifest's commands.
 .venv/bin/python scripts/run_coinbase_quality_map.py \
   --engine native \
   --no-cold-ab \
   --days-file data/tmp/coinbase_quality_map_batches/batch_001_days.txt \
+  --usable-calendar data/usable_calendar.json \
+  --out-dir data/reports/coinbase_quality_map_batches/batch_001 \
   --allow-broad
 ```
 

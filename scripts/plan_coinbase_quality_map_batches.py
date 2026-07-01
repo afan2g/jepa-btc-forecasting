@@ -55,9 +55,15 @@ DEFAULT_MAX_GB_PER_BATCH = 250.0
 DEFAULT_GB_PER_DAY = 0.48
 
 # How each planned batch is actually run (docs §5a-QualityMap staged workflow). --allow-broad is
-# deliberate: a batch IS a broad pull; the runner's quota-headroom gate still applies.
+# deliberate: a batch IS a broad pull; the runner's quota-headroom gate still applies. The command
+# pins {calendar} (the runner would otherwise default to data/usable_calendar.json — a plan built
+# from another snapshot must run against the SAME excluded/fill context) and a per-batch
+# {report_dir} (the runner writes a fixed coinbase_quality_map.json under --out-dir, so staged
+# batches would otherwise overwrite each other's artifact).
 COMMAND_TEMPLATE = (".venv/bin/python scripts/run_coinbase_quality_map.py "
-                    "--engine native --no-cold-ab --days-file {days_file} --allow-broad")
+                    "--engine native --no-cold-ab --days-file {days_file} "
+                    "--usable-calendar {calendar} --out-dir {report_dir} --allow-broad")
+REPORT_ROOT = "data/reports/coinbase_quality_map_batches"
 
 MANIFEST_NAME = "manifest.json"
 BATCH_GLOB = "batch_*_days.txt"
@@ -162,13 +168,16 @@ def build_manifest(sel: dict, batches: list[list[str]], *, calendar_path: str, o
     batch_rows = []
     for i, days in enumerate(batches, start=1):
         fname = batch_file_name(i)
+        report_dir = os.path.join(REPORT_ROOT, fname.removesuffix("_days.txt"))
         batch_rows.append({
             "file": fname,
             "n_days": len(days),
             "first_day": days[0],
             "last_day": days[-1],
             "est_gb": round(len(days) * gb_per_day, 2),
-            "command": COMMAND_TEMPLATE.format(days_file=os.path.join(out_dir, fname)),
+            "report_dir": report_dir,
+            "command": COMMAND_TEMPLATE.format(days_file=os.path.join(out_dir, fname),
+                                               calendar=calendar_path, report_dir=report_dir),
         })
     if generated_utc is None:
         generated_utc = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")

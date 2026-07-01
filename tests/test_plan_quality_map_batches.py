@@ -208,11 +208,30 @@ def test_manifest_contains_the_runner_command_template(tmp_path):
     m = json.loads((pathlib.Path(out_dir) / "manifest.json").read_text())
     tmpl = m["meta"]["command_template"]
     for part in ("scripts/run_coinbase_quality_map.py", "--engine native", "--no-cold-ab",
-                 "--days-file {days_file}", "--allow-broad"):
+                 "--days-file {days_file}", "--usable-calendar {calendar}",
+                 "--out-dir {report_dir}", "--allow-broad"):
         assert part in tmpl
     # each batch entry carries the concrete command for ITS days file
     cmd0 = m["batches"][0]["command"]
-    assert cmd0 == tmpl.format(days_file=str(pathlib.Path(out_dir) / "batch_001_days.txt"))
+    assert cmd0 == tmpl.format(days_file=str(pathlib.Path(out_dir) / "batch_001_days.txt"),
+                               calendar=m["meta"]["input_calendar"],
+                               report_dir=m["batches"][0]["report_dir"])
+
+
+def test_batch_commands_use_distinct_report_dirs_and_the_planned_calendar(tmp_path):
+    """The runner writes a FIXED coinbase_quality_map.json under --out-dir, and defaults
+    --usable-calendar to data/usable_calendar.json — so each generated command must pin its own
+    report dir (staged batches must not overwrite each other's artifact) and the exact calendar
+    the plan was built from (Codex review, PR #12)."""
+    rc, out_dir = _main(tmp_path)
+    m = json.loads((pathlib.Path(out_dir) / "manifest.json").read_text())
+    report_dirs = [b["report_dir"] for b in m["batches"]]
+    assert len(set(report_dirs)) == len(report_dirs)  # distinct per batch
+    for b in m["batches"]:
+        stem = b["file"].removesuffix("_days.txt")
+        assert b["report_dir"].endswith(stem)
+        assert f"--out-dir {b['report_dir']}" in b["command"]
+        assert f"--usable-calendar {m['meta']['input_calendar']}" in b["command"]
 
 
 def test_batch_files_are_byte_deterministic_across_runs(tmp_path):
