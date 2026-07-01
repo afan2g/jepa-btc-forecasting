@@ -359,7 +359,14 @@ def test_inconclusive_load_failure_record():
 _CAL = {
     "usable_days": ["2025-06-01", "2026-04-01"],
     "lake_all_days": ["2025-06-01", "2026-04-01"],
-    "coinbase_fill_days": {"2024-12-06": {}, "2024-12-05": {}, "2024-11-13": {}},
+    # coinbase_fill_days: {"book"/"trades": which product Lake is MISSING that day}. book=True is a
+    # book gap (this runner's target); book=False (e.g. 2024-11-13) is a trade-only gap (book present).
+    "coinbase_fill_days": {
+        "2024-12-06": {"book": True, "trades": True},
+        "2024-12-05": {"book": True, "trades": True},
+        "2024-11-13": {"book": False, "trades": True},   # trade-only → NOT a book gap
+        "2024-07-03": {"book": False, "trades": True},   # trade-only → NOT a book gap
+    },
     "excluded_days_by_reason": {"2026-02-05": ["missing:binF_book", "missing:binF_trade"]},
     "fill_status": {"2024-12-05": {"book": {"present": True}}, "2024-12-06": {"book": None}},
 }
@@ -386,10 +393,24 @@ def test_coinapi_context_reflects_fillability_and_local_parquet(tmp_path):
                               "COINBASE", "BTC-USD")["parquet_local"] is True
 
 
-def test_gap_days_from_calendar_returns_first_n_sorted():
-    assert qm.gap_days_from_calendar(_CAL, 2) == ["2024-11-13", "2024-12-05"]
+def test_gap_days_from_calendar_returns_book_gaps_only_sorted():
+    # Only BOOK-gap days (coinbase_fill_days[*].book == True), sorted; trade-only days are skipped
+    # (this runner maps book_delta_v2, so a trade-only day's Lake book is present — Codex P2).
+    assert qm.gap_days_from_calendar(_CAL, 5) == ["2024-12-05", "2024-12-06"]  # 2 book gaps only
+    assert qm.gap_days_from_calendar(_CAL, 1) == ["2024-12-05"]
+    assert "2024-11-13" not in qm.gap_days_from_calendar(_CAL, 5)   # trade-only excluded
     assert qm.gap_days_from_calendar(None, 2) == []
     assert qm.gap_days_from_calendar(_CAL, 0) == []
+
+
+def test_resolve_days_include_gap_days_picks_book_gaps_only(tmp_path):
+    cal = tmp_path / "cal.json"
+    cal.write_text(json.dumps(_CAL))
+    args = qm.parse_args(["--days", "2025-06-01", "--include-gap-days", "5",
+                          "--usable-calendar", str(cal)])
+    days = qm.resolve_days(args)
+    assert dt.date(2024, 12, 5) in days and dt.date(2024, 12, 6) in days   # book gaps added
+    assert dt.date(2024, 11, 13) not in days and dt.date(2024, 7, 3) not in days  # trade-only skipped
 
 
 def test_resolve_days_dedupes_and_honors_explicit_days():
@@ -444,6 +465,27 @@ def test_main_excluded_day_is_classified_without_loading(monkeypatch, tmp_path):
     rep = _run_report(tmp_path, ["--out-dir", out])
     assert rep["summary"]["counts"][qm.EXCLUDED] == 1
     assert rep["days"][0]["classification"] == qm.EXCLUDED
+
+
+def test_main_all_excluded_runs_without_a_lake_session(monkeypatch, tmp_path):
+    # Calendar-only run (every day excluded) must NOT require Lake keys / create a session (Codex P3).
+    def _explode_session():
+        raise SystemExit("Crypto Lake AWS key not found in .env or environment")
+
+    def _explode(*a, **k):
+        raise AssertionError("Lake vendor call made on an all-excluded run")
+
+    monkeypatch.setattr(qm, "lake_session", _explode_session)
+    monkeypatch.setattr(qm, "lake_used_data", _explode)
+    monkeypatch.setattr(qm, "load_lake_book_delta_v2", _explode)
+    cal = _write_cal(tmp_path, _CAL)
+    out = str(tmp_path / "rep")
+    rc = qm.main(["--days", "2026-02-05", "--usable-calendar", cal, "--out-dir", out])
+    assert rc == 0                                        # succeeds despite no Lake keys
+    rep = _run_report(tmp_path, ["--out-dir", out])
+    assert rep["summary"]["counts"][qm.EXCLUDED] == 1
+    assert rep["meta"]["quota"]["reason"] == "no_days_to_load"
+    assert rep["meta"]["quota"]["used_gb_before"] is None
 
 
 def test_main_gap_day_raising_nofiles_is_missing_needs_coinapi(monkeypatch, tmp_path):

@@ -467,11 +467,16 @@ def coinapi_context(cal: dict | None, day: dt.date, coinapi_root: str,
 
 
 def gap_days_from_calendar(cal: dict | None, n: int) -> list[str]:
-    """Up to `n` documented Coinbase gap/seam days (the calendar's coinbase_fill_days, time-sorted) —
-    each a day where Lake lacks Coinbase data and CoinAPI must fill (expected missing_needs_coinapi)."""
+    """Up to `n` documented Coinbase BOOK-gap days (time-sorted). `coinbase_fill_days` mixes book gaps
+    with trade-only gaps (each entry is `{"book": bool, "trades": bool}` = which product Lake is missing
+    that day). This runner maps `book_delta_v2` only, so we keep just `book: True` days (Lake book
+    absent → expected missing_needs_coinapi); a trade-only day's Lake book is PRESENT and would waste
+    quota without yielding a book-gap sample."""
     if cal is None or n <= 0:
         return []
-    return sorted((cal.get("coinbase_fill_days") or {}).keys())[:n]
+    fill = cal.get("coinbase_fill_days") or {}
+    book_gaps = [day for day, v in fill.items() if (v or {}).get("book") is True]
+    return sorted(book_gaps)[:n]
 
 
 # ----------------------------------------------------------------------------- day-set resolution
@@ -602,33 +607,8 @@ def main(argv=None) -> int:
           f"({len(to_load)} day(s) × {per_day_gb:.2f} GB/day [{'+'.join(products)}], "
           "conservative upper bound).")
 
-    sess = lake_session()
-    try:
-        used = lake_used_data(sess)
-        used_gb = float(used.get("downloaded_gb", 0.0))
-        print(f"Crypto Lake usage BEFORE: {used_gb:.2f} GB / {used.get('timeframe_days')} days "
-              f"(cap {args.quota_gb:.0f} GB; may lag ~60 min).")
-    except Exception as e:  # noqa: BLE001 — fail safe: cannot confirm headroom ⇒ refuse below
-        print(f"WARNING: could not read lakeapi.used_data ({e!r}); assuming worst-case usage at the "
-              "monthly cap, so the quota gate will REFUSE any non-empty pull this run regardless of "
-              "--allow-broad (cannot confirm headroom). Re-run once used_data is readable.",
-              file=sys.stderr)
-        used_gb = args.quota_gb
-
-    decision = quota_decision(est_gb=est_gb, used_gb=used_gb, quota_gb=args.quota_gb,
-                              max_auto_gb=args.max_auto_gb, allow_broad=args.allow_broad,
-                              headroom_gb=args.headroom_gb)
-    if not decision["ok"]:
-        why = ("would breach the monthly quota headroom"
-               if decision["reason"] == "quota_headroom"
-               else f"exceeds the {args.max_auto_gb:.0f} GB auto cap")
-        print(f"\nREFUSING Lake load: estimate ~{est_gb:.2f} GB {why} "
-              f"(remaining ~{decision['remaining_gb']:.1f} GB of {args.quota_gb:.0f} GB).\n"
-              "  • Narrow the day set (--days), or\n"
-              "  • pass --allow-broad for a deliberate pull that still fits the monthly quota "
-              "(ensure headroom; used_data lags ~60 min).", file=sys.stderr)
-        return QUOTA_REFUSED_EXIT
-
+    # Excluded days are pure calendar verdicts — build them WITHOUT a Lake session, so a calendar-only
+    # run (every day excluded) works with no AWS keys and never hits the quota gate.
     results: list[dict] = []
     for d in excluded:
         di = d.isoformat()
@@ -638,51 +618,84 @@ def main(argv=None) -> int:
             coinapi=coinapi_context(cal, d, args.coinapi_root, args.exchange, args.symbol),
             calendar=calendar_context(cal, di)))
 
-    for d in to_load:
-        di = d.isoformat()
-        cctx = coinapi_context(cal, d, args.coinapi_root, args.exchange, args.symbol)
-        calctx = calendar_context(cal, di)
-        print(f"\nLoading Crypto Lake {args.exchange} {args.symbol} book_delta_v2 for {di} …")
+    used_gb = used_after = None
+    decision = {"ok": True, "reason": "no_days_to_load", "est_gb": est_gb}
+    if not to_load:
+        print("No days to load (all excluded, or empty set) — writing a calendar-only report; "
+              "no Crypto Lake session created.")
+    else:
+        sess = lake_session()
         try:
-            lake_df = load_lake_book_delta_v2(sess, d, args.exchange, args.symbol)
-        except Exception as e:  # noqa: BLE001
-            if _is_no_files(e):
-                # An ABSENT Lake partition (a gap day): lakeapi raises NoFilesFound rather than
-                # returning an empty frame, so this is missing_needs_coinapi, NOT a load failure.
-                print(f"  Lake book_delta_v2 absent for {di} (gap) → missing_needs_coinapi.")
-                results.append(assess_lake_day(pd.DataFrame(), None, day=d, k=args.k,
-                                               grid_ms=args.grid_ms, coinapi=cctx, calendar=calctx))
-            else:
-                print(f"  WARNING: Lake book_delta_v2 load failed for {di} ({e!r}) — inconclusive.",
-                      file=sys.stderr)
-                results.append(inconclusive_load_failure(d, repr(e), k=args.k, grid_ms=args.grid_ms,
-                                                         coinapi=cctx, calendar=calctx))
-            continue
-        print(f"  Lake book_delta_v2 rows: {len(lake_df):,}")
+            used = lake_used_data(sess)
+            used_gb = float(used.get("downloaded_gb", 0.0))
+            print(f"Crypto Lake usage BEFORE: {used_gb:.2f} GB / {used.get('timeframe_days')} days "
+                  f"(cap {args.quota_gb:.0f} GB; may lag ~60 min).")
+        except Exception as e:  # noqa: BLE001 — fail safe: cannot confirm headroom ⇒ refuse below
+            print(f"WARNING: could not read lakeapi.used_data ({e!r}); assuming worst-case usage at "
+                  "the monthly cap, so the quota gate will REFUSE any non-empty pull this run "
+                  "regardless of --allow-broad (cannot confirm headroom). Re-run once used_data is "
+                  "readable.", file=sys.stderr)
+            used_gb = args.quota_gb
 
-        snaps = None
-        if not args.no_lake_seed and len(lake_df):
+        decision = quota_decision(est_gb=est_gb, used_gb=used_gb, quota_gb=args.quota_gb,
+                                  max_auto_gb=args.max_auto_gb, allow_broad=args.allow_broad,
+                                  headroom_gb=args.headroom_gb)
+        if not decision["ok"]:
+            why = ("would breach the monthly quota headroom"
+                   if decision["reason"] == "quota_headroom"
+                   else f"exceeds the {args.max_auto_gb:.0f} GB auto cap")
+            print(f"\nREFUSING Lake load: estimate ~{est_gb:.2f} GB {why} "
+                  f"(remaining ~{decision['remaining_gb']:.1f} GB of {args.quota_gb:.0f} GB).\n"
+                  "  • Narrow the day set (--days), or\n"
+                  "  • pass --allow-broad for a deliberate pull that still fits the monthly quota "
+                  "(ensure headroom; used_data lags ~60 min).", file=sys.stderr)
+            return QUOTA_REFUSED_EXIT
+
+        for d in to_load:
+            di = d.isoformat()
+            cctx = coinapi_context(cal, d, args.coinapi_root, args.exchange, args.symbol)
+            calctx = calendar_context(cal, di)
+            print(f"\nLoading Crypto Lake {args.exchange} {args.symbol} book_delta_v2 for {di} …")
             try:
-                snaps = load_lake_book_snapshots(sess, d, args.exchange, args.symbol,
-                                                 max_levels=args.book_max_levels,
-                                                 stride_ms=args.book_stride_ms)
-                print(f"  Lake book seed candidates: {len(snaps):,}")
-            except Exception as e:  # noqa: BLE001 — fall back to cold-start (→ inconclusive)
-                print(f"  WARNING: could not load Lake `book` snapshots ({e!r}); cold-start (the day "
-                      "will classify inconclusive without a validated seed).", file=sys.stderr)
-                snaps = None
+                lake_df = load_lake_book_delta_v2(sess, d, args.exchange, args.symbol)
+            except Exception as e:  # noqa: BLE001
+                if _is_no_files(e):
+                    # An ABSENT Lake partition (a gap day): lakeapi raises NoFilesFound rather than
+                    # returning an empty frame, so this is missing_needs_coinapi, NOT a load failure.
+                    print(f"  Lake book_delta_v2 absent for {di} (gap) → missing_needs_coinapi.")
+                    results.append(assess_lake_day(pd.DataFrame(), None, day=d, k=args.k,
+                                                   grid_ms=args.grid_ms, coinapi=cctx, calendar=calctx))
+                else:
+                    print(f"  WARNING: Lake book_delta_v2 load failed for {di} ({e!r}) — inconclusive.",
+                          file=sys.stderr)
+                    results.append(inconclusive_load_failure(d, repr(e), k=args.k,
+                                                             grid_ms=args.grid_ms, coinapi=cctx,
+                                                             calendar=calctx))
+                continue
+            print(f"  Lake book_delta_v2 rows: {len(lake_df):,}")
 
-        results.append(assess_lake_day(
-            lake_df, snaps, day=d, k=args.k, grid_ms=args.grid_ms, reseed=not args.no_reseed,
-            reseed_after_crossed_s=args.reseed_after_crossed_s, seed_min_levels=args.seed_min_levels,
-            max_spread_frac=args.seed_max_spread_frac, cold_ab=not args.no_cold_ab,
-            coinapi=cctx, calendar=calctx))
+            snaps = None
+            if not args.no_lake_seed and len(lake_df):
+                try:
+                    snaps = load_lake_book_snapshots(sess, d, args.exchange, args.symbol,
+                                                     max_levels=args.book_max_levels,
+                                                     stride_ms=args.book_stride_ms)
+                    print(f"  Lake book seed candidates: {len(snaps):,}")
+                except Exception as e:  # noqa: BLE001 — fall back to cold-start (→ inconclusive)
+                    print(f"  WARNING: could not load Lake `book` snapshots ({e!r}); cold-start (the "
+                          "day will classify inconclusive without a validated seed).", file=sys.stderr)
+                    snaps = None
 
-    used_after = None
-    try:
-        used_after = float(lake_used_data(sess).get("downloaded_gb", 0.0))
-    except Exception:  # noqa: BLE001
-        pass
+            results.append(assess_lake_day(
+                lake_df, snaps, day=d, k=args.k, grid_ms=args.grid_ms, reseed=not args.no_reseed,
+                reseed_after_crossed_s=args.reseed_after_crossed_s,
+                seed_min_levels=args.seed_min_levels, max_spread_frac=args.seed_max_spread_frac,
+                cold_ab=not args.no_cold_ab, coinapi=cctx, calendar=calctx))
+
+        try:
+            used_after = float(lake_used_data(sess).get("downloaded_gb", 0.0))
+        except Exception:  # noqa: BLE001
+            pass
 
     meta = {
         "k": int(args.k), "grid_ms": int(args.grid_ms),
