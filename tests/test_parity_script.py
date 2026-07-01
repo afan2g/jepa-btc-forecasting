@@ -285,3 +285,18 @@ def test_run_parity_core_native_lake_engine_matches_python():
     assert lr_n["crossed_rate_after"] == lr_p["crossed_rate_after"]
     assert nat_report["parity"]["mid_diff"]["max"] == py_report["parity"]["mid_diff"]["max"]
     assert nat_report["parity"]["n_grid"] == py_report["parity"]["n_grid"]
+
+
+@native
+def test_run_parity_core_native_no_snapshot_cold_start_uses_native_engine():
+    # --engine native with NO seed snapshots (cold-start: --no-lake-seed / book-load failure) must
+    # actually exercise native AND stay byte-identical to the Python cold-start — the recorded
+    # lake_engine must not attribute Python-produced metrics to Rust (Codex PR#9 P2).
+    py_report, py_lake, _ = rcp.run_parity_core(_lake_df(), [_coinapi_rows()], day=DAY, k=5)
+    nat_report, nat_lake, _ = rcp.run_parity_core(_lake_df(), [_coinapi_rows()], day=DAY, k=5,
+                                                  engine="native", price_scale=100)
+    assert py_report["meta"]["lake_engine"] == "python"
+    assert nat_report["meta"]["lake_engine"] == "native"        # accurate attribution
+    pd.testing.assert_frame_equal(nat_lake, py_lake, check_dtype=True)  # native cold-start == Python
+    assert nat_report["lake_quality"] == py_report["lake_quality"]
+    assert nat_report["parity"]["mid_diff"]["max"] == py_report["parity"]["mid_diff"]["max"]

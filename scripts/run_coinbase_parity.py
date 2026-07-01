@@ -229,6 +229,16 @@ def run_parity_core(lake_delta_df: pd.DataFrame, coinapi_chunks, *, day: dt.date
             _, cold_meta = _seeded_reconstruct(
                 engine, price_scale, df=lake_delta_df, grid=grid, k=k, engine_col=engine_col,
                 snapshots=None, policy=policy, frame_out=False)
+        elif engine == "native":
+            # No seed snapshots (--no-lake-seed, or the `book` load failed) but native was selected:
+            # route the pure cold-start through native too, so `--engine native` actually exercises
+            # the Rust core here and `meta.lake_engine` is not attributed to the wrong engine. Native
+            # seeded with snapshots=None is byte-identical to the Python cold-start
+            # (test_no_snapshots_at_all_is_byte_identical_cold_start / test_no_snapshot_path_is_byte_
+            # identical_to_cold_start). reseed_meta stays None — no seed/reseed was applied.
+            lake, _ = _seeded_reconstruct(
+                engine, price_scale, df=lake_delta_df, grid=grid, k=k, engine_col=engine_col,
+                snapshots=None, policy=ReseedPolicy(), frame_out=True)
         else:
             lake = reconstruct_lake_l2_at_samples(lake_delta_df, grid, k=k, engine_time_col=engine_col)
 
