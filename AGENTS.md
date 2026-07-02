@@ -11,6 +11,8 @@ file as the durable reviewer and repository-contract guidance.
   - `jepa_btc_forecasting_spec.md`: product and modeling spec.
   - `docs/data.md`: vendor, coverage, cost, and data-quality decisions.
   - `docs/experiment-plan.md`: implementation phases and gates.
+  - `docs/feature-manifest.md`: the normalized bar/feature manifest contract for
+    modeling data (schema, leakage/timing rules, how training consumes it).
   - `docs/superpowers/plans/`: task-level implementation plans.
 - `ingest/` contains vendor verification and download scripts. These scripts may
   touch paid/vendor APIs, so do not run bulk or live verification commands unless
