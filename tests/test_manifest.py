@@ -309,6 +309,27 @@ def test_run_from_manifest_refuses_v1_fields_without_version():
         run_from_manifest(m, man)
 
 
+def test_run_from_manifest_refuses_optional_v1_fields_without_version():
+    # Codex P2: optional v1 fields (dtypes/as_of_ns/availability_lag_ns/extra_cols) on a
+    # legacy-shaped manifest must also fail closed, not be silently ignored.
+    m, feats, lb = make_matrix(n=64, signal_strength=1.0, seed=1)
+    man = {"feature_cols": feats, "embargo_ns": lb, "max_lookback_ns": lb,
+           "gate": {"n_groups": 4, "k": 2}, "dtypes": {"cvd": "float64"}}
+    with pytest.raises(ValueError, match="manifest_version"):
+        run_from_manifest(m, man)
+
+
+def test_run_from_manifest_categorical_horizon_with_unused_categories():
+    # Codex P2: validate_frame accepts unused horizon categories (observed=True), so the
+    # runner's own groupby must not hand run_study an empty subframe for "2s".
+    m, feats, lb = make_matrix(n=900, signal_strength=4.0, seed=8)
+    m["horizon"] = pd.Categorical(m["horizon"], categories=["10s", "2s"])
+    man = _manifest(feature_cols=feats, max_lookback_ns=lb, embargo_ns=lb,
+                    gate={"n_groups": 4, "k": 2, "min_trades": 1, "min_eff_trades": 1.0})
+    res = run_from_manifest(m, man)
+    assert set(res["horizons"]) == {"10s"}
+
+
 # ---------- schema guard pins (review findings: deletable checks) ----------
 
 def test_scalar_schema_guards_fail_closed():

@@ -28,11 +28,12 @@ LEAKY_NAME_PATTERNS = ("fwd", "future", "forward", "barrier", "label", "target",
 
 VENUE_ROLES = ("signal", "target")
 
-# Fields that only exist in versioned manifests. eval.runner uses this to refuse a manifest
-# that carries the v1 contract but lost its 'manifest_version' key (e.g. a typo) instead of
-# silently downgrading it to the unvalidated legacy path.
-V1_ONLY_FIELDS = frozenset(REQUIRED_FIELDS) - {
-    "manifest_version", "feature_cols", "max_lookback_ns", "embargo_ns",
+# Fields that only exist in versioned manifests (required AND optional — declaring dtypes
+# or as_of_ns on a legacy dict must not be silently ignored). eval.runner uses this to
+# refuse a manifest that carries the v1 contract but lost its 'manifest_version' key (e.g.
+# a typo) instead of downgrading it to the unvalidated legacy path.
+V1_ONLY_FIELDS = (frozenset(REQUIRED_FIELDS) | frozenset(OPTIONAL_FIELDS)) - {
+    "manifest_version", "feature_cols", "max_lookback_ns", "embargo_ns", "gate",
 }
 
 _TIMING_COLS = ("t_event", "t_barrier", "t_feature_start", "t_available")

@@ -36,7 +36,9 @@ def run_from_manifest(matrix: pd.DataFrame, manifest: dict) -> dict:
     feats = manifest["feature_cols"]
     emb, lb = manifest["embargo_ns"], manifest["max_lookback_ns"]
     horizons = {}
-    for h, sub in matrix.groupby("horizon"):
+    # observed=True: a categorical horizon column must not yield empty subframes for
+    # unused categories (run_study crashes on an empty matrix under pandas 2.x defaults)
+    for h, sub in matrix.groupby("horizon", observed=True):
         horizons[str(h)] = run_study(sub.reset_index(drop=True), feats, cost_default=None,
                                      embargo_ns=emb, max_lookback_ns=lb, **gate)
     return {"gate": gate, "horizons": horizons}
