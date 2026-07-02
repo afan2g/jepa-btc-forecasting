@@ -132,8 +132,11 @@ Selection is **bounded by design** — no broad default run. Precedence (first m
    deterministic, seeded stratified random sample of `--sample-n` additional *usable* days drawn
    across the train/val/test split spans (reproducible via `--seed`). Intersected with the usable
    calendar.
-4. **no day args** — the **safe small default sample** (4 curated days, ≈1 GB, runs without
-   `--allow-broad`): `2025-06-01`, `2024-08-05`, `2025-01-07`, `2026-04-15`.
+4. **no day args** — the **safe small default sample** (5 curated days, ≈1.3 GB, runs without
+   `--allow-broad`): `2025-06-01`, `2024-08-05`, `2024-08-06`, `2025-01-07`, `2026-04-15`.
+   `2024-08-06` (a full Coinbase gap, `coinbase_fill_days` with `trades: true`) is included on
+   purpose so the one bounded live run exercises the real `coinapi_fill` routing that §8 later makes
+   a gate condition — `2025-01-07` only produces a Lake-present-but-sparse `warn`, not a fill route.
 
 **Regime cohort** (each a `docs/data.md` §5a-QualityMap-characterized day, so the validator's output
 can be cross-checked against known ground truth):
@@ -173,9 +176,9 @@ loaded/renamed columns (§2). `null` timestamp = the existing sentinel `value < 
 |---|---|---|---|
 | 1 | `row_count` | `len(df)` | hard-fail below `min_rows_hard`; soft surface below regime floor |
 | 2 | `first_ts` / `last_ts` | ISO of `origin_time.min()` / `.max()` after sort | reported; used for hour coverage |
-| 3 | `origin_time_null_frac` | `(origin_time < 2015-01-01).mean()` | fail if `> origin_time_null_max` and no `received_time` fallback |
-| 4 | `received_time_available` / `received_time_null_frac` | column present; `(received_time < 2015-01-01).mean()` | fallback availability (§5) |
-| 5 | `monotonic_after_sort` | `engine_clock.is_monotonic_increasing` after the §5 sort, with no `NaT` | **hard fail** if False |
+| 3 | `origin_time_null_frac` | `(origin_time < 2015-01-01).mean()` | fail if `> origin_time_null_max` (else warn `received_time_fallback_used` when nonzero); substitution itself is per-row unconditional (§5) |
+| 4 | `received_time_available` / `received_time_null_frac` | column present; `(received_time < 2015-01-01).mean()` | fallback availability; a null-origin row with null `received_time` → fail (§5) |
+| 5 | `monotonic_after_sort` | `engine_clock.is_monotonic_increasing` on the **post-fallback** clock after the §5 sort, treating any residual `NaT`/sentinel (`< 2015-01-01`) as invalid | **hard fail** if False |
 | 6 | `was_presorted` | whether the *file* arrived `origin_time`-monotonic (pre-sort) | informational (Coinbase→False, Binance→True) |
 | 7 | `dup_ts_cluster_count` / `dup_ts_max_cluster` | `origin_time` values with count>1; max multiplicity | warn if `dup_ts_max_cluster > dup_ts_cluster_warn` |
 | 8 | `dup_trade_id_count` / `dup_trade_id_frac` | `len(df) - trade_id.nunique()` (if `trade_id` present) | warn if `> 0` |
@@ -195,12 +198,24 @@ All float metrics pass through `_json_safe` (non-finite → `null`) so the repor
 - **Engine clock = `origin_time` (exchange/origin time).** It is the §5.3 engine-time axis
   (`shared_engine_time_col`) and is measured 100% populated (0% empty) on all three venues, so it is
   the primary sort key and bar-clock timestamp.
-- **Fallback to `received_time`.** If `origin_time_null_frac > origin_time_null_max` (default 1%),
-  rows with a null `origin_time` fall back to `received_time` **for the engine clock only** (the
-  original `origin_time` is retained in the frame for audit). If `received_time` is also
-  null/absent for those rows → **hard fail** (`received_time_fallback_unavailable`). A day that
-  needed *any* fallback is recorded (`used_received_time_fallback: true`) and downgraded to **warn**
-  even when it otherwise passes — falling off exchange time is never silently accepted.
+- **Fallback to `received_time` (per-row, unconditional).** The substitution is **not** gated by any
+  threshold: **every** row whose `origin_time` is null/sentinel (`< 2015-01-01`) takes its
+  `received_time` into the engine clock (the original `origin_time` is retained in the frame for
+  audit). Gating the substitution behind `origin_time_null_max` would be unsound — a sub-threshold
+  handful of sentinel `origin_time` rows are not `NaT`, so they sort to 1970 at the front and still
+  read as `monotonic_after_sort=True`, silently corrupting the bar clock. The threshold governs
+  **severity, not whether fallback happens**:
+  - any row where **both** `origin_time` and `received_time` are null/sentinel → its engine clock is
+    unresolvable → **hard fail** (`received_time_fallback_unavailable`), at any fraction;
+  - if `origin_time_null_frac ≤ origin_time_null_max` (default 1%): substitute silently-recorded →
+    **warn** (`received_time_fallback_used`);
+  - if `origin_time_null_frac > origin_time_null_max`: too much of the day is off exchange time →
+    **hard fail** (`origin_time_null_fraction_high`), even though every recoverable row was
+    substituted.
+  A day that needed *any* fallback records `used_received_time_fallback: true`. `monotonic_after_sort`
+  is computed on the **post-substitution** engine clock and treats any remaining sentinel/null value
+  as invalid (it fails, never reads as trivially monotonic) — falling off exchange time is never
+  silently accepted.
 - **Sorting rule (explicit):** sort ascending by the engine clock, **stable**, tie-breaking by
   original file/row order — i.e. `df.sort_values(clock_col, kind="mergesort")` on a
   `reset_index`-preserved frame. This matches the resolved CoinAPI within-timestamp policy (file/`seq`
@@ -229,8 +244,8 @@ passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "day
     "table": "trades",
     "anchor_end": "2026-06-22",
     "venues": ["binance_perp", "binance_spot", "coinbase"],
-    "days_requested": ["2025-06-01", "2024-08-05", "2025-01-07", "2026-04-15"],
-    "days_selected": ["2025-06-01", "2024-08-05", "2025-01-07", "2026-04-15"],
+    "days_requested": ["2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2026-04-15"],
+    "days_selected": ["2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2026-04-15"],
     "selection_mode": "default_sample",
     "seed": 0,
     "timestamp_policy": {"engine_clock": "origin_time", "fallback": "received_time",
@@ -240,24 +255,27 @@ passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "day
                     "price_jump_warn": 0.10, "size_max_btc": 5000.0,
                     "dup_ts_cluster_warn": 50, "lag_neg_frac_max": 0.001 },
     "trades_gb_per_day": {"binance_perp": 0.12, "binance_spot": 0.10, "coinbase": 0.05},
-    "quota": { "ok": true, "reason": "ok", "est_gb": 1.08, "used_gb": 42.0,
+    "quota": { "ok": true, "reason": "ok", "est_gb": 1.35, "used_gb": 42.0,
                "quota_gb": 300.0, "max_auto_gb": 3.0, "allow_broad": false, "headroom_gb": 10.0,
-               "used_gb_before": 42.0, "used_gb_after": 43.1 },
+               "used_gb_before": 42.0, "used_gb_after": 43.35 },
     "vendor_api": { "source": "crypto_lake", "region": "eu-west-1", "table": "trades",
-                    "lakeapi_calls": 12, "dry_run": false, "coinapi_used": false },
+                    "lakeapi_calls": 15, "dry_run": false, "coinapi_used": false },
     "source_artifacts": { "usable_calendar": "data/usable_calendar.json",
                           "usable_calendar_anchor_end": "2026-06-22" },
     "generated_utc": "2026-07-02T00:00:00+00:00",
     "note": "VALIDATION only (docs/data.md §5b / §10 trade-validation breadth). Reads Crypto Lake trades; the CoinAPI backfill gate stays LOCKED and this tool does not unlock it."
   },
   "summary": {
-    "n_days": 4, "n_venues": 3,
-    "counts": { "pass": 9, "warn": 2, "fail": 0, "coinapi_fill": 1, "excluded": 0,
+    "n_days": 5, "n_venues": 3,
+    "counts": { "pass": 11, "warn": 3, "fail": 0, "coinapi_fill": 1, "excluded": 0,
                 "empty": 0, "missing": 0, "load_error": 0 },
     "fail_day_venues": [],
-    "warn_day_venues": [{"day": "2024-08-05", "venue": "coinbase", "reason_codes": ["sparse_hour"]}],
-    "by_venue": { "coinbase": {"pass": 2, "warn": 1, "fail": 0, "coinapi_fill": 1},
-                  "binance_spot": {"pass": 4}, "binance_perp": {"pass": 3, "warn": 1} },
+    "warn_day_venues": [
+      {"day": "2024-08-05", "venue": "coinbase", "reason_codes": ["sparse_hour"]},
+      {"day": "2025-01-07", "venue": "coinbase", "reason_codes": ["sparse_hour"]},
+      {"day": "2024-08-05", "venue": "binance_perp", "reason_codes": ["interarrival_gap_excess"]}],
+    "by_venue": { "coinbase": {"pass": 2, "warn": 2, "fail": 0, "coinapi_fill": 1},
+                  "binance_spot": {"pass": 5}, "binance_perp": {"pass": 4, "warn": 1} },
     "gate": { "all_required_pass": true, "blocking_failures": [],
               "coinapi_fill_deferred": [{"day": "2024-08-06", "venue": "coinbase"}] }
   },
@@ -353,8 +371,8 @@ Script: `ingest/validate_trade_feeds.py` (thin Lake wrapper over `ingest/trade_c
 | `--strict` | store_true | exit `7` if any blocking fail (for CI gating); default exits 0 after writing the report |
 | `--dry-run` | store_true | print the resolved plan (days × venues, est GB, quota decision) and write nothing — **no vendor calls** |
 
-**No broad default run:** with no day args the validator runs the **safe small default sample** (4
-curated days, ≈1 GB) which passes the auto cap. `--dry-run` runs full selection + GB estimation +
+**No broad default run:** with no day args the validator runs the **safe small default sample** (5
+curated days, ≈1.3 GB) which passes the auto cap. `--dry-run` runs full selection + GB estimation +
 calendar crossing with **zero** Lake I/O (like the batch planner's dry-run: everything but the load
 runs). The GB gate reuses the `run_coinbase_quality_map` pattern — `estimate_trades_gb(venues, days,
 per_venue_gb)` + `quota_decision(...)` returning `ok`/`quota_headroom`/`exceeds_auto_cap`; a refused
@@ -501,8 +519,9 @@ Required test cases (TDD — write each failing test first):
   `ingest/validate_trade_feeds.py` (CLI, day selection, calendar crossing, `--dry-run`). Ship the
   full synthetic test suite (§9). **No vendor calls** — `--dry-run` prints the plan; CI runs the pure
   tests only.
-- **Phase 2 — bounded live validation (ask-first).** Run the **safe small default sample** (4 days ×
-  3 venues, ≈1 GB) once against Crypto Lake, write `trade_feed_validation.json`, and record measured
+- **Phase 2 — bounded live validation (ask-first).** Run the **safe small default sample** (5 days ×
+  3 venues, ≈1.3 GB, incl. the `2024-08-06` fill-routing case) once against Crypto Lake, write
+  `trade_feed_validation.json`, and record measured
   per-venue `trades_gb_per_day` to replace the provisional estimates. `AGENTS.md`: live/vendor pulls
   only when the user explicitly asks; document GB used and that the report artifact is git-ignored.
   Optionally widen to the full regime cohort (still bounded, still `--allow-broad`-gated).
