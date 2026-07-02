@@ -16,8 +16,11 @@ See docs/superpowers/plans/2026-07-02-binance-downloader-plan.md.
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+
+MANIFEST_NAME = "_manifest.jsonl"
 
 # ----------------------------------------------------------------------------- registry (Req 1)
 # Scoped OUTPUT feeds. `book` (the 20-level snapshot SEED product) is deliberately NOT here — it is a
@@ -98,3 +101,53 @@ def processed_parquet_path(out_root: str, output: str, exchange: str, symbol: st
     NOT the Lake feed, and with no `lake/` segment (distinct scheme from the raw store)."""
     return os.path.join(out_root, output, f"exchange={exchange}",
                         f"symbol={symbol}", f"dt={day_iso}", "data.parquet")
+
+
+# ----------------------------------------------------------------------------- manifest + resume (Req 3/6)
+def manifest_append(store_root: str, rec: dict) -> None:
+    """Append one JSON record line to `<store_root>/_manifest.jsonl` (append-only resume ledger,
+    one record per written partition; mirrors download_coinapi.py:manifest_append)."""
+    os.makedirs(store_root, exist_ok=True)
+    with open(os.path.join(store_root, MANIFEST_NAME), "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def manifest_index(store_root: str) -> dict[tuple[str, str, str, str], str]:
+    """Map (feed, exchange, symbol, dt) -> latest `status` from the manifest. Last record wins, so a
+    --resume run that re-writes a unit supersedes the earlier record. Blank/malformed lines and
+    records missing the key fields are skipped (a partial write must not crash resume). Empty dict
+    when no manifest exists."""
+    path = os.path.join(store_root, MANIFEST_NAME)
+    idx: dict[tuple[str, str, str, str], str] = {}
+    if not os.path.exists(path):
+        return idx
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                key = (rec["feed"], rec["exchange"], rec["symbol"], rec["dt"])
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+            idx[key] = rec.get("status")
+    return idx
+
+
+def is_done(out_root: str, feed: str, exchange: str, symbol: str, day_iso: str) -> bool:
+    """A partition is done iff its FINAL `data.parquet` exists — a leftover `.tmp` from an
+    interrupted run does NOT count (writes are atomic: stream to .tmp, os.replace on success)."""
+    return os.path.exists(raw_parquet_path(out_root, feed, exchange, symbol, day_iso))
+
+
+def cleanup_tmp(out_root: str) -> int:
+    """Remove stale `*.parquet.tmp` left by an interrupted run (keeps --resume clean; mirrors
+    download_coinapi.py:cleanup_tmp). Returns the number removed."""
+    removed = 0
+    for dirpath, _, files in os.walk(out_root):
+        for fn in files:
+            if fn.endswith(".parquet.tmp"):
+                os.remove(os.path.join(dirpath, fn))
+                removed += 1
+    return removed
