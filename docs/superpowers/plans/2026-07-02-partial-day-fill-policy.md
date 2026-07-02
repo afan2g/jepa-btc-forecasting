@@ -287,8 +287,14 @@ Live/integration (follow-up branches, before unlock):
     build the stitched plan from the real quality-map record, replay CoinAPI over the leading
     window, and run `compare_topk` on the *overlap* region (both vendors, post-boundary) — parity in
     the Lake window must meet the 2025-06-01-class bar; report seam guard exclusions transparently.
+    **Partial 2026-07-02 (PR #22):** the real quality-map record yields the expected
+    `leading_partial_fill` stitched plan on 2025-01-07 (native, `docs/data.md` §5a-QualityMap
+    "Seam-day live validation"); the CoinAPI-overlap `compare_topk` parity in the Lake window remains
+    OPEN — no bounded CoinAPI pull was run/approved.
 17. **2024-08-05 full-day verification**: confirm the crossed-source routing (needs_fill=true,
-    full_day_fill) against its real record; no parity rehabilitation attempted.
+    full_day_fill) against its real record; no parity rehabilitation attempted. **Done 2026-07-02
+    (PR #22):** confirmed against the real record — `needs_fill=true`, `full_day_fill` /
+    `crossed_seed_source`, no rehabilitation (`docs/data.md` §5a-QualityMap).
 18. A trailing-partial and an internal-gap day located from the broad map (if none exist, synthetic
     coverage stands).
 19. Native-engine conformance for the new coverage metrics (present/trusted timestamps, invalid
@@ -413,9 +419,15 @@ with the conservative full-day fallback kept for coverage-less meta. Conformance
 meta) and `tests/test_quality_map.py` (identical stitch plans/quality blocks at the assess level,
 plus the report-cap and fallback paths). See docs/native-recon.md "Coverage metrics".
 
-### Task 4 (follow-up branch): seam-day live validation
+### Task 4 (follow-up branch): seam-day live validation — **partially done 2026-07-02 (PR #22)**
 
-Q8 items 12–13 (bounded single-day pulls only; gate untouched); update `docs/data.md` §10.
+Q8 items 16–17 (bounded single-day pulls only; gate untouched); update `docs/data.md` §10. Landed as
+a docs-only run (`docs/data.md` §5a-QualityMap "Seam-day live validation" + §10): `--engine native`
+quality-map on both real seam days. **Item 17 done** — 2024-08-05 routes `full_day_fill` /
+`crossed_seed_source` against its real record, no rehabilitation. **Item 16 partial** — the real
+2025-01-07 record yields the expected `leading_partial_fill` stitched plan (native coverage metrics),
+but the CoinAPI-overlap `compare_topk` parity in the Lake window is still OPEN (no bounded CoinAPI
+pull run/approved). Backfill still LOCKED.
 
 ### Task 5 (with bar builder): masks + `vendor_source` in the dataset build and manifests
 
