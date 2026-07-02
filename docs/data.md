@@ -626,6 +626,61 @@ the §5a backfill gate (still enforced in `ingest/download_coinapi.py` / `ingest
 Bulk backfill remains gated until the multi-day quality map (and the §10 multi-day reseed validation)
 passes.
 
+**Staging the broad map (batch planner).** `scripts/plan_coinbase_quality_map_batches.py` turns the
+stage-across-quota-windows requirement above into deterministic day batches: it reads
+`data/usable_calendar.json` and selects every day with a PRESENT Lake book — `lake_all_days` (652)
+plus the 5 trade-only fill days (`book: false` = only trades gapped; their book quality still needs
+validating before the backfill gate, and they stay listed separately in the manifest because each
+still needs a CoinAPI trades fill) = **657 days**. It withholds the 47 book-gap fill days (Lake book
+absent — they classify `missing_needs_coinapi` at ~0 GB; map them separately via the runner's
+`--include-gap-days`) and the 26 non-Coinbase `excluded_days_by_reason`, then chunks the rest into
+`--days-file` batches under a configurable GB budget. Default: **250 GB/batch** (current planning
+target — one batch per monthly quota window with headroom under the 300 GB cap) at the
+**conservative 0.48 GB/day** §6 estimate (matches the runner's quota estimator; measured wire rate is
+lower, ~0.26 GB/day). The current calendar plans **2 batches** (520 + 137 days ≈ 249.6 + 65.8 GB,
+~315.4 GB total). Batch sizing is additionally capped at what the runner's own gate can ever accept —
+floor((300 − 10 GB) ÷ 0.48 GB/day) = **604 days/batch** — because the runner re-estimates every
+request at its fixed 0.48 GB/day and refuses anything above quota − headroom *regardless* of
+`--allow-broad`; so planning with a lower measured `--gb-per-day` (e.g. 0.26) still yields batches
+every emitted command can actually run (657 days → 604 + 53). Batch files plus a manifest (day counts,
+per-batch GB estimates, the exact runner command per batch) land under the git-ignored
+`data/tmp/coinbase_quality_map_batches/`; batch files are byte-deterministic for a given
+calendar + budget. **Planning only:** the planner performs no vendor I/O — it does not run Lake
+downloads and does not unlock the §5a backfill gate. Each batch still passes through the runner's own
+`used_data`/headroom quota gate when executed, so run at most one batch per quota window and re-check
+`lakeapi.used_data` first (a ~249.6 GB batch estimate only fits under the 300 GB cap − 10 GB headroom
+if less than ~40 GB is already used that month).
+
+```bash
+# 1) plan the batches (add --dry-run to print the plan without writing files)
+.venv/bin/python scripts/plan_coinbase_quality_map_batches.py \
+  --max-gb-per-batch 250 \
+  --gb-per-day 0.48
+
+# 2) run ONE batch this quota window (the runner re-checks used_data + quota headroom).
+#    Per-batch --out-dir: the runner writes a fixed coinbase_quality_map.json under --out-dir, so
+#    staged batches would otherwise overwrite each other's report; --usable-calendar pins the
+#    exact calendar the plan was built from. Both are already baked into the manifest's commands.
+.venv/bin/python scripts/run_coinbase_quality_map.py \
+  --engine native \
+  --no-cold-ab \
+  --days-file data/tmp/coinbase_quality_map_batches/batch_001_days.txt \
+  --usable-calendar data/usable_calendar.json \
+  --out-dir data/reports/coinbase_quality_map_batches/batch_001 \
+  --allow-broad
+
+# 3) optional: sweep the 47 withheld book-gap days. ACTUAL transfer is ~0 GB (each day raises
+#    NoFilesFound → missing_needs_coinapi), but the runner does NOT pre-discount gap days — it
+#    estimates the request at 0.48 GB/day ((47 gap days + the 2 default validation days) × 0.48
+#    ≈ 23.5 GB), so the sweep needs --allow-broad and quota headroom like any broad request.
+.venv/bin/python scripts/run_coinbase_quality_map.py \
+  --engine native \
+  --no-cold-ab \
+  --include-gap-days 47 \
+  --out-dir data/reports/coinbase_quality_map_batches/gap_days \
+  --allow-broad
+```
+
 **Replay engine (Python reference vs native).** The pure-Python seed/reseed replay
 (`recon/reseed.py`) is the **correctness reference/oracle**, but it is single-process and its per-event
 `max(dict)/min(dict)` best-bid/ask scans make it O(N·L) — the 2026-07-01 Python-only quality-map smoke
@@ -756,6 +811,7 @@ END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap str
 .venv/bin/python ingest/coinapi_flatfiles.py 14                  # CoinAPI flat-files coverage + 8 MB schema
 .venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01   # CoinAPI → Parquet (ONE day)
 .venv/bin/python scripts/run_coinbase_quality_map.py    # multi-day Lake quality map (§5a-QualityMap; quota-aware, prints used_data, refuses broad pulls without --allow-broad) -> data/reports/
+.venv/bin/python scripts/plan_coinbase_quality_map_batches.py   # stage the broad quality map into quota-window day batches (§5a-QualityMap; planning only, NO vendor I/O; --dry-run prints without writing) -> data/tmp/
 # NOTE: multi-day BULK pulls are the backfill and are GATED — download_coinapi.py refuses a >1-day full
 # pull (exit 4) until the §5a parity + reseed gates pass. A single day, or a multi-day range with a small
 # --sample-mb smoke (≤64MB), is allowed; --allow-backfill overrides once the gate passes (Spend Mgmt on, §8).

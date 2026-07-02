@@ -24,3 +24,6 @@ coinapi_rate_limits/
 # parity / recon reports (generated; can be large) — keep out of git
 data/reports/
 data/processed/
+
+# generated planning artifacts (quality-map batch plans etc.) — regenerate, don't commit
+data/tmp/
