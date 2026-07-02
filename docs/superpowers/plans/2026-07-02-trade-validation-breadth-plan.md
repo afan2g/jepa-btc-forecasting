@@ -449,11 +449,22 @@ Synthetic frames come from a module-level helper (not a fixture), matching the r
 ```python
 import numpy as np, pandas as pd
 
+SENTINEL = pd.Timestamp("1970-01-01")          # < 2015-01-01 → treated as null (§4/§5)
+
 def _trades_df(n=1000, start="2025-06-01T00:00:00Z", step_ms=80, *, presorted=True,
-               null_origin=0.0, dup_ids=0, bad_price=False, bad_size=False, empty_hours=()):
-    """Deterministic synthetic Crypto Lake `trades` frame (loaded/renamed columns)."""
+               full_day=False, null_origin=0.0, null_received=0.0, dup_ids=0,
+               bad_price=False, bad_size=False, empty_hours=()):
+    """Deterministic synthetic Crypto Lake `trades` frame (loaded/renamed columns).
+
+    full_day=True spreads the n rows evenly across [00:00, 24:00) (step = 86_400_000 // n ms) so the
+    24-hour missing/sparse-hour metric is exercisable; otherwise rows are step_ms apart from `start`.
+    null_origin / null_received are FRACTIONS of leading rows set to the 1970 sentinel; the same
+    leading rows overlap, so null_origin>0 with null_received>0 makes those rows unrecoverable.
+    dup_ids is the number of EXTRA duplicate trade_ids created (first dup_ids+1 rows share one id).
+    """
     base = pd.Timestamp(start)
-    origin = base + pd.to_timedelta(np.arange(n) * step_ms, unit="ms")
+    step = (86_400_000 // n) if full_day else step_ms
+    origin = base + pd.to_timedelta(np.arange(n) * step, unit="ms")
     if not presorted:                          # Coinbase shape: shuffle the file order
         origin = origin[np.random.RandomState(0).permutation(n)]
     df = pd.DataFrame({
@@ -464,10 +475,11 @@ def _trades_df(n=1000, start="2025-06-01T00:00:00Z", step_ms=80, *, presorted=Tr
         "side": np.where(np.arange(n) % 2, "buy", "sell"),
         "trade_id": np.arange(n, dtype="int64"),
     })
-    if null_origin: df.loc[df.index[: int(n*null_origin)], "origin_time"] = pd.Timestamp("1970-01-01")
-    if dup_ids:     df.loc[df.index[:dup_ids], "trade_id"] = df["trade_id"].iloc[0]
-    if bad_price:   df.loc[df.index[0], "price"] = 0.0
-    if bad_size:    df.loc[df.index[0], "quantity"] = -1.0
+    if null_origin:   df.loc[df.index[: int(n*null_origin)], "origin_time"] = SENTINEL
+    if null_received: df.loc[df.index[: int(n*null_received)], "received_time"] = SENTINEL
+    if dup_ids:       df.loc[df.index[: dup_ids + 1], "trade_id"] = df["trade_id"].iloc[0]
+    if bad_price:     df.loc[df.index[0], "price"] = 0.0
+    if bad_size:      df.loc[df.index[0], "quantity"] = -1.0
     for h in empty_hours: df = df[df["origin_time"].dt.hour != h]
     return df.reset_index(drop=True)
 ```
@@ -476,17 +488,28 @@ Required test cases (TDD — write each failing test first):
 
 1. **Missing timestamp field** — a frame with no `origin_time`/`timestamp` column →
    `origin_time_column_missing`, status `fail`.
-2. **`origin_time` null fallback** — `null_origin=0.02` with `received_time` present → engine clock
-   uses `received_time` for those rows, `received_time_fallback_used`, status `warn`; with
-   `received_time` also null → `received_time_fallback_unavailable`, status `fail`.
+2. **`origin_time` null fallback (three branches, matching §5 severity).**
+   - **Sub-threshold warn:** `null_origin=0.005` (0.5% ≤ `origin_time_null_max`) with `received_time`
+     present → engine clock uses `received_time` for those rows, `monotonic_after_sort=True`,
+     `received_time_fallback_used`, status `warn`.
+   - **Super-threshold fail:** `null_origin=0.02` (2% > 1%) with `received_time` present → the
+     substitution still happens per-row, but too much of the day is off exchange time →
+     `origin_time_null_fraction_high`, status `fail` (guards against the test accepting a >1%
+     off-exchange-time day and weakening the gate).
+   - **Unrecoverable fail:** `null_origin=0.005, null_received=0.005` (the same leading rows null in
+     both) → `received_time_fallback_unavailable`, status `fail`, at any fraction.
 3. **Non-monotonic → repaired by sort** — `presorted=False` frame becomes `monotonic_after_sort=True`
    → `pass` (proves the Coinbase sort works); a frame with a `NaT` engine clock that the sort cannot
    repair → `nonmonotonic_after_sort`, `fail`.
-4. **Duplicate trade IDs** — `dup_ids=5` → `dup_trade_id_count == 5`, `duplicate_trade_id` warn.
+4. **Duplicate trade IDs** — `dup_ids=5` (the helper makes the first 6 rows share one id → exactly 5
+   extra duplicates) → `dup_trade_id_count == 5`, `duplicate_trade_id` warn.
 5. **Invalid price / size** — `bad_price=True` → `price_out_of_range` fail; `bad_size=True` →
    `size_nonpositive` fail; a zero-size row → `size_nonpositive` fail.
-6. **Sparse / missing hour** — `empty_hours=(3,4)` → `missing_hour_count == 2`, `missing_hour` warn;
-   a thinned hour → `sparse_hour`.
+6. **Sparse / missing hour** — build a **full-day** frame (`_trades_df(n=2400, full_day=True)` →
+   ~100 rows in each of the 24 UTC hours); `empty_hours=(3,4)` → `missing_hour_count == 2`,
+   `missing_hour` warn; thinning one hour below `sparse_hour_min_rows` (e.g. drop all but 30 of its
+   rows) → `sparse_hour`. (The default 80 ms frame spans only ~80 s of hour 0 and cannot exercise a
+   24-hour metric.)
 7. **Duplicate-timestamp cluster** — many rows sharing one `origin_time` above `dup_ts_cluster_warn`
    → `duplicate_timestamp_cluster` warn; a small burst does not trip it.
 8. **Inter-arrival gap** — inject a 200 s gap → `interarrival_max_s ≈ 200`, `interarrival_gap_excess`
