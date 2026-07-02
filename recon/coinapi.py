@@ -21,16 +21,17 @@ Ordering rule (mandatory — docs/data.md §4.3):
     non-decreasing watermark over the label time drives sampling, so a stray backward
     time stamp can never sort the snapshot to the end of the day.
 
-⚠️ VENDOR-SEMANTICS — `MATCH`=`decrement` VERIFIED for Coinbase; `SUB` still UNVERIFIED (§5a).
+⚠️ VENDOR-SEMANTICS — `MATCH`=`decrement` AND `SUB`=`decrement` both VERIFIED for Coinbase (§5a).
 `update_type` is an OPEN string set {SNAPSHOT, ADD, DELETE, MATCH, SET, SUB, …} (store as
 string, never an enum). Their book meaning (CoinAPI L3): SNAPSHOT seeds the book, ADD posts
 a resting order, DELETE cancels it, SET sets its state, SUB is a partial fill (size reduced),
 MATCH is an execution against it. The *size convention* of the reducing events is selectable;
 the 2025-06-01 live gate RESOLVED `MATCH`=`decrement` for Coinbase `limitbook_full` (`entry_sx`
 is the traded amount; under `absolute`, filled MATCH orders left stale residue and crossed the
-book ~100% — docs/data.md §5a). `SUB` is **NOT yet verified for Coinbase** — that day had 0 `SUB`
-events, so `decrement` applies to `SUB` by family analogy only until a day with real partial-fill
-`SUB` rows confirms it (a multi-day quality-map / parity follow-up, docs/data.md §10):
+book ~100% — docs/data.md §5a). `SUB`=`decrement` was VERIFIED 2026-07-01 on the first live days
+with real `SUB` rows (2026-04-01 / 2024-12-04, 168k / 47k events): per-order conservation
+`ADD = ΣSUB + ΣMATCH + DELETE` holds exactly, and non-decreasing within-order SUB sequences
+falsify an absolute-remainder reading (docs/data.md §5a-QualityMap "CoinAPI cross-validation"):
 
   * `size_policy="absolute"` (this function's DEFAULT, kept for OTHER venues and the A/B): every
     row reports the order's resulting resting size at `entry_px` (size 0 ⇒ remove). Self-consistent
@@ -150,7 +151,7 @@ class L3Book:
                 else:
                     self.q["missing_order"] += 1  # reducing op on unseen order: skip
             else:  # decrement: entry_sx = amount removed (MATCH verified for Coinbase 2025-06-01;
-                   # SUB decremented by family analogy only — unverified until a real SUB day, §5a/§10)
+                   # SUB verified 2026-07-01 by per-order conservation — §5a / §5a-QualityMap)
                 self._decrement_order(oid, size)
         else:
             self.q["unknown_total"] += 1

@@ -297,6 +297,69 @@ def test_quota_gate_boundary_at_safe_remaining_is_allowed():
     assert d["ok"] is True
 
 
+# --------------------------------------------------------------------------- coinapi fill mapping
+def test_fill_decision_crossed_seed_source_inconclusive_needs_fill():
+    # The 2026-07-01 cross-validation policy: inconclusive VIA the crossed-seed-source bar → fill
+    # (provisional, 2 of 4 days — docs/data.md §5a-QualityMap "CoinAPI cross-validation").
+    d = qm.coinapi_fill_decision(qm.INCONCLUSIVE,
+                                 [qm.SEED_SOURCE_UNRELIABLE, "seed_source_crossed_frac=0.3751>0.05"])
+    assert d["needs_fill"] is True
+    assert d["why"] == "crossed_seed_source_cross_validated_2026-07-01"
+
+
+def test_fill_decision_other_inconclusive_is_no_verdict_not_fill_and_not_clean():
+    # No-seed / rejected-seed / load-failure inconclusives have NO measured fill policy: they must
+    # surface as needs_fill=None (unresolved), never silently drop out of a fill manifest.
+    for reasons in (["no_seed_snapshots"], ["seed_rejected:crossed"], ["lake_load_failed:boom"], None):
+        d = qm.coinapi_fill_decision(qm.INCONCLUSIVE, reasons)
+        assert d["needs_fill"] is None
+        assert d["why"] == "no_verdict"
+
+
+def test_fill_decision_maps_the_remaining_classes():
+    assert qm.coinapi_fill_decision(qm.MISSING_NEEDS_COINAPI,
+                                    ["lake_book_delta_v2_absent"])["needs_fill"] is True
+    assert qm.coinapi_fill_decision(qm.LAKE_PRESENT_DEGRADED,
+                                    ["seed_accepted", "missing_book_fraction=0.6146>0.02"]
+                                    )["needs_fill"] is True
+    assert qm.coinapi_fill_decision(qm.LAKE_USABLE, ["seed_accepted"])["needs_fill"] is False
+    assert qm.coinapi_fill_decision(qm.EXCLUDED, ["binance_gap"])["needs_fill"] is None
+
+
+def test_classify_day_emits_the_shared_seed_source_reason_constant():
+    # classify_day and coinapi_fill_decision must agree on the reason code — via the shared constant.
+    meta = {"seed_accepted": True, "seed_reason": "ok", "thin_depth_fraction": 0.0,
+            "snapshot_reason_codes": {"ok": 68, "crossed": 32}}   # 32% crossed source
+    lake_q = {"crossed_rate": 0.0, "missing_book_fraction": 0.0}
+    cls, reasons = qm.classify_day(have_lake=True, meta=meta, lake_q=lake_q,
+                                   thresholds=qm.THRESHOLDS)
+    assert cls == qm.INCONCLUSIVE and qm.SEED_SOURCE_UNRELIABLE in reasons
+    assert qm.coinapi_fill_decision(cls, reasons)["needs_fill"] is True
+
+
+def test_build_report_stamps_coinapi_fill_per_day_and_summary():
+    days = [
+        {"day": "2025-06-01", "classification": qm.LAKE_USABLE, "reasons": ["seed_accepted"]},
+        {"day": "2026-04-01", "classification": qm.INCONCLUSIVE,
+         "reasons": [qm.SEED_SOURCE_UNRELIABLE, "seed_source_crossed_frac=0.3751>0.05"]},
+        {"day": "2025-03-03", "classification": qm.INCONCLUSIVE, "reasons": ["no_seed_snapshots"]},
+        {"day": "2024-12-05", "classification": qm.MISSING_NEEDS_COINAPI,
+         "reasons": ["lake_book_delta_v2_absent"]},
+    ]
+    rep = qm.build_report(days, meta={"k": 10})
+    stamped = {r["day"]: r["coinapi_fill"] for r in rep["days"]}
+    assert stamped["2026-04-01"]["needs_fill"] is True   # crossed-seed-source inconclusive → fill
+    assert stamped["2025-03-03"]["needs_fill"] is None   # other inconclusive → unresolved
+    assert stamped["2024-12-05"]["needs_fill"] is True
+    assert stamped["2025-06-01"]["needs_fill"] is False
+    fill = rep["summary"]["coinapi_fill"]
+    assert fill["needs_fill"] == ["2026-04-01", "2024-12-05"]
+    assert fill["no_verdict"] == ["2025-03-03"]
+    assert fill["no_fill"] == ["2025-06-01"]
+    # input records are not mutated (build_report stamps copies)
+    assert "coinapi_fill" not in days[0]
+
+
 # --------------------------------------------------------------------------- report aggregation + JSON
 def test_build_report_counts_each_classification():
     days = [

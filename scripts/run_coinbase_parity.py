@@ -436,8 +436,10 @@ def parse_args(argv=None):
                     help="CoinAPI SUB/MATCH size convention. Default 'decrement': the 2025-06-01 "
                          "live gate proved MATCH.entry_sx is the traded amount for Coinbase "
                          "limitbook_full, so 'absolute' leaves filled orders as stale residue and "
-                         "crosses the book ~100%% (docs/data.md §5a). 'absolute' kept as the A/B "
-                         "alternative for other venues (see recon/coinapi.py).")
+                         "crosses the book ~100%% (docs/data.md §5a); SUB=decrement verified "
+                         "2026-07-01 by per-order conservation on real SUB days (§5a-QualityMap). "
+                         "'absolute' kept as the A/B alternative for other venues "
+                         "(see recon/coinapi.py).")
     ap.add_argument("--on-unknown", choices=("count", "raise"), default="count",
                     help="policy for unknown CoinAPI update_type (default count+skip)")
     ap.add_argument("--band-bps", type=float, default=0.0, help="no-trade band for label agreement (bps)")

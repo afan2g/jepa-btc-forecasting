@@ -75,6 +75,9 @@ MISSING_NEEDS_COINAPI = "missing_needs_coinapi"
 EXCLUDED = "excluded"
 INCONCLUSIVE = "inconclusive"
 CLASSES = (LAKE_USABLE, LAKE_PRESENT_DEGRADED, MISSING_NEEDS_COINAPI, EXCLUDED, INCONCLUSIVE)
+# The reason code that routes a day inconclusive because its accepted seed's `book` SOURCE is itself
+# crossed above the bar — the case the 2026-07-01 CoinAPI cross-validation resolved to "fill".
+SEED_SOURCE_UNRELIABLE = "seed_accepted_but_source_unreliable"
 
 # ----------------------------------------------------------------------------- quota constants
 QUOTA_GB = 300.0           # Crypto Lake individual-plan monthly download cap (docs/data.md §2.1/§8)
@@ -197,7 +200,7 @@ def classify_day(*, have_lake: bool, meta: dict | None, lake_q: dict | None,
     n_snap = sum(codes.values())
     seed_crossed_frac = (codes.get("crossed", 0) / n_snap) if n_snap else 0.0
     if seed_crossed_frac > thresholds.seed_crossed_frac_max:
-        return INCONCLUSIVE, ["seed_accepted_but_source_unreliable",
+        return INCONCLUSIVE, [SEED_SOURCE_UNRELIABLE,
                               f"seed_source_crossed_frac={seed_crossed_frac:.4f}>"
                               f"{thresholds.seed_crossed_frac_max}"]
     over: list[str] = []
@@ -211,6 +214,34 @@ def classify_day(*, have_lake: bool, meta: dict | None, lake_q: dict | None,
         return LAKE_PRESENT_DEGRADED, ["seed_accepted", *over]
     return LAKE_USABLE, ["seed_accepted", f"crossed_rate_after={crossed:.4f}",
                          f"missing_book_fraction={missing:.4f}", f"thin_depth_fraction={thin:.4f}"]
+
+
+def coinapi_fill_decision(classification: str, reasons) -> dict:
+    """Machine-readable CoinAPI-fill mapping for a day's `(classification, reasons)` — the contract
+    fill manifests consume, so the doc-level fill policy never needs manual reinterpretation of
+    reason strings (docs/data.md §5a-QualityMap "CoinAPI cross-validation").
+
+    Returns `{"needs_fill": True|False|None, "why": <code>}`. `needs_fill=None` means NO VERDICT —
+    such days are unresolved, not clean; a fill manifest must surface them, never silently drop them.
+
+    `inconclusive` days carrying `seed_accepted_but_source_unreliable` map to `needs_fill=True` per
+    the 2026-07-01 CoinAPI cross-validation: on 2 of the 4 such days (the extremes of the observed
+    8.4–37.5% severity range) parity fails even outside the excluded crossed windows, so
+    crossed-seed-source days are fill days, not rehabilitable from Lake alone. That policy is
+    PROVISIONAL (2 of 4 days measured) — deliberately encoded here rather than by reclassifying the
+    day, so `inconclusive` keeps meaning "no verdict from Lake alone"."""
+    rs = set(reasons or ())
+    if classification == MISSING_NEEDS_COINAPI:
+        return {"needs_fill": True, "why": "lake_book_delta_v2_absent"}
+    if classification == LAKE_PRESENT_DEGRADED:
+        return {"needs_fill": True, "why": "quality_over_usable_bar"}
+    if classification == INCONCLUSIVE and SEED_SOURCE_UNRELIABLE in rs:
+        return {"needs_fill": True, "why": "crossed_seed_source_cross_validated_2026-07-01"}
+    if classification == LAKE_USABLE:
+        return {"needs_fill": False, "why": "lake_usable"}
+    if classification == EXCLUDED:
+        return {"needs_fill": None, "why": "excluded_not_in_scope"}
+    return {"needs_fill": None, "why": "no_verdict"}
 
 
 def _empty_seed_block(snapshots_present, candidates) -> dict:
@@ -373,14 +404,23 @@ def inconclusive_load_failure(day: dt.date, err: str, *, k: int = 10, grid_ms: i
 
 
 def build_report(per_day_results, *, meta: dict) -> dict:
-    """Aggregate per-day results into the report: stable per-class counts + day lists + the rows."""
+    """Aggregate per-day results into the report: stable per-class counts + day lists + the rows.
+    Every per-day record is stamped with its machine-readable `coinapi_fill` decision
+    (`coinapi_fill_decision`), and the summary carries the fill day-lists — the contract a fill
+    manifest reads, so no consumer re-parses reason strings."""
+    days = [{**r, "coinapi_fill": coinapi_fill_decision(r["classification"], r.get("reasons"))}
+            for r in per_day_results]
     by_class: dict[str, list] = {c: [] for c in CLASSES}
-    for r in per_day_results:
+    fill: dict[str, list] = {"needs_fill": [], "no_fill": [], "no_verdict": []}
+    for r in days:
         by_class.setdefault(r["classification"], []).append(r["day"])
+        nf = r["coinapi_fill"]["needs_fill"]
+        fill["needs_fill" if nf else ("no_fill" if nf is False else "no_verdict")].append(r["day"])
     counts = {c: len(by_class[c]) for c in by_class}
     return {"meta": meta,
-            "summary": {"n_days": len(per_day_results), "counts": counts, "by_class": by_class},
-            "days": list(per_day_results)}
+            "summary": {"n_days": len(days), "counts": counts, "by_class": by_class,
+                        "coinapi_fill": fill},
+            "days": days}
 
 
 def write_report(report: dict, path: str) -> str:

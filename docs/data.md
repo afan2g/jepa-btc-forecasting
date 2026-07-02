@@ -417,6 +417,11 @@ be trusted). The classifier keys off missing `book_delta_v2`, no/rejected seed s
 seed-source fraction, the crossed rate after reseed, the missing-book fraction, and thin top-K depth; the
 per-day record additionally **records** (it does not classify on) whether CoinAPI parity — a local
 parquet or a calendar-verified flat-files `book` — was available, for downstream fill planning.
+Each report record is also stamped with a **machine-readable `coinapi_fill` decision**
+(`{"needs_fill": true|false|null, "why": …}`, summary day-lists under `summary.coinapi_fill`) so fill
+manifests never re-parse reason strings: `missing_needs_coinapi`/`lake_present_degraded` → fill;
+`inconclusive` via the crossed-seed-source bar → fill (the provisional 2026-07-01 cross-validation
+policy, see below); other `inconclusive` → `null` (unresolved — must be surfaced, never dropped).
 
 **Quota-aware (docs §2.1/§6/§8).** It prints `lakeapi.used_data(sess)` before/after, estimates the
 request from measured per-day sizes (`book_delta_v2` ~0.30 GB/day from §6; the `book` 20-level snapshot
@@ -449,6 +454,7 @@ One per-day record shape:
  "quality": {"crossed_rate_after": 0.00015, "crossed_rate_cold": 0.6704,
              "missing_book_fraction": 0.0, "thin_depth_fraction": 0.0},
  "coinapi": {"parquet_local": false, "fillable": null},
+ "coinapi_fill": {"needs_fill": false, "why": "lake_usable"},
  "calendar": {"in_usable_days": true, "is_coinbase_fill_day": false, "excluded_reason": null}}
 ```
 
@@ -588,7 +594,11 @@ Findings:
    trigger — treat `inconclusive` crossed-seed-source days like `lake_present_degraded` (CoinAPI fill);
    do not attempt parity rehabilitation per day. Tested at both extremes of the observed range and
    both fail the same way; untested: 2025-10-15 (28.33%) and 2024-08-05 (28.78% — also a partial/seam
-   day, deferred until the partial-fill policy is in scope).
+   day, deferred until the partial-fill policy is in scope). The mapping is **encoded in the report
+   contract** (`coinapi_fill_decision` in `scripts/run_coinbase_quality_map.py`): report records with
+   the `seed_accepted_but_source_unreliable` reason carry `coinapi_fill.needs_fill=true`, so fill
+   manifests inherit the policy without reinterpreting doc prose; the day's *classification* stays
+   `inconclusive` (no verdict from Lake alone) on purpose.
 4. **Bonus — CoinAPI `SUB` size convention VERIFIED = `decrement`** (previously analogy-only, §5a):
    these are the first live days with real `SUB` rows, and the CoinAPI book is 0% crossed under
    `decrement` on both. An ad-hoc per-order conservation trace on the local parquet (orders born by
@@ -652,7 +662,9 @@ L3 csv.gz is ~8× Crypto Lake's L2 parquet — another reason the hybrid keeps C
 | 24 mo | 858 GB | ~3 monthly caps exactly; use **3-4** windows with headroom or upgrade | ~120 GB | **~0.98 TB** |
 
 (Backfilled L3 is transient — it aggregates to top-K L2 at ~10 GB after recon. Fill-day count scales
-with the chosen span; ~52 is the full 2-yr usable-calendar set, §5b.)
+with the chosen span; ~52 is the full 2-yr usable-calendar set, §5b — a **calendar-gap-only lower
+bound**: the 2026-07-01 cross-validation adds crossed-seed-source and seam present-days to the fill
+scope, with the full count pending the production quality map — §5a-QualityMap.)
 
 **Crypto Lake quota constraint:** the measured all-feed Lake footprint is ~1.17 GB/day, so the
 300 GB/month individual-plan cap covers at most ~256 all-feed days before any safety margin. Small
@@ -701,7 +713,7 @@ capture is in Tokyo), never a persistent cluster.
 | Item | Cost |
 |---|---|
 | Crypto Lake subscription | ~$64/mo individual plan, **300 GB/month download limit** |
-| CoinAPI Coinbase backfill (§5b, all verified), book 47 d / trades 52 d | **~$92** (book 84.6 GB≈$85 + trades 2.6 GB≈$8) at $1/$3 per GB; −$25 ≈ **$67 OOP** |
+| CoinAPI Coinbase backfill (§5b, all verified), book 47 d / trades 52 d — **calendar-gap-only lower bound** (crossed-seed + seam days add to it, §5a-QualityMap) | **~$92** (book 84.6 GB≈$85 + trades 2.6 GB≈$8) at $1/$3 per GB; −$25 ≈ **$67 OOP** |
 | ↳ if only the single 33-day hole is filled | ~$82 |
 | Compute | $0 (local); optional one-off same-region (**eu-west-1**) spot for recon |
 | Storage | $0 (existing 2 TB SSD) |
@@ -713,6 +725,10 @@ capture is in Tokyo), never a persistent cluster.
 - Backfill GB is **measured** (split by product, summed from `data/usable_calendar.json`): 47 book days
   = **84.6 GB** L3 (~$85), 52 trade days = **2.6 GB** (~$8 at $3/GB) → **~$92**, mostly the Dec'24 cluster.
   If the WebSocket "Tier-1" tiered GB discount applies to flat files (unconfirmed), it'd be **less**.
+  **This is a calendar-gap-only lower bound**: the 2026-07-01 cross-validation makes crossed-seed-source
+  present-days CoinAPI-fill days too (2 confirmed so far at ~2–2.4 GB L3/day, e.g. 2026-04-01 = 2.37 GB),
+  and seam days need partial-day fills — the full fill scope lands with the production quality map
+  (§5a-QualityMap "CoinAPI cross-validation").
 - **⚠️ Enable CoinAPI Spend Management (daily cap + hard-stop) before running the backfill or any full
   L3 pull** — it's OFF by default (§2.2). Set a daily budget, watch Billing → Overview and Usage
   Explorer. Credits never expire, so top up only what a bounded run needs.
