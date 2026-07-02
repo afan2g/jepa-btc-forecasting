@@ -36,6 +36,9 @@ LAKE = "lake"
 COINAPI = "coinapi"
 EXCLUDED = "excluded"  # covered by neither vendor for training (e.g. a tiny warmup window)
 SOURCES = (LAKE, COINAPI, EXCLUDED)
+# Not a segment source: returned by window_vendor_sources for the part of a window that reaches
+# OUTSIDE the day's segment partition (e.g. a day-edge label whose target lands past day end).
+UNCOVERED = "uncovered"
 
 LAKE_ONLY = "lake_only"
 FULL_DAY_FILL = "full_day_fill"
@@ -388,8 +391,16 @@ def vendor_source_at(sample_ts, segments) -> list[str]:
 def window_vendor_sources(start_ts: int, end_ts: int, segments) -> set[str]:
     """The `feature_vendor_source`/`label_vendor_source` set: sources of every segment the closed
     window [start_ts, end_ts] touches. A training row requires a singleton {lake} or {coinapi}
-    for both of its windows (plan doc Q6); anything else — mixed vendors or any `excluded`
-    coverage — is masked."""
+    for both of its windows (plan doc Q6); anything else — mixed vendors, any `excluded`
+    coverage, or UNCOVERED — is masked.
+
+    A window reaching outside the partition `[segments[0].start_ts, segments[-1].end_ts)`
+    additionally carries UNCOVERED: its overhang has no vendor at all, so a day-edge label whose
+    target lands past day end must never read as a clean single-vendor window. Cross-midnight
+    windows are resolvable only against the adjacent day's plan (bar-builder follow-up)."""
     if end_ts < start_ts:
         raise ValueError("window end_ts must be >= start_ts")
-    return {s.source for s in segments if s.start_ts <= end_ts and start_ts < s.end_ts}
+    out = {s.source for s in segments if s.start_ts <= end_ts and start_ts < s.end_ts}
+    if start_ts < segments[0].start_ts or end_ts >= segments[-1].end_ts:
+        out.add(UNCOVERED)
+    return out

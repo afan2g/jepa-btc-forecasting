@@ -26,6 +26,7 @@ from recon.stitch_policy import (
     LEADING_PARTIAL_FILL,
     MIXED_PARTIAL_FILL,
     TRAILING_PARTIAL_FILL,
+    UNCOVERED,
     SeamPolicy,
     feature_valid_mask,
     label_valid_mask,
@@ -382,6 +383,19 @@ def test_window_vendor_sources_pins_the_single_vendor_rule():
     assert window_vendor_sources(1 * S, 3 * S, segs) == {EXCLUDED, LAKE}
     # Touching a segment's half-open end does NOT pull in the next segment.
     assert window_vendor_sources(100 * S, 999 * S, segs) == {LAKE}
+
+
+def test_window_vendor_sources_marks_windows_extending_past_the_partition():
+    # Codex P2 (PR #17): a day-edge label whose target lands beyond the planned day must not
+    # read as a clean single-vendor window — the uncovered part has no vendor at all.
+    segs = _plan(np.ones(7200, dtype=bool), seed_ts=0).segments  # excluded|lake over [0, 7200 s)
+    assert window_vendor_sources(7150 * S, 7210 * S, segs) == {LAKE, UNCOVERED}
+    # A window ending on the last covered sample stays clean...
+    assert window_vendor_sources(7100 * S, 7199 * S, segs) == {LAKE}
+    # ...but end_ts == day_end is the first ns OUTSIDE the half-open partition.
+    assert UNCOVERED in window_vendor_sources(7100 * S, 7200 * S, segs)
+    # Feature lookbacks reaching before day open are uncovered on the left, symmetrically.
+    assert window_vendor_sources(-60 * S, 100 * S, segs) == {EXCLUDED, LAKE, UNCOVERED}
 
 
 # -------------------------------------------------------------- defaults and threshold semantics

@@ -185,9 +185,12 @@ A training row is usable only if **both** of its windows are single-vendor and g
 
 Helpers: the rule is the composition of two checks — `window_vendor_sources(start, end, segments)`
 must be a singleton `{lake}` or `{coinapi}` (single-vendor coverage; also rejects windows touching
-`excluded` segments), AND `label_valid_mask` / `feature_valid_mask` must pass (seam-crossing +
-guard geometry). Neither alone suffices: a window inside an `excluded` segment contains no seam,
-and a guard-clean window can still touch two vendors' segments only via a seam (caught by both).
+`excluded` segments, and windows reaching outside the day's partition carry `uncovered` — a
+day-edge label whose target lands past day end never reads as clean; cross-midnight windows
+resolve only against the adjacent day's plan, a bar-builder follow-up), AND `label_valid_mask` /
+`feature_valid_mask` must pass (seam-crossing + guard geometry). Neither alone suffices: a window
+inside an `excluded` segment contains no seam, and a guard-clean window can still touch two
+vendors' segments only via a seam (caught by both).
 Manifest integration:
 
 - **Now (zero schema change)**: the build-level `sources` list in the feature manifest accepts dict
@@ -275,7 +278,8 @@ Synthetic (this PR, `tests/test_stitch_policy.py` — no vendor I/O):
     exactly at `span_invalid_max` stays partial (strict `>`, the quality-map inclusive-usable
     convention); `DEFAULT_SEAM_POLICY` pinned to the defaults table.
 15. Input validation: irregular grid, non-positive `grid_ns` (incl. the n==1 case), and
-    `present`-mask length mismatch all raise; `window_vendor_sources` singleton rule pinned.
+    `present`-mask length mismatch all raise; `window_vendor_sources` singleton rule pinned,
+    including the `uncovered` marker for windows extending past the day partition (Codex P2).
 
 Live/integration (follow-up branches, before unlock):
 
