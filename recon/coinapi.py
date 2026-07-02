@@ -12,7 +12,14 @@ shares the SAME `sample_topk_as_of` sampler so the two vendors are sampled ident
 Ordering rule (mandatory — docs/data.md §4.3):
   * Replay strictly in **`seq` order** (file/row order). `seq` is canonical; there is no
     `sequence_number`. We process rows in the order the chunks deliver them and only *check*
-    that `seq` is non-decreasing (a `seq_disorder` counter), never re-sort by it.
+    `seq`, never re-sort by it: a strict regression (`s < last`) counts `seq_disorder`, a
+    duplicate (`s == last`) counts `seq_duplicate`.
+  * **Within-timestamp ordering**: many L3 events share one `time_exchange_ns` (an ADD and
+    its immediate MATCH routinely carry the same stamp). Ties break by ORIGINAL ROW INDEX —
+    i.e. file order, which the downloader records as `seq` — a stable no-op because rows are
+    never re-sorted in the first place. `order_id` is NEVER an ordering key (lexicographic
+    UUID order is meaningless). Pinned by tests/test_coinapi_within_timestamp_ordering.py;
+    policy note: docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md.
   * The opening **SNAPSHOT** block (lowest `seq`) is the initial book state for the
     partition day and is applied BEFORE every non-snapshot event, even though its
     `time_exchange` carries the prior-day close (e.g. 23:59:59.999). We therefore clamp the
@@ -170,8 +177,11 @@ class L3Book:
 def _iter_actions(chunks, book: L3Book, day_open_ns: int):
     """Yield (label_ns, update_type, side, price, size, order_id) in file/`seq` order,
     with SNAPSHOT label clamped to the partition-day open and a non-decreasing watermark on
-    the label time. Vectorizes the per-row time/side math per chunk; the apply loop stays
-    sequential (the book is a state machine). Updates `book.q` seq/time-order counters."""
+    the label time. Rows are NEVER re-sorted — same-timestamp (and even same-`seq`) events
+    keep their original row order across chunk boundaries, so within-timestamp ordering is
+    deterministic by construction. Vectorizes the per-row time/side math per chunk; the
+    apply loop stays sequential (the book is a state machine). Updates `book.q` seq/time-
+    order counters (`seq_disorder` = strict `seq` regression, `seq_duplicate` = tie)."""
     cur = None
     last_seq = None
     for df in chunks:
@@ -189,8 +199,11 @@ def _iter_actions(chunks, book: L3Book, day_open_ns: int):
         sides = np.where(isb, "bid", "ask")
         for i in range(len(df)):
             s = int(seq[i])
-            if last_seq is not None and s <= last_seq:
-                book.q["seq_disorder"] += 1
+            if last_seq is not None:
+                if s < last_seq:
+                    book.q["seq_disorder"] += 1   # strict regression: stream was re-sorted upstream
+                elif s == last_seq:
+                    book.q["seq_duplicate"] += 1  # tie: broken by row order (stable), not an error
             last_seq = s
             lab = int(labels[i])
             if cur is not None and lab < cur:
@@ -210,8 +223,8 @@ def reconstruct_coinapi_l2_at_samples(
       * `frame`: one row per sample, columns `sample_ts, mid, microprice,
         bid_i_price/size, ask_i_price/size` — identical schema to the Lake reconstructor.
       * `quality`: per-event counters (snapshot_rows/add/set/sub/match/delete, missing_order,
-        unknown:*, seq_disorder, time_regressions, …) plus sample-level crossed-book and
-        missing-book rates measured on `frame`.
+        unknown:*, seq_disorder, seq_duplicate, time_regressions, …) plus sample-level
+        crossed-book and missing-book rates measured on `frame`.
 
     `chunks` is an iterable of downloader-schema DataFrames in `seq` order (stream Parquet
     row-groups for memory safety), or a single DataFrame. `day` is the partition date
