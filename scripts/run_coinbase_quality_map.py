@@ -17,7 +17,8 @@ This is a VALIDATION / quality-map tool, NOT a backfill:
     sizes, and REFUSES a broad pull unless `--allow-broad` is passed — and always refuses a pull that
     would breach the monthly quota headroom, override or not.
   * Default day set is small (2025-06-01 = the validated clean day → expected `lake_usable`;
-    2026-04-01 = the crossed-`book`-product day, ~31.75% of `book` seed candidates crossed → its seed
+    2026-04-01 = the crossed-`book`-product day, `seed_source_crossed_frac`=0.3751 of the thinned
+    seed candidates (31.75% of raw product rows) → its seed
     SOURCE is too unreliable to trust → expected `inconclusive`). Add more with `--days`,
     `--days-file`, or `--include-gap-days N` (documented gap/seam days from the usable calendar). It
     writes the full report under `data/reports/` (git-ignored).
@@ -30,8 +31,8 @@ Classifications (explicit thresholds, emitted in the report JSON — see `Thresh
                             skipped before any Lake load (saves quota).
   * inconclusive          — cannot validate the reconstruction: no/all-rejected seed, OR an accepted
                             seed whose `book` SOURCE is itself substantially crossed (e.g. 2026-04-01
-                            ~31.75%), OR the Lake load failed. Needs a better seed source or CoinAPI
-                            fill before a verdict.
+                            `seed_source_crossed_frac`=0.3751), OR the Lake load failed. Needs a
+                            better seed source or CoinAPI fill before a verdict.
 
 Usage:
   .venv/bin/python scripts/run_coinbase_quality_map.py                       # default 2-day set
@@ -94,7 +95,7 @@ LAKE_GB_PER_DAY = {"book_delta_v2": 0.30, "book": 0.18}
 LAKE_PRODUCTS = ("book_delta_v2", "book")
 
 # Small default validation set: 2025-06-01 = the validated clean day (→ lake_usable); 2026-04-01 =
-# the crossed-`book`-product day (~31.75% crossed seed source → inconclusive). docs §5a-QualityMap.
+# the crossed-`book`-product day (seed_source_crossed_frac=0.3751 → inconclusive). docs §5a-QualityMap.
 DEFAULT_DAYS = ("2025-06-01", "2026-04-01")
 
 
@@ -108,7 +109,7 @@ class Thresholds:
     missing_usable_max: float = 0.02    # ≤2% of grid samples with no top-of-book on a side
     thin_usable_max: float = 0.10       # ≤10% of grid samples present+uncrossed but thin (< k/side)
     seed_crossed_frac_max: float = 0.05  # ≤5% of `book` seed candidates may be crossed; above this the
-                                         # seed SOURCE is unreliable → inconclusive (2026-04-01: 31.75%)
+                                         # seed SOURCE is unreliable → inconclusive (2026-04-01: 0.3751)
 
     def as_dict(self) -> dict:
         return {"crossed_usable_max": self.crossed_usable_max,
@@ -182,7 +183,7 @@ def classify_day(*, have_lake: bool, meta: dict | None, lake_q: dict | None,
     A confident `lake_usable`/`lake_present_degraded` verdict requires a VALIDATED accepted seed AND
     a trustworthy seed SOURCE — without an accepted seed (none/all rejected), a cold-started book can
     look uncrossed for the wrong reason; and even with an accepted seed, if the `book` seed source is
-    itself substantially crossed (e.g. 2026-04-01: 31.75%), seeds during crossed episodes are
+    itself substantially crossed (e.g. 2026-04-01: 0.3751 of candidates), seeds during crossed episodes are
     unreliable and reseeds get blocked, so a clean-looking reconstruction can't be trusted. Both →
     `inconclusive` (the day needs a better seed source or CoinAPI fill), not silently usable."""
     if not have_lake:
@@ -195,7 +196,8 @@ def classify_day(*, have_lake: bool, meta: dict | None, lake_q: dict | None,
         code = "no_seed_snapshots" if sr in (None, "no_snapshots") else f"seed_rejected:{sr}"
         return INCONCLUSIVE, [code, f"crossed_rate_after={crossed:.4f}"]
     # Seed accepted, but is the seed SOURCE itself reliable? The `book` product is intermittently
-    # crossed (2026-04-01: 31.75%); above seed_crossed_frac_max the accepted seed cannot be trusted.
+    # crossed (2026-04-01: 0.3751 of candidates); above seed_crossed_frac_max the accepted seed
+    # cannot be trusted.
     codes = meta.get("snapshot_reason_codes") or {}
     n_snap = sum(codes.values())
     seed_crossed_frac = (codes.get("crossed", 0) / n_snap) if n_snap else 0.0

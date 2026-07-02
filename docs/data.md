@@ -357,7 +357,8 @@ large vendor-filled holes. Required policy:
   first full state; do not assume continuity across the seam.
 
 **Why the seed must be validated:** Crypto Lake's derived `book` (20-level snapshot) product is
-**intermittently crossed on some days** (2026-04-01: 31.75% crossed, spreads to −$1188; 2025-06-01: 0%).
+**intermittently crossed on some days** (2026-04-01: 31.75% of raw rows crossed — 37.51% of the
+1 s-thinned seed candidates, the map's `seed_source_crossed_frac`; spreads to −$1188; 2025-06-01: 0%).
 We don't use that product for features, but if it's used as a reseed source it must be checked first.
 Whether the underlying `book_delta_v2` *reconstruction* is also degraded on such days was **measured
 2026-07-01** (§5a-QualityMap expanded validation): yes — on the 4 sampled crossed-source days the
@@ -410,8 +411,11 @@ report JSON):
 | `inconclusive` | cannot validate the reconstruction | no/all-rejected seed, **or** an accepted seed whose `book` source is itself crossed > **5%**, **or** the Lake load failed |
 
 A confident `lake_usable`/`lake_present_degraded` verdict **requires both an accepted seed and a
-trustworthy seed source**: on 2026-04-01 the `book` product is **31.75% crossed**, so although ~68% of
-candidates are valid and a seed IS accepted, the source exceeds the **5%** crossed-candidate bar → the
+trustworthy seed source**: on 2026-04-01 the `book` product is **31.75% crossed at raw rows**
+(83,423/262,771, top-of-book scan, re-measured 2026-07-02) and **37.51% at the 1 s-thinned seed
+candidates the map validates** (22,965/61,218 — this is `seed_source_crossed_frac`, the classified
+metric; crossed episodes span proportionally more seconds than rows). So although 62.5% of candidates
+are valid and a seed IS accepted, the source exceeds the **5%** crossed-candidate bar → the
 day is `inconclusive`, not silently usable (a clean-looking reconstruction off a flaky seed source can't
 be trusted). The classifier keys off missing `book_delta_v2`, no/rejected seed snapshots, the crossed
 seed-source fraction, the crossed rate after reseed, the missing-book fraction, and thin top-K depth; the
@@ -429,7 +433,8 @@ product ~0.18 GB/day ≈ 275k rows → ~0.48 GB/day, a conservative upper bound)
 pull** (> `--max-auto-gb`, default 5 GB) unless `--allow-broad` — and *always* refuses a pull that would
 breach the 300 GB/month quota headroom, override or not (and refuses the whole run, fail-safe, if
 `used_data` is unreadable). The default day set is small: **2025-06-01** (the validated clean day →
-`lake_usable`) and **2026-04-01** (31.75%-crossed `book` seed source → `inconclusive`); add more with
+`lake_usable`) and **2026-04-01** (crossed `book` seed source, `seed_source_crossed_frac=0.3751` →
+`inconclusive`); add more with
 `--days` / `--days-file` / `--include-gap-days N`. The full report is written to
 `data/reports/coinbase_quality_map.json` (git-ignored).
 

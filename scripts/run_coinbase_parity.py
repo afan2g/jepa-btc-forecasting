@@ -128,7 +128,8 @@ def load_lake_book_snapshots(sess, day: dt.date, exchange: str, symbol: str, *,
     table (verified), and the Coinbase `book` product is small (~275k rows/day ≈ 180 MB, 83 cols),
     so a single-day load is memory-safe — reseeds only need a sparse validated set, not every row.
     The `book` product is NOT used for features; it is a reseed source only, and only on days where
-    it is verified uncrossed (2025-06-01: 0% crossed; 2026-04-01: 31.75% crossed → rejected by
+    it is verified uncrossed (2025-06-01: 0% crossed; 2026-04-01: 37.51% of thinned candidates
+    crossed, 31.75% of raw rows → crossed candidates rejected by
     `classify_snapshot`). Projects the RAW level columns (`bid_i_price/size`, `ask_i_price/size`).
 
     Single-clock invariant: snapshots, deltas, and the grid share ONE engine clock (origin_time — the
