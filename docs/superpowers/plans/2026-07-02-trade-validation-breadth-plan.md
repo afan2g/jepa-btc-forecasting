@@ -134,22 +134,30 @@ Selection is **bounded by design** — no broad default run. Precedence (first m
    calendar.
 4. **no day args** — the **safe small default sample** (5 curated days, ≈1.3 GB, runs without
    `--allow-broad`): `2025-06-01`, `2024-08-05`, `2024-08-06`, `2025-01-07`, `2026-04-15`.
-   `2024-08-06` (a full Coinbase gap, `coinbase_fill_days` with `trades: true`) is included on
-   purpose so the one bounded live run exercises the real `coinapi_fill` routing that §8 later makes
-   a gate condition — `2025-01-07` only produces a Lake-present-but-sparse `warn`, not a fill route.
+   `2024-08-06` is included on purpose because it is a **full Coinbase gap** (no Lake partition for
+   either product), so the calendar's `coinbase_fill_days[2024-08-06].trades` is set and the one
+   bounded live run exercises the real `coinapi_fill` routing §8 later makes a gate condition — the
+   only default day guaranteed to hit it regardless of what the other days' trades partitions turn
+   out to contain.
 
-**Regime cohort** (each a `docs/data.md` §5a-QualityMap-characterized day, so the validator's output
-can be cross-checked against known ground truth):
+**Regime cohort** — days chosen for regime *diversity*. **Important (exact-product contract):** the
+§5a-QualityMap facts cited below (book seam / resume times, crossed-seed fractions, L3 event counts)
+are all `book_delta_v2` *reconstruction* results — a **different product** from `trades`. They pick
+days worth testing; they are **not** ground truth for the `trades` feed and are **not** used to
+pre-declare expected trade-hour gaps. Whether a day's Coinbase `trades` partition is complete, sparse,
+or absent is what the validator **measures**, and fill routing is driven only by the calendar's
+per-product `coinbase_fill_days[day].trades` flag (`data/usable_calendar.json`) — never inferred from
+a book seam. So the cohort exercises the checks; it does not hardcode their verdicts.
 
-| Cohort member | day(s) | regime / why it exercises the checks |
+| Cohort member | day(s) | regime / why the day is worth testing (book-product context ≠ trades verdict) |
 |---|---|---|
 | Clean known overlap | `2025-06-01` | the pilot day; all 3 venues Lake-present, clean — the pass baseline |
-| High-volatility / crash + seam | `2024-08-05` | crash morning; Coinbase Lake book resumes 16:08:35Z (67.3% of day missing) → Coinbase trades sparse-hours in the AM; Binance = extreme-volume, wide-jump high-vol stress |
-| Crash-adjacent full gap | `2024-08-06` | Coinbase Lake absent → `missing_partition`; a known CoinAPI-fill day → must route to `coinapi_fill`, not fail |
-| Coinbase gap/fill seam (leading partial) | `2025-01-07` | 33-day-hole end; Coinbase resumes 14:45:00Z (61.5% missing) → leading sparse-hours; clean where present |
-| High-vol vendor seam | `2024-12-04` | 63.2 M L3 events; a `lake_present_degraded`/seam candidate |
+| High-volatility / crash | `2024-08-05` | crash morning; extreme Binance volume + wide jumps (high-vol stress). Its `book_delta_v2` seam is 16:08:35Z, but the `trades` partition's coverage is measured, not assumed |
+| Crash-adjacent full gap | `2024-08-06` | full Coinbase gap (no Lake partition for either product) → the calendar marks it a trade-fill day → must route to `coinapi_fill`, not fail |
+| Coinbase gap/fill seam | `2025-01-07` | 33-day-hole end; the `book_delta_v2` resume is 14:45:00Z — the validator measures whether `trades` is similarly sparse or fully present |
+| High-vol vendor seam | `2024-12-04` | 63.2 M L3 `book` events (high-vol regime); trades coverage measured independently |
 | Recent OOS | `2026-04-15` | inside the April-2026 OOS usable run (`2026-02-06→2026-05-05`); all 3 venues Lake-present |
-| Late-window clean | `2026-06-15` | `lake_usable` late-window control |
+| Late-window clean | `2026-06-15` | `lake_usable` (book) late-window control |
 
 **Random sample across splits** (requirement: "random sampled days across train/val/test"): given
 `--start/--end`, draw `--sample-n` days deterministically (seeded `random.Random(seed)`) stratified
@@ -172,10 +180,17 @@ report's `days[].metrics`; the pass/warn/fail role is defined in §8. `<field>` 
 loaded/renamed columns (§2). `null` timestamp = the existing sentinel `value < pd.Timestamp(
 "2015-01-01")`.
 
+**All time-based metrics use the post-fallback `engine_clock`, not raw `origin_time`** (§5): the
+`engine_clock` is `origin_time` with `received_time` substituted per null/sentinel row, and the sort
+key. Diffing raw `origin_time` on a sub-threshold fallback day would fabricate a ~55-year gap and
+day-0 hour coverage from the 1970 sentinels; the clock the bar builder actually consumes is the one
+that must be gated. Raw `origin_time` is retained only for the null-fraction metric (row 3) and
+audit.
+
 | # | metric key | how computed | role |
 |---|---|---|---|
 | 1 | `row_count` | `len(df)` | hard-fail below `min_rows_hard`; soft surface below regime floor |
-| 2 | `first_ts` / `last_ts` | ISO of `origin_time.min()` / `.max()` after sort | reported; used for hour coverage |
+| 2 | `first_ts` / `last_ts` | ISO of `engine_clock.min()` / `.max()` after sort | reported; used for hour coverage |
 | 3 | `origin_time_null_frac` | `(origin_time < 2015-01-01).mean()` | fail if `> origin_time_null_max` (else warn `received_time_fallback_used` when nonzero); substitution itself is per-row unconditional (§5) |
 | 4 | `received_time_available` / `received_time_null_frac` | column present; `(received_time < 2015-01-01).mean()` | fallback availability; a null-origin row with null `received_time` → fail (§5) |
 | 5 | `monotonic_after_sort` | `engine_clock.is_monotonic_increasing` on the **post-fallback** clock after the §5 sort, treating any residual `NaT`/sentinel (`< 2015-01-01`) as invalid | **hard fail** if False |
@@ -185,8 +200,8 @@ loaded/renamed columns (§2). `null` timestamp = the existing sentinel `value < 
 | 9 | `price_min` / `price_max` / `price_median` / `price_p99_abs_ret` / `price_max_abs_ret` / `price_out_of_band_count` | min/max/median; p99 **and max** of `abs(price.pct_change())` after sort; count of prices outside `[median/price_range_factor, median*price_range_factor]` | fail on non-positive/NaN price; warn if `price_p99_abs_ret > price_jump_warn` **or** `price_max_abs_ret > price_spike_warn` **or** `price_out_of_band_count > 0` (a lone corrupt spike two-diffs among 10⁵ trades never moves p99, so `price_max_abs_ret` + the robust band catch it) |
 | 10 | `size_min` / `size_max` / `size_zero_frac` / `size_neg_frac` | on `quantity` | **hard fail** if `size_zero_frac>0` or `size_neg_frac>0`; warn if `size_max > size_max_btc` |
 | 11 | `notional_sum` / `notional_max_trade` | `Σ price*quantity`; `max(price*quantity)` | fail if `notional_sum<=0`/NaN; warn on absurd single-trade notional |
-| 12 | `interarrival_median_s` / `_p95_s` / `_p99_s` / `_max_s` | `diff(origin_time).dt.total_seconds()` after sort | warn if `interarrival_max_s > interarrival_gap_warn_s` (calendar-context-exempt) |
-| 13 | `missing_hour_count` / `sparse_hour_count` | of the 24 UTC hours: 0 rows / `< sparse_hour_min_rows` | warn; escalates only via §8 gating vs. calendar |
+| 12 | `interarrival_median_s` / `_p95_s` / `_p99_s` / `_max_s` | `diff(engine_clock).dt.total_seconds()` after sort | warn if `interarrival_max_s > interarrival_gap_warn_s` (calendar-context-exempt) |
+| 13 | `missing_hour_count` / `sparse_hour_count` | of the 24 UTC `engine_clock` hours: 0 rows / `< sparse_hour_min_rows` | `sparse_hour` warn; `missing_hour` warn up to `max_missing_hours`, else **`missing_hours_excess` fail** on a required non-fill day (§8) |
 | 14 | `recv_origin_lag_median_ms` / `_p95_ms` / `_neg_frac` | `(received_time-origin_time)` ms | informational (Coinbase inherently higher); fail only if `_neg_frac > lag_neg_frac_max` |
 | 15 | `side_values` | `side.value_counts()` dict | warn if any value ∉ {`buy`,`sell`} |
 | 16 | `calendar_state` | crossed with `data/usable_calendar.json` (§8) | routes `coinapi_fill` / `excluded` |
@@ -197,7 +212,10 @@ All float metrics pass through `_json_safe` (non-finite → `null`) so the repor
 
 - **Engine clock = `origin_time` (exchange/origin time).** It is the §5.3 engine-time axis
   (`shared_engine_time_col`) and is measured 100% populated (0% empty) on all three venues, so it is
-  the primary sort key and bar-clock timestamp.
+  the primary sort key and bar-clock timestamp. The validator materializes a derived `engine_clock`
+  column (= `origin_time`, with the row-level `received_time` fallback below applied); **every
+  time-based metric in §4 — sort, `first_ts`/`last_ts`, inter-arrival, hour coverage — reads
+  `engine_clock`, never raw `origin_time`**, which stays only for `origin_time_null_frac` and audit.
 - **Fallback to `received_time` (per-row, unconditional).** The substitution is **not** gated by any
   threshold: **every** row whose `origin_time` is null/sentinel (`< 2015-01-01`) takes its
   `received_time` into the engine clock (the original `origin_time` is retained in the frame for
@@ -235,7 +253,9 @@ All float metrics pass through `_json_safe` (non-finite → `null`) so the repor
 Written to `data/reports/trade_feed_validation.json` (the git-ignored `data/reports/` dir; CLI
 `--out-dir`, default `data/reports`). Strict JSON via `write_report`:
 `json.dump(_json_safe(report), f, indent=2, allow_nan=False)` + trailing newline, so `jq empty`
-passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "days"}`:
+passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "days"}`. **The values
+below are illustrative (schema shape, not measured) — the live run fills them from the actual
+`trades` partitions; nothing here is a hardcoded expected verdict:**
 
 ```json
 {
@@ -252,8 +272,9 @@ passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "day
                           "sort": "stable_by_engine_clock_then_file_order"},
     "thresholds": { "origin_time_null_max": 0.01, "min_rows_hard": 1000,
                     "interarrival_gap_warn_s": 120.0, "sparse_hour_min_rows": 60,
-                    "price_jump_warn": 0.10, "price_spike_warn": 0.50, "price_range_factor": 10.0,
-                    "size_max_btc": 5000.0, "dup_ts_cluster_warn": 50, "lag_neg_frac_max": 0.001 },
+                    "max_missing_hours": 1, "price_jump_warn": 0.10, "price_spike_warn": 0.50,
+                    "price_range_factor": 10.0, "size_max_btc": 5000.0, "dup_ts_cluster_warn": 50,
+                    "lag_neg_frac_max": 0.001 },
     "trades_gb_per_day": {"binance_perp": 0.12, "binance_spot": 0.10, "coinbase": 0.05},
     "quota": { "ok": true, "reason": "ok", "est_gb": 1.35, "used_gb": 42.0,
                "quota_gb": 300.0, "max_auto_gb": 3.0, "allow_broad": false, "headroom_gb": 10.0,
@@ -282,9 +303,9 @@ passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "day
   "days": [
     {
       "day": "2024-08-05", "venue": "coinbase", "exchange": "COINBASE", "symbol": "BTC-USD",
-      "status": "warn", "reason_codes": ["sparse_hour", "sparse_hour:hours_missing=0..15"],
+      "status": "warn", "reason_codes": ["sparse_hour", "sparse_hour:hour=05"],
       "vendor_source": "lake",
-      "metrics": { "row_count": 61234, "first_ts": "2024-08-05T16:08:35.412Z",
+      "metrics": { "row_count": 921034, "first_ts": "2024-08-05T00:00:00.812Z",
                    "last_ts": "2024-08-05T23:59:59.771Z", "origin_time_null_frac": 0.0,
                    "received_time_available": true, "monotonic_after_sort": true,
                    "was_presorted": false, "used_received_time_fallback": false,
@@ -293,14 +314,14 @@ passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "day
                    "price_median": 55200.0, "price_p99_abs_ret": 0.004,
                    "price_max_abs_ret": 0.031, "price_out_of_band_count": 0,
                    "size_min": 0.0001, "size_max": 42.5,
-                   "size_zero_frac": 0.0, "size_neg_frac": 0.0, "notional_sum": 3.1e9,
-                   "interarrival_median_s": 0.08, "interarrival_p99_s": 3.2,
-                   "interarrival_max_s": 41.0, "missing_hour_count": 16, "sparse_hour_count": 0,
+                   "size_zero_frac": 0.0, "size_neg_frac": 0.0, "notional_sum": 2.5e9,
+                   "interarrival_median_s": 0.09, "interarrival_p99_s": 3.2,
+                   "interarrival_max_s": 41.0, "missing_hour_count": 0, "sparse_hour_count": 1,
                    "recv_origin_lag_median_ms": 168.0, "recv_origin_lag_neg_frac": 0.0,
-                   "side_values": {"buy": 30110, "sell": 31124} },
-      "calendar_state": { "class": "coinbase_fill_seam", "in_usable_days": true,
+                   "side_values": {"buy": 456210, "sell": 464824} },
+      "calendar_state": { "class": "lake_trades_present", "in_usable_days": true,
                           "fill": {"book": true, "trades": false},
-                          "reasons": ["coinbase_book_partial_2024-08-05"] }
+                          "note": "book_delta_v2 seam 16:08:35Z is a separate product; the trades partition here is measured full-day present (warn only for one sparse overnight hour)" }
     }
   ]
 }
@@ -331,7 +352,8 @@ stable code first — the `run_coinbase_quality_map.classify_day` convention):
 | `price_spike` | `price_max_abs_ret > price_spike_warn` or `price_out_of_band_count > 0` (a lone corrupt outlier p99 misses) | warn |
 | `size_out_of_range` | `size_max > size_max_btc` | warn |
 | `interarrival_gap_excess` | `interarrival_max_s > interarrival_gap_warn_s` | warn |
-| `missing_hour` / `sparse_hour` | empty / sparse UTC hour | warn |
+| `missing_hour` / `sparse_hour` | empty / sparse UTC `engine_clock` hour | warn |
+| `missing_hours_excess` | required non-fill day, `missing_hour_count > max_missing_hours` | fail (→ fill/exclude) |
 | `lag_negative` | `recv_origin_lag_neg_frac > lag_neg_frac_max` | fail |
 | `side_value_unexpected` | `side ∉ {buy,sell}` | warn |
 | `row_count_low` | below the regime soft floor | warn |
@@ -352,6 +374,7 @@ stable code first — the `run_coinbase_quality_map.classify_day` convention):
 | `size_max_btc` | 5000.0 | a single BTC-denominated trade > 5000 BTC is implausible on these venues |
 | `interarrival_gap_warn_s` | 120.0 | a >2 min no-trade gap in a normally-active market; quiet-hour context exempts it |
 | `sparse_hour_min_rows` | 60 | < 1 trade/min for a whole UTC hour is sparse |
+| `max_missing_hours` | 1 | ≥2 fully-empty UTC hours on a continuously-traded BTC venue is a data gap, not quiet — a required non-fill day above this fails (§8) rather than passing as warn |
 | `lag_neg_frac_max` | 0.001 | `received ≥ origin` should hold; a nonzero negative-lag fraction is a clock fault |
 
 ## 7. CLI shape (future implementation)
@@ -421,13 +444,20 @@ mirroring the "never silently dropped" discipline (a fail is surfaced in
 - `received_time_fallback_unavailable` — a null-`origin_time` row whose `received_time` is also
   null (unresolvable engine clock), **on its own**, at any fraction
 - `nonmonotonic_after_sort` (the sorted engine clock **is** the bar clock — non-monotonic is fatal)
+- `missing_hours_excess` — a required non-fill day with `missing_hour_count > max_missing_hours`
+  (a real intraday trade-clock hole; BTC on these venues trades every second, so ≥2 fully-empty UTC
+  hours is a data gap, not a quiet market). The bar clock must not span an unfilled hole, so the day
+  must be **filled (CoinAPI) or excluded**, never emitted across — this is the mechanism that turns a
+  day-level "partition present" into an intraday-coverage gate. (Calendar fill days route to
+  `coinapi_fill` before this check; sparse — non-empty — hours stay warn.)
 - `price_out_of_range`, `size_nonpositive`, `notional_nonpositive`
 - `row_count_implausibly_low` (`< min_rows_hard`)
 - `lag_negative` above `lag_neg_frac_max`
 
 **Warn (usable, surfaced, non-blocking):** `duplicate_timestamp_cluster`, `duplicate_trade_id`,
-`price_jump_excess`, `price_spike`, `size_out_of_range`, `interarrival_gap_excess`,
-`missing_hour`/`sparse_hour`, `side_value_unexpected`, `received_time_fallback_used`, `row_count_low`.
+`price_jump_excess`, `price_spike`, `size_out_of_range`, `interarrival_gap_excess`, `sparse_hour`,
+`missing_hour` (**up to `max_missing_hours`** — beyond that it escalates to the blocking
+`missing_hours_excess` above), `side_value_unexpected`, `received_time_fallback_used`, `row_count_low`.
 These are either legitimate market behaviour (flash moves, dead Sundays, same-ns bursts) or
 informational; the bar builder may consume the day but the report retains the flags for stratified
 diagnostics (experiment-plan "stratify all results by regime"). `price_spike` is warn-only on
@@ -525,11 +555,19 @@ Required test cases (TDD — write each failing test first):
    → `price_p99_abs_ret ≈ 0` (p99 misses the two spike diffs) **but** `price_max_abs_ret` large and
    `price_out_of_band_count == 1` → `price_spike` warn. Pins that a lone corrupt outlier surfaces even
    though it never moves the 99th percentile (the P2 review gap).
-6. **Sparse / missing hour** — build a **full-day** frame (`_trades_df(n=2400, full_day=True)` →
-   ~100 rows in each of the 24 UTC hours); `empty_hours=(3,4)` → `missing_hour_count == 2`,
-   `missing_hour` warn; thinning one hour below `sparse_hour_min_rows` (e.g. drop all but 30 of its
-   rows) → `sparse_hour`. (The default 80 ms frame spans only ~80 s of hour 0 and cannot exercise a
-   24-hour metric.)
+6. **Sparse / missing hour + coverage gate** — build a **full-day** frame
+   (`_trades_df(n=2400, full_day=True)` → ~100 rows in each of the 24 UTC hours). (The default 80 ms
+   frame spans only ~80 s of hour 0 and cannot exercise a 24-hour metric.)
+   - `empty_hours=(4,)` (1 missing ≤ `max_missing_hours`) on a **required non-fill** day →
+     `missing_hour_count == 1`, `missing_hour` **warn**.
+   - `empty_hours=(3,4)` (2 missing > `max_missing_hours=1`) on a **required non-fill** day →
+     `missing_hours_excess` **fail** (a real intraday trade-clock hole must fill/exclude, not pass —
+     the P1 gate fix); the same frame on a `coinbase_fill_days[day].trades` day routes to
+     `coinapi_fill`, and on an excluded day → `excluded` (neither blocks).
+   - thinning one non-empty hour below `sparse_hour_min_rows` (drop all but 30 of its rows) →
+     `sparse_hour` **warn** at any count (a non-empty hour is plausibly quiet).
+   - hours are computed on the `engine_clock` (§5), so a sub-threshold fallback frame's substituted
+     rows land in their real hour, not 1970 (the P2 clock fix).
 7. **Duplicate-timestamp cluster** — many rows sharing one `origin_time` above `dup_ts_cluster_warn`
    → `duplicate_timestamp_cluster` warn; a small burst does not trip it.
 8. **Inter-arrival gap** — inject a 200 s gap → `interarrival_max_s ≈ 200`, `interarrival_gap_excess`
