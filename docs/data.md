@@ -524,7 +524,10 @@ Findings:
    33-day hole ends mid-day. 2025-01-07 is otherwise clean where present (crossed 0.000116, clean
    seed source) → the classic partial-day CoinAPI-fill shape; 2024-08-05 has BOTH the partial day and
    a crossed seed source. Fill planning must budget partial-day fills on seam days, not only the
-   calendar's full-gap days.
+   calendar's full-gap days. The partial-day/seam fill **policy is DEFINED (2026-07-02)**:
+   `docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md` + `recon/stitch_policy.py`
+   (segment planning + seam masks, synthetic-tested); quality-map report wiring and the seam-day
+   live validation are follow-ups — backfill stays locked.
 3. **Gap days route correctly and are fillable.** All 3 documented book-gap days raise lakeapi
    `NoFilesFound` → `missing_needs_coinapi`, and each is calendar-verified fillable from CoinAPI flat
    files (`coinapi.fillable=true`).
@@ -618,8 +621,10 @@ Findings:
 **This changes the fill PLAN, not the gate — backfill stays LOCKED.** The cross-validation converts
 2 of the 4 `inconclusive` days into confirmed CoinAPI-fill days (fill scope grows beyond the §8 ~$92
 calendar-gap estimate — crossed-seed and seam days add to it); it certifies no new Lake day. Unlock
-still requires at least the partial-day/seam fill policy (2025-01-07, 2024-08-05), the remaining §10
-reseed-validation items (vendor-seam day, prior-day seed carry), and the broad production map.
+still requires at least the partial-day/seam fill policy (2025-01-07, 2024-08-05 — **defined
+2026-07-02**, see §5a-QualityMap finding 2; its report wiring + seam-day live validation still
+open), the remaining §10 reseed-validation items (vendor-seam day, prior-day seed carry), and the
+broad production map.
 
 **Backfill stays LOCKED.** The quality-map tool itself does not download CoinAPI and does not unlock
 the §5a backfill gate (still enforced in `ingest/download_coinapi.py` / `ingest/_common.py`).
@@ -870,8 +875,11 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       (8.4–37.5% crossed candidates, Aug '24–Apr '26), and seam days lose the leading 61–67% of the
       day. CoinAPI cross-validation 2026-07-01 (2 of 4 crossed-seed-source days): parity fails →
       those days get CoinAPI fill. Remaining gate: partial-day fill
-      handling for seam days, plus the full-window map (~313 GB conservative / ~170 GB measured
-      wire-rate → staged across quota windows); backfill stays locked until it passes.)*
+      handling for seam days (policy DEFINED 2026-07-02 —
+      `docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md` + `recon/stitch_policy.py`;
+      quality-map wiring and seam-day live validation open), plus the full-window map (~313 GB
+      conservative / ~170 GB measured wire-rate → staged across quota windows); backfill stays
+      locked until it passes.)*
 
 Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
