@@ -913,8 +913,10 @@ Other open items:
       canonical, ties break by original row index, `order_id` is never an ordering key
       (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,
       `tests/test_coinapi_within_timestamp_ordering.py`; quality counters `seq_disorder`/`seq_duplicate`).
-- [ ] **Binance downloader** — not yet built; same throttled/resumable/partitioned pattern as
-      `download_coinapi.py`, streaming per day (109 M rows). Read direct via pyarrow S3 (`eu-west-1`) or lakeapi.
+- [ ] **Binance downloader** — not yet built; **plan:**
+      [`docs/superpowers/plans/2026-07-02-binance-downloader-plan.md`](superpowers/plans/2026-07-02-binance-downloader-plan.md).
+      Same throttled/resumable/partitioned pattern as `download_coinapi.py`, streaming per day
+      (109 M rows). Read direct via pyarrow S3 (`eu-west-1`) or lakeapi.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
 
 ---
