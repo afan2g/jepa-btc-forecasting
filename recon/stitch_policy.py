@@ -48,6 +48,9 @@ INTERNAL_GAP_FILL = "internal_gap_fill"
 MIXED_PARTIAL_FILL = "mixed_partial_fill"
 FILL_PROFILES = (LAKE_ONLY, FULL_DAY_FILL, LEADING_PARTIAL_FILL, TRAILING_PARTIAL_FILL,
                  INTERNAL_GAP_FILL, MIXED_PARTIAL_FILL)
+# The four profiles that mix vendors within one day (summary bucketing: partial_fill ⊆ needs_fill).
+PARTIAL_FILL_PROFILES = (LEADING_PARTIAL_FILL, TRAILING_PARTIAL_FILL, INTERNAL_GAP_FILL,
+                         MIXED_PARTIAL_FILL)
 
 # Per-segment reasons. `excluded` segments can only be the day-open warmup prefix: every mid-day
 # non-Lake window contains an invalid run >= fill_min_s (that is what ended the Lake segment), so
@@ -331,6 +334,41 @@ def plan_day_stitch(sample_ts, valid, *, grid_ns: int, seed_accepted: bool, seed
                          trusted_lake_start_ts=int(lake_segs[0].start_ts),
                          trusted_lake_end_ts=int(lake_segs[-1].end_ts),
                          lake_present_start_ts=present_start, lake_present_end_ts=present_end)
+
+
+def full_day_plan(*, day_open_ts: int, day_end_ts: int, grid_ns: int, reason: str,
+                  policy: SeamPolicy = DEFAULT_SEAM_POLICY, day: str | None = None) -> DayStitchPlan:
+    """A full-day CoinAPI plan constructed WITHOUT per-sample data — for callers that must route a
+    day to full-day fill from day-level evidence alone: the Lake partition is absent, the engine is
+    metrics-only (no frame to mask), or a day-level quality bar failed with no mask-supported
+    narrower fill. Same segment/JSON contract as a `plan_day_stitch` full-day route; `reason`
+    becomes both `full_day_reason` and the single segment's reason (the caller owns its stability —
+    the quality map reuses its day-level codes). Coverage bounds are unknown here, so
+    `trusted_lake_*`/`lake_present_*` are None."""
+    day_open_ts, day_end_ts, grid_ns = int(day_open_ts), int(day_end_ts), int(grid_ns)
+    if grid_ns <= 0:
+        raise ValueError("grid_ns must be a positive step (ns)")
+    if day_end_ts <= day_open_ts:
+        raise ValueError("day_end_ts must be after day_open_ts")
+    seg = Segment(COINAPI, day_open_ts, day_end_ts, reason)
+    return DayStitchPlan(day=day, day_open_ts=day_open_ts, day_end_ts=day_end_ts, grid_ns=grid_ns,
+                         fill_profile=FULL_DAY_FILL, full_day_reason=reason, segments=(seg,),
+                         seams=(), policy=policy, trusted_lake_start_ts=None,
+                         trusted_lake_end_ts=None, lake_present_start_ts=None,
+                         lake_present_end_ts=None)
+
+
+def invalid_runs(sample_ts, valid, *, grid_ns: int) -> list[tuple[int, int]]:
+    """Maximal half-open [start_ts, end_ts) spans where `valid` is False — the plan-doc Q7
+    per-day report metric (`quality.invalid_runs`). Same array contract as `plan_day_stitch`."""
+    ts = np.asarray(sample_ts, dtype=np.int64)
+    ok = np.asarray(valid, dtype=bool)
+    grid_ns = int(grid_ns)
+    if grid_ns <= 0:
+        raise ValueError("grid_ns must be a positive step (ns)")
+    if len(ok) != len(ts):
+        raise ValueError("sample_ts and valid must be equal-length")
+    return [(int(ts[i0]), int(ts[i1 - 1]) + grid_ns) for i0, i1 in _runs(~ok)]
 
 
 # --------------------------------------------------------------- seam masks (regular grid only)

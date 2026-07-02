@@ -25,10 +25,13 @@ from recon.stitch_policy import (
     LAKE_ONLY,
     LEADING_PARTIAL_FILL,
     MIXED_PARTIAL_FILL,
+    PARTIAL_FILL_PROFILES,
     TRAILING_PARTIAL_FILL,
     UNCOVERED,
     SeamPolicy,
     feature_valid_mask,
+    full_day_plan,
+    invalid_runs,
     label_valid_mask,
     plan_day_stitch,
     seam_guard_mask,
@@ -396,6 +399,54 @@ def test_window_vendor_sources_marks_windows_extending_past_the_partition():
     assert UNCOVERED in window_vendor_sources(7100 * S, 7200 * S, segs)
     # Feature lookbacks reaching before day open are uncovered on the left, symmetrically.
     assert window_vendor_sources(-60 * S, 100 * S, segs) == {EXCLUDED, LAKE, UNCOVERED}
+
+
+# ------------------------------------------------- mask-less full-day plans and invalid-run spans
+def test_full_day_plan_constructs_a_plan_without_sample_data():
+    # The quality-map wiring needs full-day plans for days with NO validity mask (Lake partition
+    # absent; metrics-only native engine) — same segment/JSON contract as plan_day_stitch.
+    plan = full_day_plan(day_open_ts=0, day_end_ts=7200 * S, grid_ns=S,
+                         reason="lake_book_delta_v2_absent", day="2024-12-05")
+    assert plan.fill_profile == FULL_DAY_FILL
+    assert plan.full_day_reason == "lake_book_delta_v2_absent"
+    assert [(s.source, s.start_ts, s.end_ts, s.reason) for s in plan.segments] == [
+        (COINAPI, 0, 7200 * S, "lake_book_delta_v2_absent")]
+    assert plan.seams == ()
+    assert plan.trusted_lake_start_ts is None and plan.lake_present_start_ts is None
+    d = plan.as_dict()
+    assert json.loads(json.dumps(d, allow_nan=False)) == d
+    assert d["seam_policy"] == DEFAULT_SEAM_POLICY.as_dict()
+
+
+def test_full_day_plan_validates_inputs():
+    with pytest.raises(ValueError, match="positive step"):
+        full_day_plan(day_open_ts=0, day_end_ts=7200 * S, grid_ns=0, reason="x")
+    with pytest.raises(ValueError, match="day_end_ts"):
+        full_day_plan(day_open_ts=7200 * S, day_end_ts=7200 * S, grid_ns=S, reason="x")
+
+
+def test_invalid_runs_reports_maximal_half_open_spans():
+    valid = np.ones(100, dtype=bool)
+    valid[10:13] = False
+    valid[50] = False
+    valid[99] = False
+    assert invalid_runs(_grid(100), valid, grid_ns=S) == [
+        (10 * S, 13 * S), (50 * S, 51 * S), (99 * S, 100 * S)]
+    assert invalid_runs(_grid(5), np.ones(5, dtype=bool), grid_ns=S) == []
+    assert invalid_runs(_grid(3), np.zeros(3, dtype=bool), grid_ns=S) == [(0, 3 * S)]
+
+
+def test_invalid_runs_validates_inputs():
+    with pytest.raises(ValueError, match="equal-length"):
+        invalid_runs(_grid(5), np.ones(4, dtype=bool), grid_ns=S)
+    with pytest.raises(ValueError, match="positive step"):
+        invalid_runs(_grid(5), np.ones(5, dtype=bool), grid_ns=0)
+
+
+def test_partial_fill_profiles_constant_covers_the_four_partial_shapes():
+    assert PARTIAL_FILL_PROFILES == (LEADING_PARTIAL_FILL, TRAILING_PARTIAL_FILL,
+                                     INTERNAL_GAP_FILL, MIXED_PARTIAL_FILL)
+    assert FULL_DAY_FILL not in PARTIAL_FILL_PROFILES and LAKE_ONLY not in PARTIAL_FILL_PROFILES
 
 
 # -------------------------------------------------------------- defaults and threshold semantics

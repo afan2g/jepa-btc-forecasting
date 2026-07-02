@@ -363,6 +363,364 @@ def test_build_report_stamps_coinapi_fill_per_day_and_summary():
     assert "coinapi_fill" not in days[0]
 
 
+# --------------------------------------------------------------------------- partial-day fill wiring
+# (docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md Q7 / Task 2: the per-day
+# `coinapi_fill` block gains the stitch plan, `quality` gains coverage timestamps + invalid runs,
+# and the summary gains partial_fill + fill_counts. No vendor I/O; the backfill gate is untouched.)
+from recon.stitch_policy import plan_day_stitch  # noqa: E402
+
+
+def _leading_partial_lake_df():
+    """The 2025-01-07 shape at full-day scale: Lake silent until +50,000 s, clean afterwards."""
+    t0 = DAY_OPEN + 50_000 * S
+    return _lake_df([
+        (t0, 1, True, 100.0, 1.0),
+        (t0, 2, False, 101.0, 1.0),
+        (t0 + 1 * S, 3, True, 100.0, 2.0),
+    ])
+
+
+def _late_seed():
+    return [book_snapshot(DAY_OPEN + 50_000 * S, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+
+
+def _day_grid_plan(valid_from_s, *, trusted=True, day="2025-01-07"):
+    """A real plan_day_stitch dict over the full 86,400-sample day grid."""
+    ts = DAY_OPEN + np.arange(86_400, dtype=np.int64) * S
+    valid = ts >= DAY_OPEN + valid_from_s * S
+    return plan_day_stitch(ts, valid, grid_ns=S, seed_accepted=True,
+                           seed_ts=DAY_OPEN + valid_from_s * S, seed_source_trusted=trusted,
+                           day=day).as_dict()
+
+
+def test_assess_clean_day_emits_lake_only_stitch_plan_and_coverage():
+    res = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), day=DAY, k=1, seed_min_levels=1)
+    assert res["classification"] == qm.LAKE_USABLE
+    plan = res["stitch_plan"]
+    assert plan["fill_profile"] == "lake_only"
+    q = res["quality"]
+    # boundary = 3rd consecutive valid grid sample at/after the seed (+1 ns): +1s, +2s, +3s
+    assert q["trusted_lake_start_ts"] == plan["trusted_lake_start_ts"] == DAY_OPEN + 3 * S
+    assert q["trusted_lake_end_ts"] == DAY_OPEN + 86_400 * S
+    assert q["lake_present_start_ts"] == DAY_OPEN + 1 * S
+    assert q["lake_present_end_ts"] == DAY_OPEN + 86_400 * S
+    assert q["n_invalid_runs"] == 1
+    assert q["invalid_runs"] == [[DAY_OPEN, DAY_OPEN + 1 * S]]  # the pre-seed day-open sample
+
+
+def test_assess_leading_partial_day_plans_leading_fill():
+    res = qm.assess_lake_day(_leading_partial_lake_df(), _late_seed(), day=DAY, k=1,
+                             seed_min_levels=1)
+    assert res["classification"] == qm.LAKE_PRESENT_DEGRADED     # missing ~58% > 2%, Lake-only view
+    plan = res["stitch_plan"]
+    assert plan["fill_profile"] == "leading_partial_fill"
+    segs = plan["fill_segments"]
+    boundary = DAY_OPEN + 50_002 * S                             # warmup requalifies at the 3rd sample
+    assert [s["source"] for s in segs] == ["coinapi", "lake"]
+    assert segs[0]["reason"] == "lake_missing_leading_segment"
+    assert segs[0]["end_ts"] == boundary == segs[1]["start_ts"]
+    assert plan["seams"] == [boundary]
+    q = res["quality"]
+    assert q["trusted_lake_start_ts"] == boundary
+    assert q["lake_present_start_ts"] == DAY_OPEN + 50_000 * S
+    assert q["invalid_runs"] == [[DAY_OPEN, DAY_OPEN + 50_000 * S]]
+
+
+def test_assess_crossed_seed_source_day_plans_full_day_crossed():
+    # 2024-08-05 shape: classification stays inconclusive (Lake-only view), but the plan routes
+    # full-day CoinAPI with the crossed-source reason — crossed dominates even a partial day.
+    res = qm.assess_lake_day(_clean_lake_df(), _partial_crossed_seed(), day=DAY, k=1,
+                             reseed=True, reseed_after_crossed_s=0.0, seed_min_levels=1)
+    assert res["classification"] == qm.INCONCLUSIVE
+    plan = res["stitch_plan"]
+    assert plan["fill_profile"] == "full_day_fill"
+    assert plan["full_day_reason"] == "crossed_seed_source"
+    q = res["quality"]
+    assert q["trusted_lake_start_ts"] is None                    # full-day route: no trusted span
+    assert q["lake_present_start_ts"] is not None                # presence recorded, trust not implied
+
+
+def test_assess_missing_day_carries_no_stitch_plan():
+    res = qm.assess_lake_day(pd.DataFrame(), None, day=DAY, k=1)
+    assert res["stitch_plan"] is None
+    assert res["quality"]["trusted_lake_start_ts"] is None
+    assert res["quality"]["invalid_runs"] is None
+
+
+def test_assess_native_engine_day_is_metrics_only_with_full_day_fallback(monkeypatch):
+    # The metrics-only native path materializes no frame: no mask plan, all-None coverage, and a
+    # degraded native fill day gets the conservative synthesized full-day plan at report build
+    # (per-sample native coverage metrics are the plan's Task-3 follow-up). Offline: the native
+    # reconstruction is stubbed with metrics-only meta, the exact shape `_lake_quality_from_meta`
+    # consumes.
+    meta = {"seed_accepted": True, "seed_reason": "ok", "seed_ts": DAY_OPEN + 1,
+            "reseed_count": 0, "reseed_blocked_invalid_snapshot": 0,
+            "snapshot_reason_codes": {"ok": 10}, "thin_depth_fraction": 0.0,
+            "crossed_duration_s": 5.0, "n_samples": 86_400, "crossed_samples": 34_560,
+            "crossed_rate": 0.40, "missing_book_samples": 0, "missing_book_fraction": 0.0}
+    monkeypatch.setattr(qm, "_seeded_reconstruct", lambda *a, **k: (None, dict(meta)))
+    res = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), day=DAY, k=1, seed_min_levels=1,
+                             cold_ab=False, engine="native", price_scale=100)
+    assert res["classification"] == qm.LAKE_PRESENT_DEGRADED    # crossed 40% > 1%
+    assert res["stitch_plan"] is None
+    assert all(res["quality"][key] is None for key in qm._EMPTY_COVERAGE)
+    rep = qm.build_report([res], meta={})
+    day_rec = rep["days"][0]
+    assert "stitch_plan" not in day_rec
+    cf = day_rec["coinapi_fill"]
+    assert cf["needs_fill"] is True
+    assert cf["fill_profile"] == "full_day_fill"
+    assert cf["full_day_reason"] == "quality_over_usable_bar"
+    seg, = cf["fill_segments"]
+    assert seg["start_iso"] == "2025-06-01T00:00:00Z" and seg["end_iso"] == "2025-06-02T00:00:00Z"
+
+
+# ------------------------------------------------------------------- coinapi_fill_block (composer)
+def test_fill_block_no_fill_and_no_verdict_days_carry_no_plan():
+    lake_only = _day_grid_plan(0, day="2025-06-01")
+    b = qm.coinapi_fill_block(qm.LAKE_USABLE, ["seed_accepted"], day="2025-06-01",
+                              stitch_plan=lake_only)
+    assert b["needs_fill"] is False and b["why"] == "lake_usable"
+    assert b["fill_profile"] is None and b["fill_segments"] is None
+    assert b["seams"] is None and b["seam_policy"] is None and b["full_day_reason"] is None
+    for cls, reasons in ((qm.INCONCLUSIVE, ["no_seed_snapshots"]),
+                         (qm.EXCLUDED, ["binance_gap"])):
+        b = qm.coinapi_fill_block(cls, reasons, day="2025-06-01")
+        assert b["needs_fill"] is None and b["fill_profile"] is None
+
+
+def test_fill_block_missing_day_synthesizes_full_day_plan():
+    b = qm.coinapi_fill_block(qm.MISSING_NEEDS_COINAPI, ["lake_book_delta_v2_absent"],
+                              day="2024-12-05")
+    assert b["needs_fill"] is True
+    assert b["fill_profile"] == "full_day_fill"
+    assert b["full_day_reason"] == "lake_book_delta_v2_absent"
+    seg, = b["fill_segments"]
+    assert seg["source"] == "coinapi" and seg["reason"] == "lake_book_delta_v2_absent"
+    assert seg["start_iso"] == "2024-12-05T00:00:00Z" and seg["end_iso"] == "2024-12-06T00:00:00Z"
+    assert b["seams"] == [] and b["seam_policy"]["seam_guard_s"] == 60.0
+
+
+def test_fill_block_degraded_partial_day_keeps_the_mask_plan():
+    plan = _day_grid_plan(50_000)
+    b = qm.coinapi_fill_block(qm.LAKE_PRESENT_DEGRADED,
+                              ["seed_accepted", "missing_book_fraction=0.5787>0.02"],
+                              day="2025-01-07", stitch_plan=plan)
+    assert b["needs_fill"] is True and b["why"] == "quality_over_usable_bar"
+    assert b["fill_profile"] == "leading_partial_fill"
+    assert b["full_day_reason"] is None
+    assert b["fill_segments"] == plan["fill_segments"] and b["seams"] == plan["seams"]
+
+
+def test_fill_block_degraded_day_with_lake_only_plan_routes_full_day():
+    # A day-level bar failed (e.g. thin depth) but the top-of-book validity mask shows no fillable
+    # window: no mask-supported narrower fill exists, so route the WHOLE day to CoinAPI.
+    lake_only = _day_grid_plan(0, day="2025-06-01")
+    b = qm.coinapi_fill_block(qm.LAKE_PRESENT_DEGRADED,
+                              ["seed_accepted", "thin_depth_fraction=0.5000>0.1"],
+                              day="2025-06-01", stitch_plan=lake_only)
+    assert b["needs_fill"] is True
+    assert b["fill_profile"] == "full_day_fill"
+    assert b["full_day_reason"] == "quality_over_usable_bar"
+    seg, = b["fill_segments"]
+    assert (seg["start_ts"], seg["end_ts"]) == (lake_only["day_open_ts"], lake_only["day_end_ts"])
+
+
+def test_fill_block_keeps_mask_full_day_reasons_verbatim():
+    # A mask-derived FULL-DAY plan (Q2 rules 4-6) must pass through the composer untouched — its
+    # own reason code (here lake_never_warmup_qualified), NOT the generic fallback code.
+    ts = DAY_OPEN + np.arange(86_400, dtype=np.int64) * S
+    valid = np.tile(np.array([True, True, False]), 28_800)   # runs of 2 < warmup_consecutive=3
+    plan = plan_day_stitch(ts, valid, grid_ns=S, seed_accepted=True, seed_ts=DAY_OPEN,
+                           seed_source_trusted=True, day="2025-06-01").as_dict()
+    assert plan["full_day_reason"] == "lake_never_warmup_qualified"
+    b = qm.coinapi_fill_block(qm.LAKE_PRESENT_DEGRADED,
+                              ["seed_accepted", "crossed_rate_after=0.4000>0.01"],
+                              day="2025-06-01", stitch_plan=plan)
+    assert b["full_day_reason"] == "lake_never_warmup_qualified"
+    seg, = b["fill_segments"]
+    assert seg["reason"] == "lake_never_warmup_qualified"
+    rep = qm.build_report([{"day": "2025-06-01", "classification": qm.LAKE_PRESENT_DEGRADED,
+                            "reasons": ["seed_accepted", "crossed_rate_after=0.4000>0.01"],
+                            "stitch_plan": plan}], meta={})
+    assert rep["summary"]["coinapi_fill"]["full_day_reason_counts"] == {
+        "lake_never_warmup_qualified": 1}
+
+
+def test_stitch_coverage_invalid_runs_list_is_capped_with_full_count():
+    # Q7: invalid_runs is capped like reseed_ts[:100]; n_invalid_runs keeps the full count.
+    n = 1200
+    ts = DAY_OPEN + np.arange(n, dtype=np.int64) * S
+    bad = np.zeros(n, dtype=bool)
+    bad[np.arange(0, n, 8)] = True                           # 150 isolated invalid samples
+    frame = pd.DataFrame({"sample_ts": ts,
+                          "bid_0_price": np.where(bad, np.nan, 100.0),
+                          "ask_0_price": np.full(n, 101.0)})
+    meta = {"seed_accepted": True, "seed_ts": int(ts[0])}
+    _, cov = qm._stitch_and_coverage(frame, meta=meta, reasons=[], grid_ms=1000, day=DAY)
+    assert cov["n_invalid_runs"] == 150
+    assert len(cov["invalid_runs"]) == qm.INVALID_RUNS_CAP == 100
+    assert cov["invalid_runs"][0] == [DAY_OPEN + 0 * S, DAY_OPEN + 1 * S]
+
+
+def test_classify_thin_over_bar_emits_stable_reason_code():
+    # Thin depth is the one degraded dimension the top-of-book validity mask cannot see, so the
+    # classifier emits a stable code (the SEED_SOURCE_UNRELIABLE pattern) for the fill composer.
+    meta = {"seed_accepted": True, "seed_reason": "ok", "thin_depth_fraction": 0.50,
+            "snapshot_reason_codes": {"ok": 10}}
+    lake_q = {"crossed_rate": 0.0, "missing_book_fraction": 0.0}
+    cls, reasons = qm.classify_day(have_lake=True, meta=meta, lake_q=lake_q,
+                                   thresholds=qm.THRESHOLDS)
+    assert cls == qm.LAKE_PRESENT_DEGRADED
+    assert qm.THIN_DEPTH_OVER_BAR in reasons
+    # ...and a thin-clean degraded day does not carry the code
+    meta2 = {**meta, "thin_depth_fraction": 0.0}
+    lake_q2 = {"crossed_rate": 0.40, "missing_book_fraction": 0.0}
+    _, reasons2 = qm.classify_day(have_lake=True, meta=meta2, lake_q=lake_q2,
+                                  thresholds=qm.THRESHOLDS)
+    assert qm.THIN_DEPTH_OVER_BAR not in reasons2
+
+
+def test_fill_block_thin_failure_discards_a_partial_mask_plan():
+    # Codex P2: a thin-degraded day that ALSO has a real gap must not keep its mask-planned Lake
+    # span — the mask can't vouch for depth, so the whole day routes to CoinAPI.
+    plan = _day_grid_plan(50_000)
+    b = qm.coinapi_fill_block(
+        qm.LAKE_PRESENT_DEGRADED,
+        ["seed_accepted", "missing_book_fraction=0.5787>0.02", qm.THIN_DEPTH_OVER_BAR,
+         "thin_depth_fraction=0.5000>0.1"],
+        day="2025-01-07", stitch_plan=plan)
+    assert b["fill_profile"] == "full_day_fill"
+    assert b["full_day_reason"] == "quality_over_usable_bar"
+    seg, = b["fill_segments"]
+    assert (seg["start_ts"], seg["end_ts"]) == (plan["day_open_ts"], plan["day_end_ts"])
+
+
+def test_thin_partial_day_end_to_end_routes_full_day_and_nulls_trust():
+    # k=2 with a one-level book AND a leading gap: mask plans a leading partial fill, but the
+    # thin-depth bar failed → report routes full-day and nulls trusted_lake_*.
+    res = qm.assess_lake_day(_leading_partial_lake_df(), _late_seed(), day=DAY, k=2,
+                             seed_min_levels=1)
+    assert res["classification"] == qm.LAKE_PRESENT_DEGRADED
+    assert qm.THIN_DEPTH_OVER_BAR in res["reasons"]
+    assert res["stitch_plan"]["fill_profile"] == "leading_partial_fill"   # mask-level view intact
+    rep = qm.build_report([res], meta={})
+    cf = rep["days"][0]["coinapi_fill"]
+    assert cf["fill_profile"] == "full_day_fill"
+    assert cf["full_day_reason"] == "quality_over_usable_bar"
+    assert rep["days"][0]["quality"]["trusted_lake_start_ts"] is None
+    assert res["quality"]["trusted_lake_start_ts"] is not None            # caller record unmutated
+
+
+def test_build_grid_and_cli_reject_non_divisor_grid_ms():
+    # Codex P3: a grid_ms that does not divide the 24 h day truncates the grid, so mask-plan day
+    # bounds would stop short of midnight while synthesized full-day plans use 24:00. Fail fast.
+    with pytest.raises(ValueError, match="divide"):
+        qm.build_grid(DAY, 7000)
+    with pytest.raises(SystemExit):
+        qm.parse_args(["--grid-ms", "7000"])
+    assert len(qm.build_grid(DAY, 1000)) == 86_400
+    assert len(qm.build_grid(DAY, 500)) == 172_800
+
+
+def test_fill_block_crossed_source_without_a_mask_plan_falls_back_full_day():
+    # Metrics-only (native-engine) records carry no stitch plan; the crossed-source fill decision
+    # still gets a conservative full-day plan with the stable crossed-source reason.
+    b = qm.coinapi_fill_block(qm.INCONCLUSIVE,
+                              [qm.SEED_SOURCE_UNRELIABLE, "seed_source_crossed_frac=0.3751>0.05"],
+                              day="2026-04-01")
+    assert b["needs_fill"] is True
+    assert b["fill_profile"] == "full_day_fill"
+    assert b["full_day_reason"] == "crossed_seed_source"
+
+
+def test_degraded_thin_day_end_to_end_routes_full_day_fill():
+    # k=2 with a one-level book: thin-degraded classification, LAKE_ONLY mask plan, conservative
+    # full-day fill in the stamped report block.
+    res = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), day=DAY, k=2, seed_min_levels=1)
+    assert res["classification"] == qm.LAKE_PRESENT_DEGRADED
+    assert any("thin" in r for r in res["reasons"])
+    assert res["stitch_plan"]["fill_profile"] == "lake_only"
+    rep = qm.build_report([res], meta={})
+    cf = rep["days"][0]["coinapi_fill"]
+    assert cf["needs_fill"] is True
+    assert cf["fill_profile"] == "full_day_fill"
+    assert cf["full_day_reason"] == "quality_over_usable_bar"
+    # No Lake coverage survives a full-day route (plan-doc definitions table): the override must
+    # null the report's trusted_lake_* — presence/invalid-run facts stay, trust does not...
+    q = rep["days"][0]["quality"]
+    assert q["trusted_lake_start_ts"] is None and q["trusted_lake_end_ts"] is None
+    assert q["lake_present_start_ts"] is not None and q["n_invalid_runs"] is not None
+    # ...and the caller's record (the mask-level view, consistent with its lake_only plan) is
+    # not mutated.
+    assert res["quality"]["trusted_lake_start_ts"] is not None
+
+
+# ------------------------------------------------------------------- report stamping + summary
+def test_build_report_stamps_fill_plans_and_summary_counts():
+    partial_plan = _day_grid_plan(50_000)
+    days = [
+        {"day": "2025-06-01", "classification": qm.LAKE_USABLE, "reasons": ["seed_accepted"]},
+        {"day": "2024-12-05", "classification": qm.MISSING_NEEDS_COINAPI,
+         "reasons": ["lake_book_delta_v2_absent"]},
+        {"day": "2025-01-07", "classification": qm.LAKE_PRESENT_DEGRADED,
+         "reasons": ["seed_accepted", "missing_book_fraction=0.5787>0.02"],
+         "stitch_plan": partial_plan},
+        {"day": "2024-08-05", "classification": qm.INCONCLUSIVE,
+         "reasons": [qm.SEED_SOURCE_UNRELIABLE, "seed_source_crossed_frac=0.2878>0.05"]},
+        {"day": "2025-03-03", "classification": qm.INCONCLUSIVE, "reasons": ["no_seed_snapshots"]},
+        {"day": "2025-02-02", "classification": qm.EXCLUDED, "reasons": ["binance_gap"]},
+    ]
+    rep = qm.build_report(days, meta={})
+    by = {r["day"]: r["coinapi_fill"] for r in rep["days"]}
+    assert by["2025-01-07"]["fill_profile"] == "leading_partial_fill"
+    assert by["2024-12-05"]["full_day_reason"] == "lake_book_delta_v2_absent"
+    assert by["2024-08-05"]["full_day_reason"] == "crossed_seed_source"
+    assert by["2025-06-01"]["fill_profile"] is None
+    assert by["2025-03-03"]["fill_profile"] is None
+    f = rep["summary"]["coinapi_fill"]
+    assert f["needs_fill"] == ["2024-12-05", "2025-01-07", "2024-08-05"]   # existing list intact
+    assert f["partial_fill"] == ["2025-01-07"]                             # Q7: ⊆ needs_fill
+    assert f["fill_counts"] == {
+        "needs_fill": 3, "full_day_fill": 2, "leading_partial_fill": 1,
+        "trailing_partial_fill": 0, "internal_gap_fill": 0, "mixed_partial_fill": 0,
+        "crossed_source_full_day": 1, "no_verdict": 1, "no_fill": 1, "not_in_scope": 1}
+    assert f["full_day_reason_counts"] == {"lake_book_delta_v2_absent": 1,
+                                           "crossed_seed_source": 1}
+    # the internal stitch_plan key is consumed into coinapi_fill, never emitted per-day...
+    assert all("stitch_plan" not in r for r in rep["days"])
+    # ...and the caller's records are not mutated
+    assert days[2]["stitch_plan"] is partial_plan and "coinapi_fill" not in days[2]
+
+
+def test_report_with_fill_plans_is_strict_json(tmp_path):
+    res = qm.assess_lake_day(_leading_partial_lake_df(), _late_seed(), day=DAY, k=1,
+                             seed_min_levels=1)
+    gap = qm.assess_lake_day(pd.DataFrame(), None, day=dt.date(2024, 12, 5), k=1)
+    rep = qm.build_report([res, gap], meta={"k": 1, "thresholds": qm.THRESHOLDS.as_dict()})
+    out = tmp_path / "quality_map_fill.json"
+    qm.write_report(rep, str(out))
+    txt = out.read_text()
+    loaded = json.loads(txt)                                     # strict-JSON round trip
+    assert "NaN" not in txt and "Infinity" not in txt
+    cf = loaded["days"][0]["coinapi_fill"]
+    assert cf["fill_profile"] == "leading_partial_fill"
+    assert loaded["days"][0]["quality"]["invalid_runs"] == [[DAY_OPEN, DAY_OPEN + 50_000 * S]]
+    assert loaded["days"][1]["coinapi_fill"]["fill_profile"] == "full_day_fill"
+    assert loaded["summary"]["coinapi_fill"]["fill_counts"]["leading_partial_fill"] == 1
+
+
+def test_quality_block_coverage_keys_are_schema_consistent():
+    # Every quality block — assessed, missing, excluded, load-failed — carries the Q7 coverage keys.
+    keys = {"lake_present_start_ts", "lake_present_end_ts", "trusted_lake_start_ts",
+            "trusted_lake_end_ts", "n_invalid_runs", "invalid_runs"}
+    assert keys <= set(qm._empty_quality_block(10, 1000))
+    assert keys <= set(qm.excluded_result(DAY, ["x"])["quality"])
+    assert keys <= set(qm.inconclusive_load_failure(DAY, "boom")["quality"])
+    res = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), day=DAY, k=1, seed_min_levels=1)
+    assert keys <= set(res["quality"])
+
+
 # --------------------------------------------------------------------------- report aggregation + JSON
 def test_build_report_counts_each_classification():
     days = [
