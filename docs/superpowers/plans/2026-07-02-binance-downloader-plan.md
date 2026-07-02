@@ -281,7 +281,7 @@ All synthetic; **no live vendor calls in tests** (inject fakes for any lister/re
 
 ## Requirement 10 — Rollout phases
 
-- **Phase 1 — metadata/schema probes + dry-run manifests.** The only offline/unattended step is `scripts/plan_lake_binance_batches.py` (pure planning, reads a local calendar — **no vendor I/O**). Everything else here is a **live Crypto Lake call and is approval-gated** (AGENTS.md — live vendor calls only when the user asks), even the cheap ones: `download_lake_binance.py --dry-run` still hits `lakeapi.list_data(...)` per feed with live subscriber credentials (metadata only — no parquet transfer, ~no quota, no `COINAPI_KEY`), and the bounded coverage/gap + `origin_time`/schema probe (a `download_lake_binance.py --probe` mode, or a small `ingest/lake_binance` probe) covers the perp/spot feeds **and** the `book` seed product plus `funding`/`open_interest`/`liquidations` schema + `origin_time` population (Risk Q9) and tick-scale confirmation (Risk Q1) — all through the **Lake-only** session path (Requirement 4). **Do not run `ingest/verify_lake.py`/`verify_lake2.py` as-is** — they require `COINAPI_KEY` via `ingest/_common.load_env` (`_common.py:41-42`) and would fail before any Lake call for a Lake-only user; reuse their coverage logic only if first switched to the Lake-only loader. **No archive transfer.** Deliverable: schema fixtures, confirmed identifiers/ticks/`origin_time`, dry-run report.
+- **Phase 1 — metadata/schema probes + dry-run manifests.** The only offline/unattended step is `scripts/plan_lake_binance_batches.py` (pure planning, reads a local calendar — **no vendor I/O**). Everything else here is a **live Crypto Lake call and is approval-gated** (AGENTS.md — live vendor calls only when the user asks), even the cheap ones: `download_lake_binance.py --dry-run` still hits `lakeapi.list_data(...)` per feed with live subscriber credentials (metadata only — no parquet transfer, ~no quota, no `COINAPI_KEY`), and the bounded coverage/gap + `origin_time`/schema probe (a `download_lake_binance.py --probe` mode, or a small `ingest/lake_binance` probe) covers the perp/spot feeds **and** the `book` seed product plus `funding`/`open_interest`/`liquidations` schema + `origin_time` population (Risk Q9) and tick-scale confirmation (Risk Q1) — all through the **Lake-only** session path (Requirement 4). **Do not run `ingest/verify_lake.py`/`verify_lake2.py` as-is** — they require `COINAPI_KEY` via `ingest/_common.load_env` (`_common.py:41-42`) and would fail before any Lake call for a Lake-only user; reuse their coverage logic only if first switched to the Lake-only loader. **No archive transfer.** Deliverable: schema fixtures, confirmed identifiers/ticks/`origin_time`, **measured per-feed per-day sizes (incl. the `book` seed → updates `LAKE_GB_PER_DAY`, Task 4)**, dry-run report.
 - **Phase 2 — one-day cheap validation.** Download **one** present day for perp + spot all feeds + the `book` seed (~1.23 GB, one quota-cheap pull), run stage-2 recon on it, and eyeball top-K sanity (uncrossed after seed, plausible depth) + trades/funding/OI/liq normalization. Record `used_data` before/after. Deliverable: one day end-to-end + report.
 - **Phase 3 — staged historical pull.** Use `plan_lake_binance_batches.py` to stage the 12–24 mo span across quota windows; run **one batch per window**, re-checking `used_data` first; recon each batch locally. Deliverable: the normalized raw + processed stores, staged.
 - **Phase 4 — bar/feature integration.** Feed the top-K L2 (sampled at bar-clock times, strict-`<` book-at-trade) + trades/funding/OI/liq into the **future** `bars/` module + feature-manifest pipeline (docs/feature-manifest.md; `bars/` is not yet in the repo — Phase-4 work). Deliverable: bar-ready feature matrix seam.
@@ -405,9 +405,13 @@ from ingest import lake_binance as lb
 import pytest
 
 def test_estimate_includes_book_seed_when_book_delta_selected():
-    # selecting book_delta_v2 also pulls its `book` seed product (0.574 + 0.18 GB/day)
+    # selecting book_delta_v2 must ALSO budget its `book` seed product. Assert the seed cost is
+    # INCLUDED via the module's own constants — do NOT pin the derived (unmeasured, Requirement 7)
+    # seed GB/day, so a Phase-1 measured value updates LAKE_GB_PER_DAY without breaking this test.
+    feeds = lb.LAKE_GB_PER_DAY[("BINANCE_FUTURES", "BTC-USDT-PERP")]
+    assert feeds["book"] > 0                                    # the seed product IS budgeted
     gb = lb.estimate_gb("binance-perp", ["book_delta_v2"], n_days=10)
-    assert 7.3 < gb < 7.8            # 10 × (0.574 + 0.18) GB
+    assert gb == pytest.approx(10 * (feeds["book_delta_v2"] + feeds["book"]))
 
 def test_broad_gate_blocks_without_allow_broad():
     with pytest.raises(SystemExit) as e:
@@ -427,7 +431,7 @@ def test_one_day_allowed():
 ```
 
 - [ ] **Step 2 — Run red.**
-- [ ] **Step 3 — Implement** `LAKE_GB_PER_DAY` (docs §6 measured + `book` seed ~0.18 GB/day/instrument, docs §5a-QualityMap), `estimate_gb` (adds the `book` seed cost whenever `book_delta_v2` is requested, mirroring `run_coinbase_quality_map.py`'s `LAKE_PRODUCTS=("book_delta_v2","book")`), and `check_broad_gate` raising `SystemExit(4)` on breach (mirror `_common.check_backfill_gate`). `used_gb` unreadable → caller exits 2.
+- [ ] **Step 3 — Implement** `LAKE_GB_PER_DAY` (docs §6 measured feed sizes; the `book` seed value is **derived** from the Coinbase ref ~0.18 GB/day, docs §5a-QualityMap — **not measured for Binance**, so Phase 1 re-measures it and updates this constant, Requirement 7), `estimate_gb` (adds the `book` seed cost whenever `book_delta_v2` is requested, mirroring `run_coinbase_quality_map.py`'s `LAKE_PRODUCTS=("book_delta_v2","book")`), and `check_broad_gate` raising `SystemExit(4)` on breach (mirror `_common.check_backfill_gate`). `used_gb` unreadable → caller exits 2.
 - [ ] **Step 4 — Run green.**
 - [ ] **Step 5 — Commit.**
 
