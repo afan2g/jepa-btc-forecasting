@@ -875,7 +875,10 @@ Hard gates before the hybrid Coinbase plan is production-validated:
 
 Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
-- [ ] **Within-timestamp ordering for CoinAPI** (no `sequence_number`; rely on `seq` + L3 `order_id`).
+- [x] **Within-timestamp ordering for CoinAPI** — resolved 2026-07-02: file/`seq` order is
+      canonical, ties break by original row index, `order_id` is never an ordering key
+      (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,
+      `tests/test_coinapi_within_timestamp_ordering.py`; quality counters `seq_disorder`/`seq_duplicate`).
 - [ ] **Binance downloader** — not yet built; same throttled/resumable/partitioned pattern as
       `download_coinapi.py`, streaming per day (109 M rows). Read direct via pyarrow S3 (`eu-west-1`) or lakeapi.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
