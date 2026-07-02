@@ -440,11 +440,39 @@ def test_assess_crossed_seed_source_day_plans_full_day_crossed():
     assert q["lake_present_start_ts"] is not None                # presence recorded, trust not implied
 
 
-def test_assess_missing_day_and_native_records_carry_no_stitch_plan():
+def test_assess_missing_day_carries_no_stitch_plan():
     res = qm.assess_lake_day(pd.DataFrame(), None, day=DAY, k=1)
     assert res["stitch_plan"] is None
     assert res["quality"]["trusted_lake_start_ts"] is None
     assert res["quality"]["invalid_runs"] is None
+
+
+def test_assess_native_engine_day_is_metrics_only_with_full_day_fallback(monkeypatch):
+    # The metrics-only native path materializes no frame: no mask plan, all-None coverage, and a
+    # degraded native fill day gets the conservative synthesized full-day plan at report build
+    # (per-sample native coverage metrics are the plan's Task-3 follow-up). Offline: the native
+    # reconstruction is stubbed with metrics-only meta, the exact shape `_lake_quality_from_meta`
+    # consumes.
+    meta = {"seed_accepted": True, "seed_reason": "ok", "seed_ts": DAY_OPEN + 1,
+            "reseed_count": 0, "reseed_blocked_invalid_snapshot": 0,
+            "snapshot_reason_codes": {"ok": 10}, "thin_depth_fraction": 0.0,
+            "crossed_duration_s": 5.0, "n_samples": 86_400, "crossed_samples": 34_560,
+            "crossed_rate": 0.40, "missing_book_samples": 0, "missing_book_fraction": 0.0}
+    monkeypatch.setattr(qm, "_seeded_reconstruct", lambda *a, **k: (None, dict(meta)))
+    res = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), day=DAY, k=1, seed_min_levels=1,
+                             cold_ab=False, engine="native", price_scale=100)
+    assert res["classification"] == qm.LAKE_PRESENT_DEGRADED    # crossed 40% > 1%
+    assert res["stitch_plan"] is None
+    assert all(res["quality"][key] is None for key in qm._EMPTY_COVERAGE)
+    rep = qm.build_report([res], meta={})
+    day_rec = rep["days"][0]
+    assert "stitch_plan" not in day_rec
+    cf = day_rec["coinapi_fill"]
+    assert cf["needs_fill"] is True
+    assert cf["fill_profile"] == "full_day_fill"
+    assert cf["full_day_reason"] == "quality_over_usable_bar"
+    seg, = cf["fill_segments"]
+    assert seg["start_iso"] == "2025-06-01T00:00:00Z" and seg["end_iso"] == "2025-06-02T00:00:00Z"
 
 
 # ------------------------------------------------------------------- coinapi_fill_block (composer)
@@ -498,6 +526,43 @@ def test_fill_block_degraded_day_with_lake_only_plan_routes_full_day():
     assert (seg["start_ts"], seg["end_ts"]) == (lake_only["day_open_ts"], lake_only["day_end_ts"])
 
 
+def test_fill_block_keeps_mask_full_day_reasons_verbatim():
+    # A mask-derived FULL-DAY plan (Q2 rules 4-6) must pass through the composer untouched — its
+    # own reason code (here lake_never_warmup_qualified), NOT the generic fallback code.
+    ts = DAY_OPEN + np.arange(86_400, dtype=np.int64) * S
+    valid = np.tile(np.array([True, True, False]), 28_800)   # runs of 2 < warmup_consecutive=3
+    plan = plan_day_stitch(ts, valid, grid_ns=S, seed_accepted=True, seed_ts=DAY_OPEN,
+                           seed_source_trusted=True, day="2025-06-01").as_dict()
+    assert plan["full_day_reason"] == "lake_never_warmup_qualified"
+    b = qm.coinapi_fill_block(qm.LAKE_PRESENT_DEGRADED,
+                              ["seed_accepted", "crossed_rate_after=0.4000>0.01"],
+                              day="2025-06-01", stitch_plan=plan)
+    assert b["full_day_reason"] == "lake_never_warmup_qualified"
+    seg, = b["fill_segments"]
+    assert seg["reason"] == "lake_never_warmup_qualified"
+    rep = qm.build_report([{"day": "2025-06-01", "classification": qm.LAKE_PRESENT_DEGRADED,
+                            "reasons": ["seed_accepted", "crossed_rate_after=0.4000>0.01"],
+                            "stitch_plan": plan}], meta={})
+    assert rep["summary"]["coinapi_fill"]["full_day_reason_counts"] == {
+        "lake_never_warmup_qualified": 1}
+
+
+def test_stitch_coverage_invalid_runs_list_is_capped_with_full_count():
+    # Q7: invalid_runs is capped like reseed_ts[:100]; n_invalid_runs keeps the full count.
+    n = 1200
+    ts = DAY_OPEN + np.arange(n, dtype=np.int64) * S
+    bad = np.zeros(n, dtype=bool)
+    bad[np.arange(0, n, 8)] = True                           # 150 isolated invalid samples
+    frame = pd.DataFrame({"sample_ts": ts,
+                          "bid_0_price": np.where(bad, np.nan, 100.0),
+                          "ask_0_price": np.full(n, 101.0)})
+    meta = {"seed_accepted": True, "seed_ts": int(ts[0])}
+    _, cov = qm._stitch_and_coverage(frame, meta=meta, reasons=[], grid_ms=1000, day=DAY)
+    assert cov["n_invalid_runs"] == 150
+    assert len(cov["invalid_runs"]) == qm.INVALID_RUNS_CAP == 100
+    assert cov["invalid_runs"][0] == [DAY_OPEN + 0 * S, DAY_OPEN + 1 * S]
+
+
 def test_fill_block_crossed_source_without_a_mask_plan_falls_back_full_day():
     # Metrics-only (native-engine) records carry no stitch plan; the crossed-source fill decision
     # still gets a conservative full-day plan with the stable crossed-source reason.
@@ -521,6 +586,14 @@ def test_degraded_thin_day_end_to_end_routes_full_day_fill():
     assert cf["needs_fill"] is True
     assert cf["fill_profile"] == "full_day_fill"
     assert cf["full_day_reason"] == "quality_over_usable_bar"
+    # No Lake coverage survives a full-day route (plan-doc definitions table): the override must
+    # null the report's trusted_lake_* — presence/invalid-run facts stay, trust does not...
+    q = rep["days"][0]["quality"]
+    assert q["trusted_lake_start_ts"] is None and q["trusted_lake_end_ts"] is None
+    assert q["lake_present_start_ts"] is not None and q["n_invalid_runs"] is not None
+    # ...and the caller's record (the mask-level view, consistent with its lake_only plan) is
+    # not mutated.
+    assert res["quality"]["trusted_lake_start_ts"] is not None
 
 
 # ------------------------------------------------------------------- report stamping + summary

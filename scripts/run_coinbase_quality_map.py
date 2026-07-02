@@ -536,6 +536,14 @@ def build_report(per_day_results, *, meta: dict) -> dict:
         rec["coinapi_fill"] = coinapi_fill_block(
             rec["classification"], rec.get("reasons"), day=rec["day"],
             grid_ms=(rec.get("quality") or {}).get("grid_ms") or 1000, stitch_plan=plan)
+        if (plan is not None and plan["fill_profile"] == LAKE_ONLY
+                and rec["coinapi_fill"]["fill_profile"] == FULL_DAY_FILL and rec.get("quality")):
+            # The lake_only mask plan was overridden to a full-day fill: no Lake coverage survives
+            # a full-day route (plan-doc definitions table), so the report's trusted_lake_* must be
+            # None. Presence/invalid-run facts stay; copy-on-write keeps the caller's record (the
+            # mask-level view, consistent with its lake_only plan) unmutated.
+            rec["quality"] = {**rec["quality"], "trusted_lake_start_ts": None,
+                              "trusted_lake_end_ts": None}
         days.append(rec)
     by_class: dict[str, list] = {c: [] for c in CLASSES}
     fill: dict[str, list] = {"needs_fill": [], "no_fill": [], "no_verdict": [], "not_in_scope": [],

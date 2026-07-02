@@ -434,9 +434,10 @@ policy, see below); other `inconclusive` → `null` (unresolved — surfaced in 
 fills the new `quality` coverage keys `lake_present_*`/`trusted_lake_*`/`n_invalid_runs`/
 `invalid_runs`), and a conservative synthesized full-day plan when no mask supports a narrower fill
 (Lake absent; the metrics-only native engine, whose per-sample coverage is the plan's Task-3
-follow-up; or a day-level bar failure with a clean mask, e.g. thin depth). No-fill / no-verdict /
-out-of-scope days carry `fill_profile: null`. `summary.coinapi_fill` adds `partial_fill` (day list ⊆
-`needs_fill`), `fill_counts`, and `full_day_reason_counts`.
+follow-up; or a day-level bar failure with a clean mask, e.g. thin depth — such override days'
+`quality.trusted_lake_*` are nulled, since no Lake coverage survives a full-day route). No-fill /
+no-verdict / out-of-scope days carry `fill_profile: null`. `summary.coinapi_fill` adds
+`partial_fill` (day list ⊆ `needs_fill`), `fill_counts`, and `full_day_reason_counts`.
 
 **Quota-aware (docs §2.1/§6/§8).** It prints `lakeapi.used_data(sess)` before/after, estimates the
 request from measured per-day sizes (`book_delta_v2` ~0.30 GB/day from §6; the `book` 20-level snapshot
