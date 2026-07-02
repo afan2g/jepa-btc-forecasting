@@ -6,6 +6,7 @@ import pytest
 from eval.manifest import (
     MANIFEST_VERSION,
     feature_list,
+    leaky_feature_names,
     load_manifest,
     target_list,
     unsafe_infer_feature_cols,
@@ -485,3 +486,9 @@ def test_unsafe_infer_param_hygiene():
     bad = df.copy(); bad[42] = 1.0
     with pytest.raises(ValueError, match="strings"):
         unsafe_infer_feature_cols(bad)
+
+
+def test_leaky_feature_names_public_helper():
+    # Public wrapper for the runner's legacy-branch screen (and manifest-authoring tools).
+    assert leaky_feature_names(["ofi_integrated", "mid_fwd_5s", "y", "spread_tick"]) == \
+        ["mid_fwd_5s", "y"]
