@@ -911,8 +911,13 @@ Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
       Plan: `docs/superpowers/plans/2026-07-02-trade-validation-breadth-plan.md` (validator
       `ingest/validate_trade_feeds.py` + pure `ingest/trade_checks.py`; per-day/per-venue
-      pass/warn/fail JSON report, timestamp/sort policy, gating + 4-phase rollout). Docs-only so far;
-      no vendor calls run — item stays open until the bounded live run + bar-builder enforcement land.
+      pass/warn/fail JSON report, timestamp/sort policy, gating + 4-phase rollout).
+      **Phase 1a landed:** the pure, source-agnostic checks module `ingest/trade_checks.py`
+      (engine-clock/`received_time` fallback + stable sort, monotonicity, dup-ts/dup-id, price/size
+      sanity, sparse/missing-hour coverage, inter-arrival, calendar routing + gate booleans, GB/quota
+      gate, strict-JSON deterministic report) with synthetic tests `tests/test_trade_checks.py` — no
+      vendor calls. Still open: the Lake CLI wrapper (Phase 1b), the bounded live run (Phase 2), and
+      bar-builder enforcement (Phase 3/4).
 - [x] **Within-timestamp ordering for CoinAPI** — resolved 2026-07-02: file/`seq` order is
       canonical, ties break by original row index, `order_id` is never an ordering key
       (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,
