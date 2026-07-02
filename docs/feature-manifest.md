@@ -59,12 +59,22 @@ X = matrix[feature_list(man)]        # exactly manifest features, in order
 ```
 
 `eval.runner.run_from_manifest` applies `validate_frame` automatically whenever
-the manifest carries `manifest_version`; legacy `{feature_cols, embargo_ns,
-max_lookback_ns, gate}` dicts still work unchanged, and `validate_matrix` /
-`run_study` keep enforcing the baseline invariants either way. A manifest that
-carries v1-only fields but lost `manifest_version` (typo) is refused rather
-than silently treated as legacy. Future JEPA
-training should consume the same manifest with
+the manifest carries `manifest_version`, selects features via `feature_list`
+(manifest order), and adds three baseline-specific fail-closed checks: declared
+`target_cols` must be exactly `{y_fwd_bps, label}` (what `evaluate_config`
+trains on), `availability_lag_ns` must be 0 (the baseline is synchronous —
+lag features upstream), and every declared horizon must be present in the
+frame. The result dict echoes `{dataset_id, build_id, generated_at,
+embargo_ns, max_lookback_ns, feature_cols}` under `"manifest"` so a run is
+reproducible from its own output. The `scripts/run_baseline.py` CLI accepts
+only v1 manifests (via `load_manifest`); legacy `{feature_cols, embargo_ns,
+max_lookback_ns, gate}` dicts still work for direct library callers of
+`run_from_manifest` (with a leaky-name screen but no frame validation) until
+the legacy branch is removed. A manifest that carries v1-only fields but lost
+`manifest_version` (typo) is refused rather than silently treated as legacy.
+Note `gate` is optional at schema level but required by `run_from_manifest`
+and the CLI (`eval.runner.resolve_gate`); JEPA pretraining manifests may omit
+it and will consume the same manifest with
 `validate_frame(df, man, require_targets=False)` (label columns may be absent
 for unsupervised pretraining; everything else still applies).
 
