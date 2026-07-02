@@ -255,7 +255,7 @@ scripts/plan_lake_binance_batches.py                         # staging (planning
 | 0 | all requested `(feed,day)` units ok or skipped |
 | 2 | setup error (bad args, missing keys, unreadable calendar/`used_data`) **or a runtime vendor quota/credit hard-stop** — fail-safe, do not proceed |
 | 3 | completed with ≥1 errored unit (partial) — rerun with `--resume` |
-| 4 | broad-pull gate — estimated GB over `--max-gb` (or over quota headroom) without `--allow-broad` |
+| 4 | broad-pull gate — estimated GB over `--max-gb` without `--allow-broad`; **or over the 300 GB/month quota headroom, which exits 4 regardless of `--allow-broad`** (matches Requirement 3 and the `check_broad_gate` test) |
 
 **Logging / report artifacts:** human-readable per-unit lines to stdout (`{dt}  OK  {rows:,} rows  {src}MB→{out}MB  {secs}s`, like `download_coinapi.py`); a machine report `data/reports/binance_download/<run-id>.json` with `{args, days, feeds, est_gb, used_data_before/after, counts{ok,skip,missing,error}, total_rows, s3_requests, per_unit[]}`. `--dry-run` writes the same report with `transferred=0`.
 
