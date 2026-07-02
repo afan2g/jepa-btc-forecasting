@@ -69,6 +69,16 @@ COMMAND_TEMPLATE = (".venv/bin/python scripts/run_coinbase_quality_map.py "
                     "--usable-calendar {calendar} --out-dir {report_dir} --allow-broad")
 REPORT_ROOT = "data/reports/coinbase_quality_map_batches"
 
+# The runner re-estimates every request at ITS fixed conservative rate and refuses, REGARDLESS of
+# --allow-broad, anything estimated over quota − headroom — so an emitted command is only
+# executable up to floor((300 − 10) / 0.48) = 604 days. Batch sizing is capped there even when
+# planning with a lower (e.g. measured-wire-rate) --gb-per-day. The planner must stay stdlib-only
+# (importing the runner pulls in pandas), so these are pinned copies of the runner's constants,
+# kept aligned by a contract test.
+RUNNER_GB_PER_DAY = 0.48   # == sum(run_coinbase_quality_map.LAKE_GB_PER_DAY.values())
+RUNNER_QUOTA_GB = 300.0    # == run_coinbase_quality_map.QUOTA_GB
+RUNNER_HEADROOM_GB = 10.0  # == run_coinbase_quality_map.DEFAULT_HEADROOM_GB
+
 MANIFEST_NAME = "manifest.json"
 BATCH_GLOB = "batch_*_days.txt"
 CALENDAR_ERROR_EXIT = 2
@@ -154,19 +164,27 @@ def select_days(cal: dict) -> dict:
 
 
 # ----------------------------------------------------------------------------- batching
-def plan_batches(days: list[str], *, max_gb_per_batch: float, gb_per_day: float) -> list[list[str]]:
-    """Chunk sorted `days` into batches of floor(max_gb_per_batch / gb_per_day) days each.
-    Deterministic; every batch estimate is ≤ the budget by construction."""
+def days_per_batch(max_gb_per_batch: float, gb_per_day: float) -> tuple[int, bool]:
+    """Days per batch under the user budget, capped at what the RUNNER's quota gate can ever
+    accept. Returns (days, capped). Tiny epsilon so an exact-multiple budget (0.96/0.48) is not
+    knocked down by float noise; otherwise floor() errs toward FEWER days per batch (the safe
+    direction for a quota)."""
     if not (math.isfinite(gb_per_day) and gb_per_day > 0):
         raise PlanError(f"--gb-per-day must be a positive number, got {gb_per_day}")
     if not (math.isfinite(max_gb_per_batch) and max_gb_per_batch > 0):
         raise PlanError(f"--max-gb-per-batch must be a positive number, got {max_gb_per_batch}")
-    # tiny epsilon so an exact-multiple budget (0.96/0.48) is not knocked down by float noise;
-    # otherwise floor() errs toward FEWER days per batch (the safe direction for a quota).
-    per_batch = int((max_gb_per_batch / gb_per_day) + 1e-9)
-    if per_batch < 1:
+    requested = int((max_gb_per_batch / gb_per_day) + 1e-9)
+    runner_cap = int((RUNNER_QUOTA_GB - RUNNER_HEADROOM_GB) / RUNNER_GB_PER_DAY + 1e-9)
+    if requested < 1:
         raise PlanError(f"--max-gb-per-batch {max_gb_per_batch} GB does not allow even one day at "
                         f"{gb_per_day} GB/day — the budget must allow at least one day per batch")
+    return min(requested, runner_cap), requested > runner_cap
+
+
+def plan_batches(days: list[str], *, max_gb_per_batch: float, gb_per_day: float) -> list[list[str]]:
+    """Chunk sorted `days` into runner-executable batches (see days_per_batch).
+    Deterministic; every batch estimate is ≤ the budget by construction."""
+    per_batch, _ = days_per_batch(max_gb_per_batch, gb_per_day)
     return [days[i:i + per_batch] for i in range(0, len(days), per_batch)]
 
 
@@ -174,7 +192,7 @@ def plan_batches(days: list[str], *, max_gb_per_batch: float, gb_per_day: float)
 def build_manifest(sel: dict, batches: list[list[str]], *, calendar_path: str, out_dir: str,
                    max_gb_per_batch: float, gb_per_day: float,
                    generated_utc: str | None = None) -> dict:
-    per_batch = int((max_gb_per_batch / gb_per_day) + 1e-9)
+    per_batch, capped = days_per_batch(max_gb_per_batch, gb_per_day)
     batch_rows = []
     for i, days in enumerate(batches, start=1):
         fname = batch_file_name(i)
@@ -185,6 +203,8 @@ def build_manifest(sel: dict, batches: list[list[str]], *, calendar_path: str, o
             "first_day": days[0],
             "last_day": days[-1],
             "est_gb": round(len(days) * gb_per_day, 2),
+            # what the RUNNER's own quota gate will estimate this batch at (its fixed rate)
+            "runner_est_gb": round(len(days) * RUNNER_GB_PER_DAY, 2),
             "report_dir": report_dir,
             "command": COMMAND_TEMPLATE.format(days_file=os.path.join(out_dir, fname),
                                                calendar=calendar_path, report_dir=report_dir),
@@ -198,6 +218,8 @@ def build_manifest(sel: dict, batches: list[list[str]], *, calendar_path: str, o
             "gb_per_day": gb_per_day,
             "max_gb_per_batch": max_gb_per_batch,
             "days_per_batch": per_batch,
+            "days_per_batch_capped_by_runner_gate": capped,
+            "runner_gb_per_day": RUNNER_GB_PER_DAY,
             "out_dir": out_dir,
             "command_template": COMMAND_TEMPLATE,
             "note": "PLANNING ONLY (docs/data.md §5a-QualityMap staging). No vendor I/O: this "
@@ -256,7 +278,10 @@ def print_plan(manifest: dict, *, dry_run: bool) -> None:
     print("=" * 74)
     print(f"  calendar:  {m['input_calendar']}")
     print(f"  budget:    {m['max_gb_per_batch']:g} GB/batch at {m['gb_per_day']:g} GB/day "
-          f"(conservative) -> {m['days_per_batch']} day(s)/batch")
+          f"(conservative) -> {m['days_per_batch']} day(s)/batch"
+          + (" (capped by the runner quota gate: it re-estimates at "
+             f"{m['runner_gb_per_day']:g} GB/day)" if m["days_per_batch_capped_by_runner_gate"]
+             else ""))
     print(f"  days:      {s['n_batch_days']} present-book day(s) to map in {s['n_batches']} "
           f"batch(es), ~{s['total_est_gb']:g} GB total estimate "
           f"(includes {s['n_fill_days_trade_only_batched']} trade-only fill day(s) — book "

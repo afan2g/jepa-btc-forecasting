@@ -536,7 +536,11 @@ absent — they classify `missing_needs_coinapi` at ~0 GB; map them separately v
 target — one batch per monthly quota window with headroom under the 300 GB cap) at the
 **conservative 0.48 GB/day** §6 estimate (matches the runner's quota estimator; measured wire rate is
 lower, ~0.26 GB/day). The current calendar plans **2 batches** (520 + 137 days ≈ 249.6 + 65.8 GB,
-~315.4 GB total). Batch files plus a manifest (day counts,
+~315.4 GB total). Batch sizing is additionally capped at what the runner's own gate can ever accept —
+floor((300 − 10 GB) ÷ 0.48 GB/day) = **604 days/batch** — because the runner re-estimates every
+request at its fixed 0.48 GB/day and refuses anything above quota − headroom *regardless* of
+`--allow-broad`; so planning with a lower measured `--gb-per-day` (e.g. 0.26) still yields batches
+every emitted command can actually run (657 days → 604 + 53). Batch files plus a manifest (day counts,
 per-batch GB estimates, the exact runner command per batch) land under the git-ignored
 `data/tmp/coinbase_quality_map_batches/`; batch files are byte-deterministic for a given
 calendar + budget. **Planning only:** the planner performs no vendor I/O — it does not run Lake
@@ -561,6 +565,17 @@ if less than ~40 GB is already used that month).
   --days-file data/tmp/coinbase_quality_map_batches/batch_001_days.txt \
   --usable-calendar data/usable_calendar.json \
   --out-dir data/reports/coinbase_quality_map_batches/batch_001 \
+  --allow-broad
+
+# 3) optional: sweep the 47 withheld book-gap days. ACTUAL transfer is ~0 GB (each day raises
+#    NoFilesFound → missing_needs_coinapi), but the runner does NOT pre-discount gap days — it
+#    estimates the request at 0.48 GB/day ((47 gap days + the 2 default validation days) × 0.48
+#    ≈ 23.5 GB), so the sweep needs --allow-broad and quota headroom like any broad request.
+.venv/bin/python scripts/run_coinbase_quality_map.py \
+  --engine native \
+  --no-cold-ab \
+  --include-gap-days 47 \
+  --out-dir data/reports/coinbase_quality_map_batches/gap_days \
   --allow-broad
 ```
 

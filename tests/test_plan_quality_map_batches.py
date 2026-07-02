@@ -130,6 +130,17 @@ def test_non_positive_gb_per_day_fails_clearly():
         pm.plan_batches(sorted(LAKE_ALL), max_gb_per_batch=1.0, gb_per_day=0.0)
 
 
+def test_batch_size_is_capped_by_the_runner_quota_gate():
+    """A --gb-per-day below the runner's fixed 0.48 estimator must not plan batches the emitted
+    command cannot run: the runner re-estimates every request at 0.48 GB/day and refuses anything
+    over quota − headroom (300 − 10 GB ⇒ 604 days) REGARDLESS of --allow-broad (Codex review)."""
+    days = [(dt.date(2024, 1, 1) + dt.timedelta(days=i)).isoformat() for i in range(700)]
+    batches = pm.plan_batches(days, max_gb_per_batch=250.0, gb_per_day=0.26)
+    assert [len(b) for b in batches] == [604, 96]
+    for b in batches:
+        assert len(b) * pm.RUNNER_GB_PER_DAY <= pm.RUNNER_QUOTA_GB - pm.RUNNER_HEADROOM_GB
+
+
 # --------------------------------------------------------------------------- calendar validation
 def test_missing_calendar_file_fails_clearly(tmp_path):
     missing = str(tmp_path / "nope.json")
@@ -216,6 +227,9 @@ def test_manifest_summarizes_the_plan(tmp_path):
     assert m["summary"]["n_fill_days_book_gap"] == 1
     assert m["summary"]["n_fill_days_trade_only_batched"] == 1
     assert m["summary"]["n_excluded_days"] == 1
+    assert m["meta"]["runner_gb_per_day"] == 0.48
+    # what the RUNNER's own quota gate will estimate this batch at (2 days × 0.48)
+    assert m["batches"][0]["runner_est_gb"] == 0.96
     assert m["batched_trade_only_fill_days"] == ["2025-01-11"]
     assert m["skipped"]["fill_days_book_gap"] == ["2025-01-10"]
     assert m["skipped"]["excluded_days_by_reason"] == EXCLUDED
@@ -282,17 +296,32 @@ def test_dry_run_prints_the_plan_and_writes_nothing(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- runner contract
-def test_batch_files_are_loadable_by_the_quality_map_runner(tmp_path):
-    """The generated days-file must parse through run_coinbase_quality_map.py::resolve_days —
-    the actual consumer contract, not just 'one day per line'."""
+def _load_runner():
     spec = importlib.util.spec_from_file_location(
         "run_coinbase_quality_map",
         pathlib.Path(__file__).resolve().parents[1] / "scripts" / "run_coinbase_quality_map.py")
     qm = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = qm
     spec.loader.exec_module(qm)
+    return qm
 
+
+def test_batch_files_are_loadable_by_the_quality_map_runner(tmp_path):
+    """The generated days-file must parse through run_coinbase_quality_map.py::resolve_days —
+    the actual consumer contract, not just 'one day per line'."""
+    qm = _load_runner()
     _, out_dir = _main(tmp_path)
     args = types.SimpleNamespace(days_file=str(pathlib.Path(out_dir) / "batch_001_days.txt"),
                                  days=None, include_gap_days=0, usable_calendar="unused")
     assert qm.resolve_days(args) == [dt.date(2025, 1, 1), dt.date(2025, 1, 2)]
+
+
+def test_planner_runner_gate_constants_stay_aligned():
+    """The planner duplicates the runner's quota-gate constants (it must stay stdlib-only, so it
+    cannot import the runner, which needs pandas). If the runner's estimator/cap/headroom change,
+    this pins the planner's copies to them."""
+    qm = _load_runner()
+    assert pm.RUNNER_GB_PER_DAY == pytest.approx(
+        sum(qm.LAKE_GB_PER_DAY[p] for p in qm.LAKE_PRODUCTS))
+    assert pm.RUNNER_QUOTA_GB == qm.QUOTA_GB
+    assert pm.RUNNER_HEADROOM_GB == qm.DEFAULT_HEADROOM_GB
