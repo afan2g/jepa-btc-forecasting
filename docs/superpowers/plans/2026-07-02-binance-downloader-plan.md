@@ -50,6 +50,7 @@ Design each unit with one responsibility; keep vendor-schema knowledge at the in
 | `tests/test_lake_binance_paths.py` | Create | Partition-path + registry generation (pure). |
 | `tests/test_lake_binance_manifest.py` | Create | Manifest append/read, resume/idempotency, per-day state (pure, `tmp_path`). |
 | `tests/test_lake_binance_schema.py` | Create | Normalized-schema validation + vendor-drift fail-loud (synthetic frames). |
+| `tests/test_lake_binance_engine_time.py` | Create | Engine-time selection + partial-`origin_time` → `received_time` fallback / drop-and-record (synthetic frames). |
 | `tests/test_lake_binance_gate.py` | Create | Quota estimation + broad-pull gate exit codes (pure). |
 | `tests/test_plan_lake_binance_batches.py` | Create | Batch planner determinism/budget (pure). |
 | `tests/test_binance_recon_conformance.py` | Create | Native-vs-Python top-K conformance on a Binance-shaped synthetic fixture (`price_scale=10`), skipped when native absent. |
@@ -378,15 +379,17 @@ def validate_feed(instrument_key: str, feed: str) -> None:
 - [ ] **Step 4 — Run green.**
 - [ ] **Step 5 — Commit.**
 
-### Task 3: Schema normalization + fail-loud drift (synthetic frames)
+### Task 3: Schema normalization + engine-time selection + fail-loud drift (synthetic frames)
 
-**Files:** Modify `ingest/lake_binance.py` (add `SCHEMA_VERSION`, `normalize_book_delta_v2`, `normalize_trades`, `normalize_scalar`); Test `tests/test_lake_binance_schema.py`.
+**Files:** Modify `ingest/lake_binance.py` (add `RAW_SCHEMA_VERSION`/`PROCESSED_SCHEMA_VERSION`, `normalize_book_delta_v2`, `normalize_trades`, `normalize_scalar`, and `resolve_engine_time(df) -> (col, fallback_used, dropped_rows)`); Test `tests/test_lake_binance_schema.py`, `tests/test_lake_binance_engine_time.py`.
 
-- [ ] **Step 1 — Failing test:** feed a synthetic pandas frame with the documented `book_delta_v2` columns → normalized frame has the canonical schema and `schema_version`; a frame with a renamed/missing column or an unknown `side` value raises `ValueError` naming the seen columns (reuse `recon.ingest._pick`/`_side_str` semantics).
+- [ ] **Step 1 — Failing test:** feed a synthetic pandas frame with the documented `book_delta_v2` columns → normalized frame has the canonical schema and stamps `RAW_SCHEMA_VERSION`; a frame with a renamed/missing column or an unknown `side` value raises `ValueError` naming the seen columns (reuse `recon.ingest._pick`/`_side_str` semantics).
 - [ ] **Step 2 — Run red.**
 - [ ] **Step 3 — Implement** the normalizers using the alias-resolution pattern from `recon/ingest.py` (do not duplicate — import the `_pick` idea; keep vendor knowledge here at the boundary).
 - [ ] **Step 4 — Run green.**
-- [ ] **Step 5 — Commit.**
+- [ ] **Step 5 — Engine-time failing test** (`tests/test_lake_binance_engine_time.py`): the three Requirement 9 item-8 cases — full `origin_time` selected; 99.x% `origin_time` + full `received_time` → whole-day fallback with `engine_time_col` stamped and the frame passing `recon.ingest._require_populated`; neither clock full → drop ≤0/NaT rows + record the count. Run red.
+- [ ] **Step 6 — Implement** `resolve_engine_time(df) -> (col, fallback_used, dropped_rows)`: reuse `recon.ingest.shared_engine_time_col`/`is_populated` as the coarse selector, then enforce the **100%-populated** gate (Requirement 4) — pick `origin_time` if full, else `received_time` if full, else drop the invalid-timestamp rows and record the count; return the chosen column + fallback flag + drop count for the manifest. Run green.
+- [ ] **Step 7 — Commit.**
 
 ### Task 4: Quota estimation + broad-pull gate (pure)
 
@@ -478,7 +481,7 @@ git status -sb
 
 ```bash
 .venv/bin/python -m pytest -q tests/test_lake_binance_paths.py tests/test_lake_binance_manifest.py \
-    tests/test_lake_binance_schema.py tests/test_lake_binance_gate.py \
+    tests/test_lake_binance_schema.py tests/test_lake_binance_engine_time.py tests/test_lake_binance_gate.py \
     tests/test_plan_lake_binance_batches.py tests/test_binance_recon_conformance.py
 .venv/bin/python -m py_compile ingest/download_lake_binance.py ingest/lake_binance.py \
     scripts/plan_lake_binance_batches.py scripts/run_binance_recon.py
