@@ -34,6 +34,16 @@ Classifications (explicit thresholds, emitted in the report JSON — see `Thresh
                             `seed_source_crossed_frac`=0.3751), OR the Lake load failed. Needs a
                             better seed source or CoinAPI fill before a verdict.
 
+`classification` stays the LAKE-ONLY quality verdict; the downstream CoinAPI fill/stitch decision
+lives in each record's `coinapi_fill` block (`coinapi_fill_block`): the PR #13 `needs_fill`/`why`
+decision plus the partial-day stitch plan from `recon.stitch_policy`
+(`fill_profile`/`fill_segments`/`seams`/`seam_policy` — plan-doc Q7,
+docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md). On the Python engine path the plan
+is derived from the per-sample validity mask (`plan_day_stitch`), and `quality` carries the
+coverage metrics (`lake_present_*`/`trusted_lake_*`/`invalid_runs`); the metrics-only native
+engine emits None coverage, and its fill days get a conservative full-day plan (native per-sample
+metrics are the plan's Task-3 follow-up).
+
 Usage:
   .venv/bin/python scripts/run_coinbase_quality_map.py                       # default 2-day set
   .venv/bin/python scripts/run_coinbase_quality_map.py --days 2025-06-01,2026-04-01
@@ -54,6 +64,7 @@ import pathlib
 import sys
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -64,6 +75,10 @@ from recon.ingest import shared_engine_time_col                       # noqa: E4
 from recon.parity import frame_quality                               # noqa: E402
 from recon.reseed import (                                           # noqa: E402
     ReseedPolicy, reconstruct_lake_l2_at_samples_seeded, snapshots_from_lake_book_df,
+)
+from recon.stitch_policy import (                                     # noqa: E402
+    FULL_DAY_FILL, LAKE_ONLY, PARTIAL_FILL_PROFILES, REASON_CROSSED_SOURCE,
+    full_day_plan, invalid_runs, plan_day_stitch, valid_mask_from_frame,
 )
 
 NS_PER_MS = 1_000_000
@@ -249,17 +264,77 @@ def coinapi_fill_decision(classification: str, reasons) -> dict:
     return {"needs_fill": None, "why": "no_verdict"}
 
 
+# Stitch-plan keys of the per-day `coinapi_fill` block (plan-doc Q7). Days without a stitch plan
+# (no fill, no verdict, out of scope) carry them as None — stable schema either way.
+_NO_PLAN_FIELDS = {"fill_profile": None, "full_day_reason": None, "fill_segments": None,
+                   "seams": None, "seam_policy": None}
+# Fallback full-day reason per needs-fill `why` code, used when a fill day has NO mask-derived plan
+# (Lake partition absent; metrics-only native engine — per-sample coverage is the Task-3 native
+# follow-up) or a mask plan with no fillable window (`lake_only` — e.g. thin-depth degradation,
+# invisible to the top-of-book validity predicate): route the WHOLE day to CoinAPI, per the policy
+# "full-day unless the partial policy clearly supports a narrower fill". Script-level codes reuse
+# the day-level reason strings; the crossed-source code is the shared stitch-policy constant.
+_FALLBACK_FULL_DAY_REASON = {
+    "lake_book_delta_v2_absent": "lake_book_delta_v2_absent",
+    "quality_over_usable_bar": "quality_over_usable_bar",
+    "crossed_seed_source_cross_validated_2026-07-01": REASON_CROSSED_SOURCE,
+}
+INVALID_RUNS_CAP = 100  # invalid_runs list cap in the report (n_invalid_runs keeps the full count)
+
+
+def coinapi_fill_block(classification: str, reasons, *, day: str, grid_ms: int = 1000,
+                       stitch_plan: dict | None = None) -> dict:
+    """The full per-day `coinapi_fill` report block: the PR #13 `needs_fill`/`why` decision
+    (`coinapi_fill_decision`, unchanged) plus the partial-day stitch plan (plan-doc Q7 /
+    docs/data.md §5a-QualityMap). Q2 routing applies only AFTER the day-level decision:
+
+      * `needs_fill` in (False, None) → no stitch plan (`fill_profile: null`), whether or not a
+        mask plan was computed — `lake_usable` days are Lake-only, unresolved days stay surfaced.
+      * `needs_fill is True` with a mask-derived plan supporting a fill → that plan verbatim
+        (`fill_profile`/`full_day_reason`/`fill_segments`/`seams`/`seam_policy` from
+        `plan_day_stitch(...).as_dict()`).
+      * `needs_fill is True` otherwise → a synthesized conservative full-day plan
+        (`full_day_plan`) with the `_FALLBACK_FULL_DAY_REASON` code for the decision's `why`.
+    """
+    base = coinapi_fill_decision(classification, reasons)
+    if base["needs_fill"] is not True:
+        return {**base, **_NO_PLAN_FIELDS}
+    plan = stitch_plan
+    if plan is not None and plan["fill_profile"] == LAKE_ONLY:
+        plan = None  # day-level bar failed but the mask shows no fillable window → full-day
+    if plan is None:
+        if stitch_plan is not None:  # reuse the mask plan's exact day bounds
+            day_open, day_end = int(stitch_plan["day_open_ts"]), int(stitch_plan["day_end_ts"])
+            grid_ns = int(stitch_plan["grid_ns"])
+        else:
+            day_open = int(pd.Timestamp(day).value)
+            day_end = day_open + DAY_MS * NS_PER_MS
+            grid_ns = grid_ms * NS_PER_MS
+        plan = full_day_plan(day_open_ts=day_open, day_end_ts=day_end, grid_ns=grid_ns,
+                             reason=_FALLBACK_FULL_DAY_REASON[base["why"]], day=day).as_dict()
+    return {**base, "fill_profile": plan["fill_profile"],
+            "full_day_reason": plan["full_day_reason"], "fill_segments": plan["fill_segments"],
+            "seams": plan["seams"], "seam_policy": plan["seam_policy"]}
+
+
 def _empty_seed_block(snapshots_present, candidates) -> dict:
     return {"snapshots_present": bool(snapshots_present), "snapshot_candidates": int(candidates),
             "seed_accepted": False, "seed_reason": None, "seed_ts": None, "reseed_count": 0,
             "reseed_blocked_invalid_snapshot": 0, "snapshot_reason_codes": {}}
 
 
+# Q7 coverage keys (plan doc): None whenever no validity mask exists — missing/excluded/load-failed
+# days, and the metrics-only native engine (per-sample runs are the Task-3 native follow-up).
+_EMPTY_COVERAGE = {"lake_present_start_ts": None, "lake_present_end_ts": None,
+                   "trusted_lake_start_ts": None, "trusted_lake_end_ts": None,
+                   "n_invalid_runs": None, "invalid_runs": None}
+
+
 def _empty_quality_block(k, grid_ms) -> dict:
     return {"k": int(k), "grid_ms": int(grid_ms), "n_grid": None, "engine_time_col": None,
             "crossed_rate_after": None, "crossed_samples_after": None, "crossed_rate_cold": None,
             "missing_book_fraction": None, "thin_depth_fraction": None,
-            "crossed_duration_s_after": None}
+            "crossed_duration_s_after": None, **_EMPTY_COVERAGE}
 
 
 def _default_coinapi_block() -> dict:
@@ -281,6 +356,30 @@ def _seeded_reconstruct(engine, price_scale, *, df, grid, k, engine_col, snapsho
     return reconstruct_lake_l2_at_samples_seeded(
         df, grid, k=k, engine_time_col=engine_col, snapshots=snapshots, policy=policy,
         frame_out=frame_out)
+
+
+def _stitch_and_coverage(frame, *, meta: dict, reasons, grid_ms: int,
+                         day: dt.date) -> tuple[dict, dict]:
+    """Mask-derived stitch plan + Q7 coverage metrics from the materialized top-K frame (Python
+    engine path only). The validity mask is the shared parity-gate predicate
+    (`valid_mask_from_frame`); presence is the `frame_quality` both-sides-of-book predicate.
+    `seed_source_trusted` comes from the classification's SEED_SOURCE_UNRELIABLE reason, so the
+    plan and the classification can never disagree on the PR #13 crossed-source rule."""
+    sf = frame.sort_values("sample_ts")
+    ts = sf["sample_ts"].to_numpy(dtype=np.int64)
+    grid_ns = grid_ms * NS_PER_MS
+    valid = valid_mask_from_frame(sf)
+    present = (sf["bid_0_price"].notna() & sf["ask_0_price"].notna()).to_numpy(dtype=bool)
+    plan = plan_day_stitch(ts, valid, grid_ns=grid_ns, seed_accepted=bool(meta["seed_accepted"]),
+                           seed_ts=meta["seed_ts"],
+                           seed_source_trusted=SEED_SOURCE_UNRELIABLE not in reasons,
+                           present=present, day=day.isoformat()).as_dict()
+    runs = invalid_runs(ts, valid, grid_ns=grid_ns)
+    coverage = {key: plan[key] for key in ("lake_present_start_ts", "lake_present_end_ts",
+                                           "trusted_lake_start_ts", "trusted_lake_end_ts")}
+    coverage.update(n_invalid_runs=len(runs),
+                    invalid_runs=[[a, b] for a, b in runs[:INVALID_RUNS_CAP]])
+    return plan, coverage
 
 
 def _lake_quality_from_meta(meta, *, source_rows) -> dict:
@@ -325,7 +424,7 @@ def assess_lake_day(lake_delta_df, lake_book_snapshots, *, day: dt.date, k: int 
         cls, reasons = classify_day(have_lake=False, meta=None, lake_q=None, thresholds=thresholds)
         result.update(classification=cls, reasons=reasons,
                       seed=_empty_seed_block(have_snaps, len(snaps)),
-                      quality=_empty_quality_block(k, grid_ms))
+                      quality=_empty_quality_block(k, grid_ms), stitch_plan=None)
         return result
 
     grid = build_grid(day, grid_ms)
@@ -357,8 +456,15 @@ def assess_lake_day(lake_delta_df, lake_book_snapshots, *, day: dt.date, k: int 
         cold_rate = float(cold_meta["crossed_rate"])
 
     cls, reasons = classify_day(have_lake=True, meta=meta, lake_q=lake_q, thresholds=thresholds)
+    # Stitch plan + Q7 coverage need the per-sample validity mask, so they exist only where the
+    # top-K frame was materialized (Python engine); native stays metrics-only (Task-3 follow-up) —
+    # its fill days get the conservative full-day fallback when the report is built.
+    stitch, coverage = None, dict(_EMPTY_COVERAGE)
+    if engine != "native":
+        stitch, coverage = _stitch_and_coverage(frame, meta=meta, reasons=reasons,
+                                                grid_ms=grid_ms, day=day)
     result.update(
-        classification=cls, reasons=reasons,
+        classification=cls, reasons=reasons, stitch_plan=stitch,
         seed={
             "snapshots_present": have_snaps,
             "snapshot_candidates": len(snaps),
@@ -378,6 +484,7 @@ def assess_lake_day(lake_delta_df, lake_book_snapshots, *, day: dt.date, k: int 
             "missing_book_fraction": float(lake_q["missing_book_fraction"]),
             "thin_depth_fraction": float(meta["thin_depth_fraction"]),
             "crossed_duration_s_after": float(meta["crossed_duration_s"]),
+            **coverage,
         },
     )
     return result
@@ -388,7 +495,7 @@ def excluded_result(day: dt.date, reasons, *, k: int = 10, grid_ms: int = 1000,
     """A schema-consistent `excluded` per-day record for a day skipped before any Lake load."""
     return {
         "day": day.isoformat(), "classification": EXCLUDED, "reasons": list(reasons),
-        "lake_book_delta_v2_present": None, "lake_delta_rows": None,
+        "lake_book_delta_v2_present": None, "lake_delta_rows": None, "stitch_plan": None,
         "seed": _empty_seed_block(False, 0), "quality": _empty_quality_block(k, grid_ms),
         "coinapi": coinapi if coinapi is not None else _default_coinapi_block(),
         "calendar": calendar if calendar is not None else _default_calendar_block(),
@@ -401,7 +508,7 @@ def inconclusive_load_failure(day: dt.date, err: str, *, k: int = 10, grid_ms: i
     return {
         "day": day.isoformat(), "classification": INCONCLUSIVE,
         "reasons": [f"lake_load_failed:{err}"],
-        "lake_book_delta_v2_present": None, "lake_delta_rows": None,
+        "lake_book_delta_v2_present": None, "lake_delta_rows": None, "stitch_plan": None,
         "seed": _empty_seed_block(False, 0), "quality": _empty_quality_block(k, grid_ms),
         "coinapi": coinapi if coinapi is not None else _default_coinapi_block(),
         "calendar": calendar if calendar is not None else _default_calendar_block(),
@@ -410,30 +517,57 @@ def inconclusive_load_failure(day: dt.date, err: str, *, k: int = 10, grid_ms: i
 
 def build_report(per_day_results, *, meta: dict) -> dict:
     """Aggregate per-day results into the report: stable per-class counts + day lists + the rows.
-    Every per-day record is stamped with its machine-readable `coinapi_fill` decision
-    (`coinapi_fill_decision`), and the summary carries the fill day-lists — the contract a fill
-    manifest reads, so no consumer re-parses reason strings. `no_verdict` holds only genuinely
-    unresolved days; calendar-excluded days go to the separate `not_in_scope` list so out-of-scope
-    (e.g. Binance-gap) days are never mistaken for unresolved Coinbase fills."""
-    days = [{**r, "coinapi_fill": coinapi_fill_decision(r["classification"], r.get("reasons"))}
-            for r in per_day_results]
+    Every per-day record is stamped with its full machine-readable `coinapi_fill` block
+    (`coinapi_fill_block`: the PR #13 needs_fill/why decision + the Q7 stitch plan), and the
+    summary carries the fill day-lists — the contract a fill manifest reads, so no consumer
+    re-parses reason strings. A record's internal `stitch_plan` key (the mask-derived
+    `plan_day_stitch` dict from `assess_lake_day`, Python engine only) is consumed here and never
+    emitted per-day. `no_verdict` holds only genuinely unresolved days; calendar-excluded days go
+    to the separate `not_in_scope` list so out-of-scope (e.g. Binance-gap) days are never mistaken
+    for unresolved Coinbase fills.
+
+    Summary extensions (plan-doc Q7 + the wiring task): `partial_fill` (day list, ⊆ `needs_fill`),
+    `fill_counts` (flat counts: needs_fill, the five fill profiles, crossed-source full-days,
+    no_verdict/no_fill/not_in_scope), and `full_day_reason_counts` (full-day fills by reason)."""
+    days = []
+    for r in per_day_results:
+        rec = dict(r)
+        plan = rec.pop("stitch_plan", None)
+        rec["coinapi_fill"] = coinapi_fill_block(
+            rec["classification"], rec.get("reasons"), day=rec["day"],
+            grid_ms=(rec.get("quality") or {}).get("grid_ms") or 1000, stitch_plan=plan)
+        days.append(rec)
     by_class: dict[str, list] = {c: [] for c in CLASSES}
-    fill: dict[str, list] = {"needs_fill": [], "no_fill": [], "no_verdict": [], "not_in_scope": []}
+    fill: dict[str, list] = {"needs_fill": [], "no_fill": [], "no_verdict": [], "not_in_scope": [],
+                             "partial_fill": []}
+    profile_counts = {p: 0 for p in (FULL_DAY_FILL, *PARTIAL_FILL_PROFILES)}
+    full_day_reasons: dict[str, int] = {}
     for r in days:
         by_class.setdefault(r["classification"], []).append(r["day"])
-        nf = r["coinapi_fill"]["needs_fill"]
+        cf = r["coinapi_fill"]
+        nf = cf["needs_fill"]
         if nf:
-            key = "needs_fill"
+            fill["needs_fill"].append(r["day"])
+            profile_counts[cf["fill_profile"]] += 1
+            if cf["fill_profile"] in PARTIAL_FILL_PROFILES:
+                fill["partial_fill"].append(r["day"])
+            if cf["full_day_reason"] is not None:
+                full_day_reasons[cf["full_day_reason"]] = \
+                    full_day_reasons.get(cf["full_day_reason"], 0) + 1
         elif nf is False:
-            key = "no_fill"
+            fill["no_fill"].append(r["day"])
         else:
-            key = ("not_in_scope" if r["coinapi_fill"]["why"] == "excluded_not_in_scope"
-                   else "no_verdict")
-        fill[key].append(r["day"])
+            key = ("not_in_scope" if cf["why"] == "excluded_not_in_scope" else "no_verdict")
+            fill[key].append(r["day"])
     counts = {c: len(by_class[c]) for c in by_class}
+    fill_counts = {"needs_fill": len(fill["needs_fill"]), **profile_counts,
+                   "crossed_source_full_day": full_day_reasons.get(REASON_CROSSED_SOURCE, 0),
+                   "no_verdict": len(fill["no_verdict"]), "no_fill": len(fill["no_fill"]),
+                   "not_in_scope": len(fill["not_in_scope"])}
     return {"meta": meta,
             "summary": {"n_days": len(days), "counts": counts, "by_class": by_class,
-                        "coinapi_fill": fill},
+                        "coinapi_fill": {**fill, "fill_counts": fill_counts,
+                                         "full_day_reason_counts": full_day_reasons}},
             "days": days}
 
 
@@ -615,6 +749,12 @@ def print_summary(report: dict) -> None:
             print(f"  {c:<22} {len(days):>4}   {shown}")
         else:
             print(f"  {c:<22} {len(days):>4}")
+    fc = (s.get("coinapi_fill") or {}).get("fill_counts")
+    if fc:
+        n_partial = sum(fc[p] for p in PARTIAL_FILL_PROFILES)
+        print(f"  coinapi fill: {fc['needs_fill']} day(s) to fill — {fc['full_day_fill']} "
+              f"full-day ({fc['crossed_source_full_day']} crossed-source), {n_partial} partial; "
+              f"{fc['no_verdict']} unresolved, {fc['no_fill']} no-fill")
     for d in report["days"]:
         q = d.get("quality", {})
         extra = ""

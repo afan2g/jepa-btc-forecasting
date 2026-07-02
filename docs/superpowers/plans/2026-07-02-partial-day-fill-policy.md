@@ -389,10 +389,12 @@ artifact records the policy that produced it.
   "Unlock still requires …" precondition paragraph, and the §10 quality-map item) marking the
   policy DEFINED with wiring open; backfill stays locked.
 
-### Task 2 (follow-up branch): quality-map runner wiring
+### Task 2 (follow-up branch): quality-map runner wiring — **implemented 2026-07-02**
 
 Emit coverage keys + fill plan in the report (Python engine first); schema-consistency +
-`jq empty` tests; `partial_fill` summary list.
+`jq empty` tests; `partial_fill` summary list. Landed in `scripts/run_coinbase_quality_map.py`
+(`coinapi_fill_block` + `_stitch_and_coverage`) with `full_day_plan`/`invalid_runs` helpers in
+`recon/stitch_policy.py`; synthetic tests in `tests/test_quality_map.py`.
 
 ### Task 3 (follow-up branch): native coverage metrics
 
