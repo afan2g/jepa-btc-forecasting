@@ -32,6 +32,10 @@ use pyo3::types::PyDict;
 pub const N_REASONS: usize = 7;
 /// Sentinel `seed_reason_code` meaning "no snapshots seen yet" (Python `"no_snapshots"`).
 pub const NO_SNAPSHOTS: i64 = 255;
+/// Result-dict ABI version; must match `recon.native._META_ABI` (bumped in lockstep whenever the
+/// fields `reconstruct_seeded` returns change). v2: per-sample coverage — `present_first_idx`/
+/// `present_last_idx`/`invalid_runs_idx` (partial-day fill plan doc, Task 3).
+pub const META_ABI: i64 = 2;
 
 // ------------------------------------------------------------------------- order book
 /// Tick-keyed L2 book side value: the ORIGINAL source float price and the absolute size.
@@ -129,6 +133,14 @@ pub struct Outcome {
     pub missing_book_samples: i64,
     pub thin_depth_samples: i64,
     pub crossed_duration_ns: i64,
+    /// Per-sample coverage (plan-doc Task 3): maximal half-open `[i0, i1)` sample-INDEX runs where
+    /// the sample fails the shared stitch-policy validity predicate (both top-of-book prices
+    /// present, non-NaN, `bid < ask` — `valid_mask_from_frame` at `min_levels_per_side=1`), plus
+    /// the first/last sample indices where both tops are present (non-NaN). Index pairs, not
+    /// timestamps: the replay does not know the grid step; Python converts against its grid.
+    pub invalid_runs_idx: Vec<(i64, i64)>,
+    pub present_first_idx: Option<i64>,
+    pub present_last_idx: Option<i64>,
     pub frame_out: bool,
     pub mid: Vec<f64>,
     pub microprice: Vec<f64>,
@@ -174,13 +186,36 @@ pub fn replay(
     let mut seeded = false;
     let mut crossed_since: Option<i64> = None;
     let mut last_t: Option<i64> = None;
+    let mut invalid_open: Option<i64> = None; // start index of the currently-open invalid run
 
-    // emit sample `g`: count crossed/missing/thin and (if frame_out) push the top-K row.
+    // emit sample `g`: count crossed/missing/thin, track per-sample coverage (`si` is the current
+    // grid index at every call site), and (if frame_out) push the top-K row.
     macro_rules! emit {
         ($g:expr) => {{
             let g: i64 = $g;
             let bb = book.best_bid();
             let ba = book.best_ask();
+            // Coverage predicates, mirroring `recon.reseed._replay_seeded`: `present` = both tops
+            // set and non-NaN (the notna predicate behind lake_present_*); `valid` additionally
+            // requires uncrossed (`bid < ask`, false on NaN in both languages) — exactly
+            // `valid_mask_from_frame` at min_levels_per_side=1.
+            let (present, valid) = match (bb, ba) {
+                (Some((bp, _)), Some((ap, _))) => (!bp.is_nan() && !ap.is_nan(), bp < ap),
+                _ => (false, false),
+            };
+            if valid {
+                if let Some(s0) = invalid_open.take() {
+                    out.invalid_runs_idx.push((s0, si as i64));
+                }
+            } else if invalid_open.is_none() {
+                invalid_open = Some(si as i64);
+            }
+            if present {
+                if out.present_first_idx.is_none() {
+                    out.present_first_idx = Some(si as i64);
+                }
+                out.present_last_idx = Some(si as i64);
+            }
             match (bb, ba) {
                 (Some((bp, bs)), Some((ap, as_))) => {
                     if bp >= ap {
@@ -319,6 +354,10 @@ pub fn replay(
             out.crossed_duration_ns += ct - cs;
         }
     }
+    // Close a trailing open invalid run at the grid end (half-open at n).
+    if let Some(s0) = invalid_open {
+        out.invalid_runs_idx.push((s0, n as i64));
+    }
 
     out
 }
@@ -425,6 +464,9 @@ fn reconstruct_seeded<'py>(
     d.set_item("missing_book_samples", out.missing_book_samples)?;
     d.set_item("thin_depth_samples", out.thin_depth_samples)?;
     d.set_item("crossed_duration_ns", out.crossed_duration_ns)?;
+    d.set_item("invalid_runs_idx", out.invalid_runs_idx)?;
+    d.set_item("present_first_idx", out.present_first_idx)?;
+    d.set_item("present_last_idx", out.present_last_idx)?;
     if frame_out {
         d.set_item("mid", PyArray1::from_vec(py, out.mid))?;
         d.set_item("microprice", PyArray1::from_vec(py, out.microprice))?;
@@ -441,6 +483,7 @@ fn recon_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__doc__", "Native Crypto Lake book_delta_v2 seed/reseed replay core (docs/data.md §5a-Recon).")?;
     m.add("N_REASONS", N_REASONS)?;
     m.add("NO_SNAPSHOTS", NO_SNAPSHOTS)?;
+    m.add("META_ABI", META_ABI)?;
     m.add_function(wrap_pyfunction!(reconstruct_seeded, m)?)?;
     Ok(())
 }
@@ -521,6 +564,72 @@ mod tests {
         let out = replay(deltas, snaps, &[5, 10, 20, 30], 1, 100.0, false, false, 0);
         assert_eq!(out.crossed_samples, 3);
         assert_eq!(out.crossed_duration_ns, 20); // 30 (grid end) - 10 (onset)
+    }
+
+    #[test]
+    fn coverage_clean_day_has_no_invalid_runs() {
+        let snaps = vec![snap(0, true, 0, vec![(100.0, 1.0)], vec![(101.0, 1.0)])];
+        let out = replay(vec![], snaps, &[5, 15, 25], 1, 100.0, false, true, 0);
+        assert!(out.invalid_runs_idx.is_empty());
+        assert_eq!(out.present_first_idx, Some(0));
+        assert_eq!(out.present_last_idx, Some(2));
+    }
+
+    #[test]
+    fn coverage_leading_missing_prefix_is_one_run() {
+        // Seed lands at ts=30: samples 0/10/20 see an empty book (missing => invalid, not present).
+        let snaps = vec![snap(30, true, 0, vec![(100.0, 1.0)], vec![(101.0, 1.0)])];
+        let out = replay(vec![], snaps, &[0, 10, 20, 40], 1, 100.0, false, true, 0);
+        assert_eq!(out.invalid_runs_idx, vec![(0, 3)]);
+        assert_eq!(out.present_first_idx, Some(3));
+        assert_eq!(out.present_last_idx, Some(3));
+    }
+
+    #[test]
+    fn coverage_trailing_crossed_run_closes_at_grid_end() {
+        // Crossed samples are invalid but PRESENT: presence reaches the grid end while the
+        // trailing invalid run stays open until closed half-open at n.
+        let deltas = vec![d(10, 1, true, 102.0, 1.0)]; // crosses at 10, never heals
+        let snaps = vec![snap(0, true, 0, vec![(100.0, 1.0)], vec![(101.0, 1.0)])];
+        let out = replay(deltas, snaps, &[5, 15, 25], 1, 100.0, false, false, 0);
+        assert_eq!(out.invalid_runs_idx, vec![(1, 3)]);
+        assert_eq!(out.present_first_idx, Some(0));
+        assert_eq!(out.present_last_idx, Some(2));
+    }
+
+    #[test]
+    fn coverage_internal_gap_is_internal_run() {
+        // The reseed_recovers_stranded_book fixture: crossed only at sample index 1 (@20).
+        let deltas = vec![
+            d(10, 1, true, 102.0, 1.0),
+            d(100, 2, false, 101.0, 0.0),
+            d(100, 3, false, 103.0, 1.0),
+        ];
+        let snaps = vec![
+            snap(0, true, 0, vec![(100.0, 1.0)], vec![(101.0, 1.0)]),
+            snap(30, true, 0, vec![(102.0, 1.0)], vec![(103.0, 1.0)]),
+        ];
+        let out = replay(deltas, snaps, &[5, 20, 50, 150], 1, 100.0, false, true, 0);
+        assert_eq!(out.invalid_runs_idx, vec![(1, 2)]);
+        assert_eq!(out.present_first_idx, Some(0));
+        assert_eq!(out.present_last_idx, Some(3));
+    }
+
+    #[test]
+    fn coverage_one_sided_book_is_missing_and_never_present() {
+        let deltas = vec![d(10, 1, true, 100.0, 1.0)]; // bid-only book, never two-sided
+        let out = replay(deltas, vec![], &[5, 15, 25], 1, 100.0, false, false, 0);
+        assert_eq!(out.invalid_runs_idx, vec![(0, 3)]);
+        assert_eq!(out.present_first_idx, None);
+        assert_eq!(out.present_last_idx, None);
+    }
+
+    #[test]
+    fn coverage_empty_grid_is_empty() {
+        let out = replay(vec![d(10, 1, true, 100.0, 1.0)], vec![], &[], 1, 100.0, false, false, 0);
+        assert!(out.invalid_runs_idx.is_empty());
+        assert_eq!(out.present_first_idx, None);
+        assert_eq!(out.present_last_idx, None);
     }
 
     // Small accessors used only by the tests above.

@@ -102,10 +102,12 @@ def test_tick_scale_for_known_and_unknown():
 # --------------------------------------------------------------------------- capability gate (stale build)
 # A stale/incompatible recon_native must be rejected at import time so `--engine native` fails BEFORE
 # any Lake load (not later at reconstruct, or — worse — with silently-misaligned reason codes).
-def _fake_native(*, with_fn=True, n_reasons=None, no_snapshots=255):
+def _fake_native(*, with_fn=True, n_reasons=None, no_snapshots=255, meta_abi=rn._META_ABI):
     import types
     n = len(rn.REASON_CODES) if n_reasons is None else n_reasons
     ns = types.SimpleNamespace(N_REASONS=n, NO_SNAPSHOTS=no_snapshots)
+    if meta_abi is not None:
+        ns.META_ABI = meta_abi
     if with_fn:
         ns.reconstruct_seeded = lambda *a, **k: None
     return ns
@@ -128,6 +130,25 @@ def test_validate_native_rejects_reason_enum_mismatch():
 def test_validate_native_rejects_sentinel_mismatch():
     with pytest.raises(ImportError):
         rn._validate_native(_fake_native(no_snapshots=7))
+
+
+def test_validate_native_rejects_meta_abi_mismatch():
+    # A build whose result-dict ABI differs (e.g. pre-coverage v1) must be rejected at import, so a
+    # stale extension can never silently drop the coverage block the quality map plans fills from.
+    with pytest.raises(ImportError):
+        rn._validate_native(_fake_native(meta_abi=rn._META_ABI - 1))
+
+
+def test_validate_native_rejects_missing_meta_abi_attr():
+    # Pre-coverage builds have no META_ABI at all — that is the stale-build signature.
+    with pytest.raises(ImportError):
+        rn._validate_native(_fake_native(meta_abi=None))
+
+
+@native
+def test_native_extension_reports_meta_abi_matching_wrapper():
+    import recon_native
+    assert recon_native.META_ABI == rn._META_ABI
 
 
 @native
@@ -353,6 +374,192 @@ def test_randomized_stream_conformance(seed_val):
     grid = list(range(0, 300, 5))
     _assert_conforms(df, grid, k=10, snapshots=snaps,
                      policy=ReseedPolicy(reseed_after_crossed_s=0.0, min_levels_per_side=1))
+
+
+# --------------------------------------------------------------------------- coverage metrics (Task 3)
+# Both engines' meta carries a compact `coverage` block (plan-doc
+# 2026-07-02-partial-day-fill-policy.md Task 3): maximal half-open [i0, i1) sample-index runs where
+# the sample is NOT valid under the shared stitch-policy predicate (`valid_mask_from_frame` at
+# min_levels_per_side=1: both top-of-book prices present, non-NaN, bid < ask), plus the first/last
+# present-sample indices behind `lake_present_*`. The FRAME-derived mask stays the correctness
+# oracle: the Python-only tests below pin replay coverage == frame-derived coverage, and
+# `_assert_conforms` (full meta equality) pins native == Python on every fixture in this file.
+from recon.stitch_policy import valid_mask_from_frame  # noqa: E402
+
+
+def _mask_runs(mask):
+    """Maximal half-open [i0, i1) index runs where `mask` is True — the test-local oracle."""
+    runs, start = [], None
+    for i, m in enumerate(mask):
+        if m and start is None:
+            start = i
+        elif not m and start is not None:
+            runs.append([start, i])
+            start = None
+    if start is not None:
+        runs.append([start, len(mask)])
+    return runs
+
+
+def _frame_coverage(frame):
+    """Frame-derived coverage oracle: invalid runs from `valid_mask_from_frame`, presence bounds
+    from the notna top-of-book columns (the quality map's `_stitch_and_coverage` predicates)."""
+    f = frame.sort_values("sample_ts")
+    valid = valid_mask_from_frame(f)
+    present = (f["bid_0_price"].notna() & f["ask_0_price"].notna()).to_numpy(dtype=bool)
+    idx = np.flatnonzero(present)
+    runs = _mask_runs(~valid)
+    return {"present_first_idx": (int(idx[0]) if len(idx) else None),
+            "present_last_idx": (int(idx[-1]) if len(idx) else None),
+            "n_invalid_runs": len(runs), "invalid_runs_idx": runs}
+
+
+def test_python_replay_coverage_matches_frame_derived_mask():
+    # missing (pre-seed) + valid + crossed phases → a leading AND a trailing invalid run.
+    df = _lake_df([(10, 1, True, 100.0, 1.0), (20, 2, False, 101.0, 1.0),
+                   (30, 3, True, 102.0, 1.0)])
+    seed = [book_snapshot(5, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+    frame, meta = reconstruct_lake_l2_at_samples_seeded(
+        df, [1, 15, 25, 40, 50], k=3, engine_time_col="origin_time", snapshots=seed,
+        policy=ReseedPolicy(enabled=False, min_levels_per_side=1))
+    assert meta["coverage"] == _frame_coverage(frame)
+    assert meta["coverage"]["invalid_runs_idx"] == [[0, 1], [3, 5]]
+    assert meta["coverage"]["n_invalid_runs"] == 2
+    assert meta["coverage"]["present_first_idx"] == 1   # crossed samples are present, not valid
+    assert meta["coverage"]["present_last_idx"] == 4
+
+
+def test_python_replay_coverage_never_two_sided_book_is_one_run_no_presence():
+    df = _lake_df([(10, 1, True, 100.0, 2.0)])          # bid-only book, never two-sided
+    frame, meta = reconstruct_lake_l2_at_samples_seeded(
+        df, [5, 15, 25], k=1, engine_time_col="origin_time", snapshots=None)
+    assert meta["coverage"] == _frame_coverage(frame)
+    assert meta["coverage"] == {"present_first_idx": None, "present_last_idx": None,
+                                "n_invalid_runs": 1, "invalid_runs_idx": [[0, 3]]}
+
+
+def test_python_replay_coverage_empty_grid_is_empty():
+    df = _lake_df([(10, 1, True, 100.0, 1.0)])
+    _, meta = reconstruct_lake_l2_at_samples_seeded(df, [], k=1, engine_time_col="origin_time")
+    assert meta["coverage"] == {"present_first_idx": None, "present_last_idx": None,
+                                "n_invalid_runs": 0, "invalid_runs_idx": []}
+
+
+@native
+def test_native_coverage_clean_day_has_no_invalid_runs():
+    df = _lake_df([(10, 1, True, 100.0, 1.0)])
+    seed = [book_snapshot(0, bids=[(100.0, 2.0)], asks=[(101.0, 3.0)])]
+    _, m = _assert_conforms(df, [5, 15, 25], k=1, snapshots=seed)
+    assert m["coverage"] == {"present_first_idx": 0, "present_last_idx": 2,
+                             "n_invalid_runs": 0, "invalid_runs_idx": []}
+
+
+@native
+def test_native_coverage_leading_missing_prefix_is_one_leading_run():
+    seed = [book_snapshot(30, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+    df = _lake_df([(40, 1, True, 100.5, 1.0)])
+    _, m = _assert_conforms(df, [0, 10, 20, 35, 45, 55], k=1, snapshots=seed)
+    assert m["coverage"]["invalid_runs_idx"] == [[0, 3]]
+    assert m["coverage"]["present_first_idx"] == 3
+    assert m["coverage"]["present_last_idx"] == 5
+
+
+@native
+def test_native_coverage_trailing_crossed_suffix_is_one_trailing_run():
+    # Crossed samples are invalid but PRESENT: the presence bound reaches the grid end while the
+    # trailing invalid run records the unhealed crossing (closed at n, the half-open convention).
+    seed = [book_snapshot(0, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+    df = _lake_df([(10, 1, True, 102.0, 1.0)])
+    _, m = _assert_conforms(df, [5, 15, 25], k=1, snapshots=seed,
+                            policy=ReseedPolicy(enabled=False, min_levels_per_side=1))
+    assert m["crossed_samples"] == 2
+    assert m["coverage"]["invalid_runs_idx"] == [[1, 3]]
+    assert m["coverage"]["present_first_idx"] == 0
+    assert m["coverage"]["present_last_idx"] == 2
+
+
+@native
+def test_native_coverage_internal_crossed_gap_is_internal_run():
+    snaps = [book_snapshot(0, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)]),
+             book_snapshot(30, bids=[(102.0, 1.0)], asks=[(103.0, 1.0)])]
+    _, m = _assert_conforms(_stranded_df(), [5, 20, 50, 150], k=1, snapshots=snaps)
+    assert m["reseed_count"] == 1                       # the reseed heals the gap mid-grid
+    assert m["coverage"]["invalid_runs_idx"] == [[1, 2]]
+    assert m["coverage"]["present_first_idx"] == 0
+    assert m["coverage"]["present_last_idx"] == 3
+
+
+@native
+def test_native_coverage_missing_book_midday_counts_invalid():
+    seed = [book_snapshot(0, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+    df = _lake_df([(10, 1, False, 101.0, 0.0),          # removes the only ask → one-sided book
+                   (30, 2, False, 101.0, 1.0)])         # restores it
+    _, m = _assert_conforms(df, [5, 15, 25, 35], k=1, snapshots=seed,
+                            policy=ReseedPolicy(enabled=False, min_levels_per_side=1))
+    assert m["missing_book_samples"] == 2
+    assert m["coverage"]["invalid_runs_idx"] == [[1, 3]]
+    # Presence has a mid-day HOLE here; the block records BOUNDS only — exactly what
+    # plan_day_stitch reads (first/last present sample) for lake_present_*.
+    assert m["coverage"]["present_first_idx"] == 0
+    assert m["coverage"]["present_last_idx"] == 3
+
+
+@native
+def test_native_coverage_multiple_runs_leading_and_trailing():
+    seed = [book_snapshot(30, bids=[(100.0, 1.0)], asks=[(101.0, 1.0)])]
+    df = _lake_df([(60, 1, True, 102.0, 1.0)])          # crosses at 60, never heals
+    _, m = _assert_conforms(df, [10, 40, 70], k=1, snapshots=seed,
+                            policy=ReseedPolicy(enabled=False, min_levels_per_side=1))
+    assert m["coverage"]["invalid_runs_idx"] == [[0, 1], [2, 3]]
+    assert m["coverage"]["n_invalid_runs"] == 2
+
+
+def test_python_replay_coverage_ignores_policy_min_levels():
+    # The coverage predicate is FIXED at min_levels_per_side=1 (the `valid_mask_from_frame`
+    # default the frame oracle uses) — it must never couple to the SEED-validation policy knob.
+    # A thin-but-two-sided cold-start book under the production seeding policy (min_levels=5)
+    # stays coverage-valid even while it counts as thin for k.
+    df = _lake_df([(10, 1, True, 100.0, 1.0), (10, 2, False, 101.0, 1.0)])
+    frame, meta = reconstruct_lake_l2_at_samples_seeded(
+        df, [5, 15, 25], k=2, engine_time_col="origin_time", snapshots=None,
+        policy=ReseedPolicy(enabled=False, min_levels_per_side=5))
+    assert meta["coverage"] == _frame_coverage(frame)
+    assert meta["coverage"]["invalid_runs_idx"] == [[0, 1]]   # only the empty-book prefix
+    assert meta["thin_depth_samples"] == 2                    # thin for k=2, yet coverage-valid
+
+
+@native
+def test_native_coverage_ignores_policy_min_levels():
+    df = _lake_df([(10, 1, True, 100.0, 1.0), (10, 2, False, 101.0, 1.0)])
+    _, m = _assert_conforms(df, [5, 15, 25], k=2, snapshots=None,
+                            policy=ReseedPolicy(enabled=False, min_levels_per_side=5))
+    assert m["coverage"]["invalid_runs_idx"] == [[0, 1]]
+
+
+# --------------------------------------------------------------------------- non-finite delta guard
+# A NaN delta price would silently DIVERGE the engines' books — Python keys the raw float
+# (max()/min() over a dict with a NaN key is insertion-order dependent, and a fresh NaN key can
+# never be popped), native keys round(NaN*scale) == tick 0 — so the coverage blocks (and therefore
+# the fill plans) would disagree. Both array entry points reject non-finite prices/sizes at ingest,
+# mirroring `classify_snapshot`'s finite-values bar on the snapshot path.
+def test_python_engine_rejects_non_finite_delta_price():
+    df = _lake_df([(10, 1, True, float("nan"), 1.0)])
+    with pytest.raises(ValueError, match="non-finite"):
+        reconstruct_lake_l2_at_samples_seeded(df, [20], k=1, engine_time_col="origin_time")
+
+
+def test_python_engine_rejects_non_finite_delta_size():
+    df = _lake_df([(10, 1, True, 100.0, float("inf"))])
+    with pytest.raises(ValueError, match="non-finite"):
+        reconstruct_lake_l2_at_samples_seeded(df, [20], k=1, engine_time_col="origin_time")
+
+
+@native
+def test_native_engine_rejects_non_finite_delta_price():
+    df = _lake_df([(10, 1, True, float("nan"), 1.0)])
+    with pytest.raises(ValueError, match="non-finite"):
+        rn.reconstruct_lake_l2_at_samples_seeded_native(
+            df, [20], k=1, engine_time_col="origin_time", price_scale=SCALE)
 
 
 # --------------------------------------------------------------------------- Python-only reference
