@@ -107,6 +107,15 @@ def test_target_cols_must_be_reserved():
         validate_manifest(_manifest(target_cols=["y_fwd_bps", "my_custom_target"]))
 
 
+def test_core_non_label_columns_rejected_as_targets():
+    # Codex P2: declaring cost/weight/tag/timing columns as "targets" would make them
+    # optional on the require_targets=False path, letting frames validate while missing
+    # required non-label reserved data.
+    for bad in ("cost_bps", "regime", "uniqueness", "t_event"):
+        with pytest.raises(ValueError, match="cannot be target_cols"):
+            validate_manifest(_manifest(target_cols=["y_fwd_bps", "label", bad]))
+
+
 def test_reserved_cols_must_include_core_registry():
     trimmed = [c for c in RESERVED if c != "t_available"]
     with pytest.raises(ValueError, match="t_available"):
@@ -452,8 +461,10 @@ def test_non_string_horizon_tags_fail():
 
 
 def test_structural_columns_required_even_without_targets():
-    # Declaring a timing column as a target must not let it vanish from the frame
-    # on the require_targets=False path.
+    # Declaring a timing column as a target must not let it vanish from the frame on the
+    # require_targets=False path. Today the schema check inside validate_frame refuses the
+    # manifest outright (core non-label columns cannot be targets); the _STRUCTURAL_COLS
+    # guard in the presence loop stays as defense-in-depth behind it.
     man = _manifest(target_cols=["y_fwd_bps", "label", "t_event"])
     df = _frame().drop(columns=["t_event"])
     with pytest.raises(ValueError, match="t_event"):

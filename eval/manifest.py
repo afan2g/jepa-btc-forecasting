@@ -40,6 +40,11 @@ _TIMING_COLS = ("t_event", "t_barrier", "t_feature_start", "t_available")
 # Required in the frame even when targets are optional: the timing/horizon checks need them.
 _STRUCTURAL_COLS = frozenset(_TIMING_COLS) | {"horizon"}
 
+# The only core reserved columns that ARE labels. Declaring any other core column
+# (cost/weight/tag/timing) as a target would make it optional on the require_targets=False
+# path, letting frames validate while missing required non-label reserved data.
+CORE_LABEL_COLS = ("y_fwd_bps", "label")
+
 
 def _leaky_names(cols) -> list[str]:
     out = []
@@ -111,6 +116,9 @@ def validate_manifest(manifest: dict) -> dict:
     not_reserved = [c for c in targets if c not in reserved]
     if not_reserved:
         raise ValueError(f"target_cols must be a subset of reserved_cols; not reserved: {not_reserved}")
+    non_label = sorted(set(targets) & (set(RESERVED) - set(CORE_LABEL_COLS)))
+    if non_label:
+        raise ValueError(f"core non-label reserved columns cannot be target_cols: {non_label}")
 
     overlap_t = sorted(set(feats) & set(targets))
     if overlap_t:

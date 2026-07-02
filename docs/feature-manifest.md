@@ -33,7 +33,7 @@ Required fields:
 | `bar_clock` | Dict with `kind` (e.g. `dollar`) plus clock params (threshold, time cap). |
 | `time` | Exactly `{"unit": "ns", "timezone": "UTC"}` — int64 nanoseconds, UTC. |
 | `feature_cols` | Explicit ordered model-input columns. |
-| `target_cols` | Label columns (required; subset of `reserved_cols`, e.g. `y_fwd_bps`, `label`). |
+| `target_cols` | Label columns (required; subset of `reserved_cols`). Core non-label reserved columns (timing/cost/weight/tag) are rejected as targets; of the core registry only `y_fwd_bps` and `label` qualify. |
 | `reserved_cols` | Non-feature registry; must include `eval.matrix.RESERVED` in full. |
 | `venues` | `{exchange, symbol[, role: signal|target]}` entries represented in the data. |
 | `horizons` | Tag → physical duration in ns (e.g. `{"10s": 10000000000}`); matches the per-row `horizon` tag. |
