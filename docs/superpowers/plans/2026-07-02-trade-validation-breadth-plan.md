@@ -301,7 +301,7 @@ below are illustrative (schema shape, not measured) — the live run fills them 
       {"day": "2024-08-05", "venue": "binance_perp", "reason_codes": ["interarrival_gap_excess"]}],
     "by_venue": { "coinbase": {"pass": 2, "warn": 2, "fail": 0, "coinapi_fill": 1},
                   "binance_spot": {"pass": 5}, "binance_perp": {"pass": 4, "warn": 1} },
-    "gate": { "all_required_pass": true, "blocking_failures": [],
+    "gate": { "lake_required_pass": true, "bars_ready": false, "blocking_failures": [],
               "coinapi_fill_deferred": [{"day": "2024-08-06", "venue": "coinbase"}] }
   },
   "days": [
@@ -482,6 +482,24 @@ parity/quality-map passes. Until then a fill day is "pass-conditional-on-CoinAPI
 to the quality-map `needs_fill` semantics. A day in `excluded_days_by_reason` is `status =
 "excluded"` (out of scope; already dropped by the usable calendar) and never blocks.
 
+**`summary.gate` fields (the bar builder gates on `bars_ready`, never `lake_required_pass`).** The two
+booleans are deliberately distinct so a deferred, unvalidated fill can never read as "ready":
+
+- `lake_required_pass` — every **required Lake** `(venue, day)` (in `usable_days`, not a fill day for
+  that product, not excluded) is `pass`/`warn`. This is the Lake-side result only; it says nothing
+  about fill days.
+- `coinapi_fill_deferred` — the `(venue, day)` fill cases routed to `coinapi_fill` whose CoinAPI trade
+  validation is still pending (gated behind the **locked** backfill). A span touching any of these is
+  not yet buildable.
+- `bars_ready` — `lake_required_pass` **and** `coinapi_fill_deferred == []` (every fill in scope
+  validated). **Phase 4 gates on `bars_ready`**; because a fill day stays in `coinapi_fill_deferred`
+  until its CoinAPI validation lands (which the locked backfill gate currently forbids), `bars_ready`
+  is `false` for any span containing a fill day — so the builder can never span an unvalidated/locked
+  Coinbase trade gap. In the example above `lake_required_pass` is `true` but `bars_ready` is `false`
+  precisely because `2024-08-06` is deferred.
+- `blocking_failures` — the required-day `status: "fail"` list; `lake_required_pass` is `false`
+  whenever it is non-empty.
+
 **Interaction with the modeling calendar (§5b) & CV (§8/E0.4):** the effective modeling calendar is
 the contiguous usable runs (`2024-06-22→2026-02-04`, `2026-02-06→2026-05-05`, OOS ≈ April 2026).
 Purged+embargoed CPCV already drops label-span-overlapping bars at gap/seam boundaries, so a
@@ -593,10 +611,14 @@ clean day classifies `pass`, not a coverage `fail`.
    → `duplicate_timestamp_cluster` warn; a small burst does not trip it.
 8. **Inter-arrival gap** — inject a 200 s gap → `interarrival_max_s ≈ 200`, `interarrival_gap_excess`
    warn.
-9. **Calendar crossing** — write a synthetic `usable_calendar.json` to `tmp_path` (the
-   `_calendar_dict`/`_write_calendar` pattern); a fill day (`coinbase_fill_days` with
+9. **Calendar crossing + gate booleans** — write a synthetic `usable_calendar.json` to `tmp_path`
+   (the `_calendar_dict`/`_write_calendar` pattern); a fill day (`coinbase_fill_days` with
    `trades: true`) with a missing Lake frame → `status "coinapi_fill"`; an excluded day →
-   `"excluded"`; both are excluded from `gate.blocking_failures`.
+   `"excluded"`; both are excluded from `gate.blocking_failures`. Assert the gate booleans:
+   a report over otherwise-clean required days **plus** the deferred fill day →
+   `gate.lake_required_pass == True` but `gate.bars_ready == False` (a deferred fill blocks
+   readiness); with no fill days → `bars_ready == True`; with a required-day `fail` →
+   `lake_required_pass == False` and the day in `blocking_failures`.
 10. **Report JSON stability** — `build_report([...])` → `write_report` to `tmp_path`; assert
     `"NaN" not in txt and "Infinity" not in txt`, `json.loads(txt)` round-trips, and **byte-for-byte
     determinism across two runs** (the `generated_utc` timestamp is the only exempted field — pass a
@@ -633,9 +655,11 @@ clean day classifies `pass`, not a coverage `fail`.
   records the trade-validation report path + `generated_utc` as a source artifact (the
   feature-manifest `sources` list already accepts extra keys).
 - **Phase 4 — enforce in the bar builder.** The bar builder refuses to emit bars for a `(venue,
-  span)` unless every required day passed trade validation (or is a validated CoinAPI fill), reusing
-  `summary.gate` as the gate artifact. CoinAPI-fill-day trade validation lands here only after the
-  §5a backfill gate unlocks.
+  span)` unless `summary.gate.bars_ready` holds for that span — i.e. `lake_required_pass` **and** no
+  `coinapi_fill_deferred` entry touches it (every required day passed, and every fill day is a
+  *validated* CoinAPI fill). It gates on `bars_ready`, **not** `lake_required_pass`, so it can never
+  span an unvalidated/locked Coinbase trade gap. CoinAPI-fill-day trade validation (which clears
+  `coinapi_fill_deferred`) lands here only after the §5a backfill gate unlocks.
 
 ## Implementation Tasks
 
@@ -673,7 +697,8 @@ commit per task.
 
 ### Task 5 (Phase 4): bar-builder enforcement (with the bar builder)
 
-- Gate bar emission on `summary.gate`; CoinAPI-fill-day trade validation only after the §5a backfill
+- Gate bar emission on `summary.gate.bars_ready` (not `lake_required_pass`); CoinAPI-fill-day trade
+  validation (which clears `coinapi_fill_deferred`) only after the §5a backfill
   gate unlocks.
 
 ## Validation Commands
@@ -709,6 +734,8 @@ agent worktrees have no `.venv` — use `/home/aaron/jepa-btc-forecasting/.venv/
       JSON (`allow_nan=False`, `jq empty` passes) and byte-deterministic apart from `generated_utc`.
 - [ ] Fail vs. warn split is justified per code; CoinAPI-fill days route (not fail) and stay behind
       the locked backfill gate; excluded days are out of scope.
+- [ ] The bar-builder gate is `bars_ready` (`lake_required_pass` **and** no deferred fills), never
+      `lake_required_pass` alone — a span with an unvalidated/locked Coinbase fill is not buildable.
 - [ ] No vendor I/O in the pure module or its tests; `--dry-run` makes no Lake calls; the GB gate
       reuses the `run_coinbase_quality_map` quota pattern (exit 5).
 - [ ] Day selection has no broad default; the no-arg default sample stays under the auto cap.
