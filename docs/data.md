@@ -548,9 +548,10 @@ Findings:
    IMPLEMENTED (2026-07-02)** — per-day `coinapi_fill` stitch plans + coverage keys, see the
    §5a-QualityMap contract paragraph above — and the **native coverage metrics are IMPLEMENTED
    (2026-07-02)**, so `--engine native` emits the same coverage keys and partial fill plans as the
-   Python frame path (plan Task 3); the seam-day live validation is **DONE (2026-07-02, native) on
-   both real seam days** — see "Seam-day live validation" below (CoinAPI-overlap parity at the seam
-   still open). Backfill stays locked.
+   Python frame path (plan Task 3); the seam-day fill-**decision** wiring is **live-validated on both
+   real seam days (2026-07-02, native)** — see "Seam-day live validation" below — but the seam-day
+   live validation item itself stays **PARTIAL/open**: the CoinAPI-overlap stitch/parity check has not
+   been run. Backfill stays locked.
 3. **Gap days route correctly and are fillable.** All 3 documented book-gap days raise lakeapi
    `NoFilesFound` → `missing_needs_coinapi`, and each is calendar-verified fillable from CoinAPI flat
    files (`coinapi.fillable=true`).
@@ -645,9 +646,10 @@ Findings:
 2 of the 4 `inconclusive` days into confirmed CoinAPI-fill days (fill scope grows beyond the §8 ~$92
 calendar-gap estimate — crossed-seed and seam days add to it); it certifies no new Lake day. Unlock
 still requires at least the partial-day/seam fill policy (2025-01-07, 2024-08-05 — **defined
-2026-07-02**, see §5a-QualityMap finding 2; its report wiring **implemented 2026-07-02** and
-**live-validated on both real seam days 2026-07-02** — see "Seam-day live validation"; CoinAPI-overlap
-parity at the seam still open), the remaining §10 reseed-validation items (vendor-seam day, prior-day
+2026-07-02**, see §5a-QualityMap finding 2; its report wiring **implemented 2026-07-02** and the
+fill-**decision** wiring **live-validated on both real seam days 2026-07-02** — see "Seam-day live
+validation" — but the seam-day validation item stays **partial** (CoinAPI-overlap stitch/parity not
+run)), the remaining §10 reseed-validation items (vendor-seam day, prior-day
 seed carry), and the broad production map.
 
 **Backfill stays LOCKED.** The quality-map tool itself does not download CoinAPI and does not unlock
@@ -656,6 +658,9 @@ Bulk backfill remains gated until the multi-day quality map (and the §10 multi-
 passes.
 
 **Seam-day live validation — 2026-07-02 (`--engine native --no-cold-ab`, one bounded Lake day each).**
+**Status: PARTIAL.** This validates the fill-**decision**/plan wiring on both real seam days; the
+seam-day live validation item stays **open** until the CoinAPI-overlap stitch/parity check (plan Q8
+item 16) is run — no CoinAPI was downloaded here, so the cross-vendor stitch at the seam is unverified.
 Confirms the report wiring + partial-fill policy (`recon/stitch_policy.py`, seam plan; native coverage
 metrics) produce the EXPECTED real-day fill decisions on the two documented seam days. Two single-day
 quota-gated runs, each est ~0.48 GB (well under the 5 GB auto cap, no `--allow-broad`); `used_data`
@@ -671,7 +676,7 @@ local lakeapi cache; vendor counter may lag ~60 min). No CoinAPI was downloaded.
   --days 2024-08-05 --out-dir data/reports/seam_day_validation_2024-08-05
 ```
 
-- **2025-01-07 (canonical leading seam day) — PASS.** `lake_present_degraded`
+- **2025-01-07 (canonical leading seam day) — fill-decision PASS (overlap parity open).** `lake_present_degraded`
   (`missing_book_fraction=0.6146>0.02`), seed accepted 14:45:00.846Z with all 22,169 `book` candidates
   clean (`snapshot_reason_codes={"ok":22169}` → trusted source, not crossed). `coinapi_fill.needs_fill
   =true`, `fill_profile=leading_partial_fill` — the **native coverage metrics produced the expected
@@ -952,8 +957,9 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       `docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md` + `recon/stitch_policy.py`;
       quality-map wiring IMPLEMENTED 2026-07-02; native coverage metrics IMPLEMENTED 2026-07-02,
       so the broad map's `--engine native` runs emit partial fill plans too; seam-day live
-      validation DONE 2026-07-02 (native, both real seam days — 2025-01-07 `leading_partial_fill`,
-      2024-08-05 crossed-source `full_day_fill`; CoinAPI-overlap parity at the seam still open —
+      validation PARTIAL 2026-07-02 (native, both real seam days — fill-decision wiring validated:
+      2025-01-07 `leading_partial_fill`, 2024-08-05 crossed-source `full_day_fill`; the CoinAPI-overlap
+      stitch/parity check is NOT yet run, so the seam item stays open —
       §5a-QualityMap "Seam-day live validation")), plus the full-window map (~313 GB
       conservative / ~170 GB measured wire-rate → staged across quota windows); backfill stays
       locked until it passes.)*
