@@ -83,5 +83,28 @@ def test_zero_estimate_never_raises():
                         used_gb=299.0, quota_gb=300.0, headroom_gb=10.0)  # no raise
 
 
+def test_quota_headroom_gate_is_decided_by_used_gb():
+    # keep the SOFT cap inert (max_gb huge + allow_broad) so ONLY the quota-headroom math decides:
+    # a 50 GB pull fits when nothing is used, but must be REFUSED once used_gb eats the headroom.
+    # (Guards a regression that dropped used_gb from the hard gate — it would leave the other tests
+    # green because their est_gb already exceeds the used_gb=0 headroom.)
+    lb.check_broad_gate(est_gb=50.0, max_gb=1e9, allow_broad=True,
+                        used_gb=0.0, quota_gb=300.0, headroom_gb=10.0)      # safe_remaining 290 -> ok
+    with pytest.raises(SystemExit) as e:
+        lb.check_broad_gate(est_gb=50.0, max_gb=1e9, allow_broad=True,
+                            used_gb=250.0, quota_gb=300.0, headroom_gb=10.0)  # safe_remaining 40 -> refuse
+    assert e.value.code == 4
+
+
+def test_quota_headroom_gate_is_decided_by_headroom_gb():
+    # same isolation, toggling ONLY headroom_gb: widening the headroom past the pull must refuse it.
+    lb.check_broad_gate(est_gb=50.0, max_gb=1e9, allow_broad=True,
+                        used_gb=0.0, quota_gb=300.0, headroom_gb=10.0)       # safe_remaining 290 -> ok
+    with pytest.raises(SystemExit) as e:
+        lb.check_broad_gate(est_gb=50.0, max_gb=1e9, allow_broad=True,
+                            used_gb=0.0, quota_gb=300.0, headroom_gb=260.0)  # safe_remaining 40 -> refuse
+    assert e.value.code == 4
+
+
 def test_gate_exit_code_constant_is_four():
     assert lb.BROAD_GATE_EXIT == 4

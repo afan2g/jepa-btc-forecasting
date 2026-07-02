@@ -79,6 +79,13 @@ def test_batch_size_capped_by_runner_gate():
         assert len(b) * pm.RUNNER_GB_PER_DAY <= pm.RUNNER_QUOTA_GB - pm.RUNNER_HEADROOM_GB
 
 
+def test_days_per_batch_returns_days_and_capped_flag():
+    # direct assertions on the (days, capped) tuple — plan_batches discards the flag, so without this
+    # a regression pinning capped=False (and the manifest notice) would go unnoticed.
+    assert pm.days_per_batch(2.5, RATE) == (2, False)         # budget-bound, under the cap
+    assert pm.days_per_batch(1000.0, 0.5) == (236, True)      # requested 2000 > runner cap 236
+
+
 # --------------------------------------------------------------------------- writing the plan
 def test_write_plan_emits_batch_files_and_manifest(tmp_path):
     rc, out_dir = _run(tmp_path)
@@ -126,6 +133,17 @@ def test_manifest_summarizes_plan(tmp_path):
     assert m["meta"]["max_gb_per_batch"] == 2.5
     assert m["meta"]["generated_utc"]  # timestamp present (batch FILES are the deterministic part)
     assert m["meta"]["runner_gb_per_day"] == pm.RUNNER_GB_PER_DAY
+
+
+def test_manifest_records_capped_flag_when_runner_gate_binds(tmp_path):
+    # a plan whose per-batch budget exceeds the runner cap must record the True flag in the manifest
+    out_dir = str(tmp_path / "b")
+    rc = pm.main(["--start", "2026-01-01", "--end", "2026-12-31",
+                  "--max-gb-per-batch", "1000.0", "--gb-per-day", "0.5", "--out-dir", out_dir])
+    assert rc == 0
+    m = json.loads((pathlib.Path(out_dir) / "manifest.json").read_text())
+    assert m["meta"]["days_per_batch"] == 236
+    assert m["meta"]["days_per_batch_capped_by_runner_gate"] is True
 
 
 def test_manifest_command_targets_downloader_with_range_and_both_instruments(tmp_path):
