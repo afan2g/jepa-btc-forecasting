@@ -202,9 +202,9 @@ audit.
 | 6 | `was_presorted` | whether the *file* arrived `origin_time`-monotonic (pre-sort) | informational (Coinbase→False, Binance→True) |
 | 7 | `dup_ts_cluster_count` / `dup_ts_max_cluster` | `origin_time` values with count>1; max multiplicity | warn if `dup_ts_max_cluster > dup_ts_cluster_warn` |
 | 8 | `dup_trade_id_count` / `dup_trade_id_frac` | `len(df) - trade_id.nunique()` (if `trade_id` present) | warn if `> 0` |
-| 9 | `price_min` / `price_max` / `price_median` / `price_p99_abs_ret` / `price_max_abs_ret` / `price_out_of_band_count` | min/max/median; p99 **and max** of `abs(price.pct_change())` after sort; count of prices outside `[median/price_range_factor, median*price_range_factor]` | fail on non-positive/NaN price; warn if `price_p99_abs_ret > price_jump_warn` **or** `price_max_abs_ret > price_spike_warn` **or** `price_out_of_band_count > 0` (a lone corrupt spike two-diffs among 10⁵ trades never moves p99, so `price_max_abs_ret` + the robust band catch it) |
-| 10 | `size_min` / `size_max` / `size_zero_frac` / `size_neg_frac` | on `quantity` | **hard fail** if `size_zero_frac>0` or `size_neg_frac>0`; warn if `size_max > size_max_btc` |
-| 11 | `notional_sum` / `notional_max_trade` | `Σ price*quantity`; `max(price*quantity)` | fail if `notional_sum<=0`/NaN; warn on absurd single-trade notional |
+| 9 | `price_min` / `price_max` / `price_median` / `price_p99_abs_ret` / `price_max_abs_ret` / `price_out_of_band_count` | min/max/median; p99 **and max** of `abs(price.pct_change())` after sort; count of prices outside `[median/price_range_factor, median*price_range_factor]` | fail on non-positive/NaN price; **`price_spike` fail** if `price_max_abs_ret > price_spike_warn` **or** `price_out_of_band_count > 0` (an isolated corrupt print the p99 misses — it directly corrupts the notional bar clock, §8); `price_jump_excess` **warn** if `price_p99_abs_ret > price_jump_warn` (broad regime churn, real) |
+| 10 | `size_min` / `size_max` / `size_zero_frac` / `size_neg_frac` | on `quantity` | **hard fail** if `size_zero_frac>0` or `size_neg_frac>0`; **`size_out_of_band` fail** if `size_max > size_hard_max_btc` (bar-clock-corrupting); `size_out_of_range` **warn** if `size_max > size_max_btc` (unusually large but plausible) |
+| 11 | `notional_sum` / `notional_max_trade` | `Σ price*quantity`; `max(price*quantity)` | fail if `notional_sum<=0`/NaN; the single-print corruption is caught upstream by rows 9–10 |
 | 12 | `interarrival_median_s` / `_p95_s` / `_p99_s` / `_max_s` | `diff(engine_clock).dt.total_seconds()` after sort | warn if `interarrival_max_s > interarrival_gap_warn_s` (calendar-context-exempt) |
 | 13 | `missing_hour_count` / `sparse_hour_count` | of the 24 UTC `engine_clock` hours: 0 rows / `< sparse_hour_min_rows` | `sparse_hour` warn; `missing_hour` warn up to `max_missing_hours`, else **`missing_hours_excess` fail** on a required non-fill day (§8) |
 | 14 | `recv_origin_lag_median_ms` / `_p95_ms` / `_neg_frac` | `(received_time-origin_time)` ms | informational (Coinbase inherently higher); fail only if `_neg_frac > lag_neg_frac_max` |
@@ -278,8 +278,8 @@ below are illustrative (schema shape, not measured) — the live run fills them 
     "thresholds": { "origin_time_null_max": 0.01, "min_rows_hard": 1000,
                     "interarrival_gap_warn_s": 120.0, "sparse_hour_min_rows": 60,
                     "max_missing_hours": 1, "price_jump_warn": 0.10, "price_spike_warn": 0.50,
-                    "price_range_factor": 10.0, "size_max_btc": 5000.0, "dup_ts_cluster_warn": 50,
-                    "lag_neg_frac_max": 0.001 },
+                    "price_range_factor": 10.0, "size_max_btc": 500.0, "size_hard_max_btc": 5000.0,
+                    "dup_ts_cluster_warn": 50, "lag_neg_frac_max": 0.001 },
     "trades_gb_per_day": {"binance_perp": 0.12, "binance_spot": 0.10, "coinbase": 0.05},
     "quota": { "ok": true, "reason": "ok", "est_gb": 1.35, "used_gb": 42.0,
                "quota_gb": 300.0, "max_auto_gb": 3.0, "allow_broad": false, "headroom_gb": 10.0,
@@ -352,9 +352,10 @@ stable code first — the `run_coinbase_quality_map.classify_day` convention):
 | `row_count_implausibly_low` | `< min_rows_hard` | fail |
 | `duplicate_timestamp_cluster` | large same-ns cluster | warn |
 | `duplicate_trade_id` | repeated `trade_id` | warn |
-| `price_jump_excess` | `price_p99_abs_ret > price_jump_warn` (broad churn) | warn |
-| `price_spike` | `price_max_abs_ret > price_spike_warn` or `price_out_of_band_count > 0` (a lone corrupt outlier p99 misses) | warn |
-| `size_out_of_range` | `size_max > size_max_btc` | warn |
+| `price_jump_excess` | `price_p99_abs_ret > price_jump_warn` (broad regime churn) | warn |
+| `price_spike` | `price_max_abs_ret > price_spike_warn` or `price_out_of_band_count > 0` (isolated corrupt print p99 misses; corrupts the notional clock) | **fail** (→ fix/quarantine/exclude, §8) |
+| `size_out_of_range` | `size_max > size_max_btc` (unusually large but plausible) | warn |
+| `size_out_of_band` | `size_max > size_hard_max_btc` (bar-clock-corrupting) | **fail** (→ fix/quarantine/exclude, §8) |
 | `interarrival_gap_excess` | `interarrival_max_s > interarrival_gap_warn_s` | warn |
 | `missing_hour` / `sparse_hour` | empty / sparse UTC `engine_clock` hour | warn |
 | `missing_hours_excess` | required non-fill day, `missing_hour_count > max_missing_hours` | fail (→ fill/exclude) |
@@ -372,10 +373,11 @@ stable code first — the `run_coinbase_quality_map.classify_day` convention):
 | `origin_time_null_max` | 0.01 | matches `verify_lake`'s `< 0.01 → USABLE (exchange time)` bar |
 | `min_rows_hard` | 1000 | a `trades` day under ~1k rows is a broken/near-empty partition, not a quiet day |
 | `dup_ts_cluster_warn` | 50 | same-ns trades are normal in bursts; a >50-deep single-ns cluster is worth a look |
-| `price_jump_warn` | 0.10 | a >10% gap between consecutive trades — real flash moves exist, so warn not fail |
-| `price_spike_warn` | 0.50 | max single-trade abs return; a >50% one-tick move is almost always one corrupt print (p99 can't see a lone outlier) |
-| `price_range_factor` | 10.0 | any price outside `[median/10, median×10]` is grossly implausible intraday (BTC never moves 10× within a day), regime-agnostic vs. a hardcoded band |
-| `size_max_btc` | 5000.0 | a single BTC-denominated trade > 5000 BTC is implausible on these venues |
+| `price_jump_warn` | 0.10 | a broad-day p99 >10% consecutive-trade churn — a genuinely volatile *regime*, so warn not fail |
+| `price_spike_warn` | 0.50 | a >50% single-tick abs return is almost always one corrupt print (p99 can't see a lone outlier); **blocking** because it corrupts the notional clock |
+| `price_range_factor` | 10.0 | any price outside `[median/10, median×10]` is grossly implausible intraday (BTC never moves 10× within a day), regime-agnostic vs. a hardcoded band; **blocking** |
+| `size_max_btc` | 500.0 | a single BTC trade > 500 BTC is unusually large but can be a real block trade → warn |
+| `size_hard_max_btc` | 5000.0 | a single BTC trade > 5000 BTC (~$300M) is bar-clock-corrupting and near-certainly a bad print → **blocking** |
 | `interarrival_gap_warn_s` | 120.0 | a >2 min no-trade gap in a normally-active market; quiet-hour context exempts it |
 | `sparse_hour_min_rows` | 60 | < 1 trade/min for a whole UTC hour is sparse |
 | `max_missing_hours` | 1 | ≥2 fully-empty UTC hours on a continuously-traded BTC venue is a data gap, not quiet — a required non-fill day above this fails (§8) rather than passing as warn |
@@ -458,19 +460,27 @@ mirroring the "never silently dropped" discipline (a fail is surfaced in
   day-level "partition present" into an intraday-coverage gate. (Calendar fill days route to
   `coinapi_fill` before this check; sparse — non-empty — hours stay warn.)
 - `price_out_of_range`, `size_nonpositive`, `notional_nonpositive`
+- `price_spike` / `size_out_of_band` — an **isolated** grossly-out-of-band print (single-tick
+  `price_max_abs_ret > price_spike_warn`, a price outside the robust `price_range_factor` band, or a
+  size > `size_hard_max_btc`). The dollar bar clock sums `price × quantity`, so **one** such print
+  prematurely trips a bar boundary and mis-times every downstream feature/label — a single outlier the
+  robust p99/median checks are designed to see. Blocking, not warn: the day must be fixed, the print
+  explicitly **quarantined** (a documented drop-mask the bar builder applies), or the day excluded —
+  never silently consumed. The real-flash-vs-corrupt ambiguity is exactly why it needs *explicit*
+  acceptance rather than passing the gate as a warning.
 - `row_count_implausibly_low` (`< min_rows_hard`)
 - `lag_negative` above `lag_neg_frac_max`
 
 **Warn (usable, surfaced, non-blocking):** `duplicate_timestamp_cluster`, `duplicate_trade_id`,
-`price_jump_excess`, `price_spike`, `size_out_of_range`, `interarrival_gap_excess`, `sparse_hour`,
-`missing_hour` (**up to `max_missing_hours`** — beyond that it escalates to the blocking
+`price_jump_excess` (broad p99 regime churn — real volatility, not a lone bad print),
+`size_out_of_range` (unusually large but plausible block trade), `interarrival_gap_excess`,
+`sparse_hour`, `missing_hour` (**up to `max_missing_hours`** — beyond that it escalates to the blocking
 `missing_hours_excess` above), `side_value_unexpected`, `received_time_fallback_used`, `row_count_low`.
 These are either legitimate market behaviour (flash moves, dead Sundays, same-ns bursts) or
 informational; the bar builder may consume the day but the report retains the flags for stratified
-diagnostics (experiment-plan "stratify all results by regime"). `price_spike` is warn-only on
-purpose — a real flash print and a corrupt one look alike, so it surfaces for review rather than
-silently dropping data; a corrupt price that also drives `notional_nonpositive`/non-positive price
-still hard-fails.
+diagnostics (experiment-plan "stratify all results by regime"). The split is deliberate: a *broad*
+volatile-regime signal is warn, but a *discrete* corrupt-looking print that would poison the notional
+accumulator blocks (above).
 
 **How CoinAPI-fill days are handled.** A Coinbase day whose Lake `trades` are missing/partial and
 which appears in `coinbase_fill_days` (with `trades: true`, i.e. Lake trades need CoinAPI fill) is
@@ -589,11 +599,15 @@ clean day classifies `pass`, not a coverage `fail`.
 4. **Duplicate trade IDs** — `dup_ids=5` (the helper makes the first 6 rows share one id → exactly 5
    extra duplicates) → `dup_trade_id_count == 5`, `duplicate_trade_id` warn.
 5. **Invalid price / size** — `bad_price=True` → `price_out_of_range` fail; `bad_size=True` →
-   `size_nonpositive` fail; a zero-size row → `size_nonpositive` fail.
-5b. **Isolated positive price spike** — `spike_price=True` (one 11× print among 1000 constant prices)
-   → `price_p99_abs_ret ≈ 0` (p99 misses the two spike diffs) **but** `price_max_abs_ret` large and
-   `price_out_of_band_count == 1` → `price_spike` warn. Pins that a lone corrupt outlier surfaces even
-   though it never moves the 99th percentile (the P2 review gap).
+   `size_nonpositive` fail; a zero-size row → `size_nonpositive` fail. A single `quantity` above
+   `size_hard_max_btc` (e.g. 6000) → `size_out_of_band` **fail**; one above `size_max_btc` but below
+   the hard ceiling (e.g. 800) → `size_out_of_range` **warn**.
+5b. **Isolated positive price spike blocks** — `spike_price=True` (one 11× print among 1000 constant
+   prices) → `price_p99_abs_ret ≈ 0` (p99 misses the two spike diffs) **but** `price_max_abs_ret` large
+   and `price_out_of_band_count == 1` → `price_spike` **fail** (blocking, §8): one such print poisons
+   the notional bar clock, so it must block/quarantine, not pass as warn. A broad-churn day
+   (`price_p99_abs_ret > price_jump_warn` with no out-of-band print) → `price_jump_excess` **warn**
+   (real volatile regime) — pins the deliberate broad-vs-isolated split.
 6. **Sparse / missing hour + coverage gate** — build a **full-day** frame
    (`_trades_df(n=2400, full_day=True)` → ~100 rows in each of the 24 UTC hours). (The default 80 ms
    frame spans only ~80 s of hour 0 and cannot exercise a 24-hour metric.)
