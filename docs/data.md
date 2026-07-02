@@ -917,10 +917,16 @@ Other open items:
       canonical, ties break by original row index, `order_id` is never an ordering key
       (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,
       `tests/test_coinapi_within_timestamp_ordering.py`; quality counters `seq_disorder`/`seq_duplicate`).
-- [ ] **Binance downloader** — not yet built; **plan:**
+- [ ] **Binance downloader** — vendor stages not yet built; **plan:**
       [`docs/superpowers/plans/2026-07-02-binance-downloader-plan.md`](superpowers/plans/2026-07-02-binance-downloader-plan.md).
       Same throttled/resumable/partitioned pattern as `download_coinapi.py`, streaming per day
       (109 M rows). Read direct via pyarrow S3 (`eu-west-1`) or lakeapi.
+      *Offline Phase-1 helpers landed 2026-07-02 (pure, CI-safe, **no vendor calls run**):*
+      `ingest/lake_binance.py` (feed/instrument registry, Hive partition paths, manifest/resume
+      state, joint `origin_time`→`received_time` engine-time resolver, quota estimate + broad-pull
+      gate) and `scripts/plan_lake_binance_batches.py` (deterministic quota-window batch planner).
+      The vendor download/recon stages, live metadata/schema probes, and Binance tick-scale
+      verification remain unbuilt.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
 
 ---
