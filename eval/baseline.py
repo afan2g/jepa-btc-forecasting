@@ -40,14 +40,16 @@ def _fit_predict(model, Xtr, ytr, ltr, Xte, wtr, scale):
         return Ridge(alpha=1.0).fit(Xtr, ytr, sample_weight=wtr).predict(Xte)
     if model == "lgbm_reg":
         m = lgb.LGBMRegressor(n_estimators=200, num_leaves=31, learning_rate=0.05,
-                              min_child_samples=50, subsample=0.8, verbose=-1)
+                              min_child_samples=50, subsample=0.8, verbose=-1,
+                              random_state=0)
         m.fit(Xtr, ytr, sample_weight=wtr)
         return m.predict(Xte)
     if model == "lgbm_clf":
         if len(np.unique(ltr)) < 2:        # single-class fold (heavy-flat regime) -> no trades
             return np.zeros(len(Xte))
         m = lgb.LGBMClassifier(n_estimators=200, num_leaves=31, learning_rate=0.05,
-                               min_child_samples=50, subsample=0.8, verbose=-1)
+                               min_child_samples=50, subsample=0.8, verbose=-1,
+                               random_state=0)
         m.fit(Xtr, ltr, sample_weight=wtr)
         proba = m.predict_proba(Xte); cls = list(m.classes_)
         p_up = proba[:, cls.index(1)] if 1 in cls else 0.0
@@ -58,7 +60,14 @@ def _fit_predict(model, Xtr, ytr, ltr, Xte, wtr, scale):
 
 def evaluate_config(matrix: pd.DataFrame, feature_cols, model: str, *,
                     n_groups: int, k: int, embargo_ns: int) -> ConfigResult:
+    feature_cols = list(feature_cols)
+    if len(set(feature_cols)) != len(feature_cols):
+        raise ValueError("duplicate feature_cols entries double-weight columns; "
+                         "deduplicate the manifest")
     X = matrix[feature_cols].to_numpy(float)
+    if X.shape[1] != len(feature_cols):
+        raise ValueError("feature selection widened X (duplicate column labels in the "
+                         "matrix); run validate_matrix/validate_frame first")
     y = matrix["y_fwd_bps"].to_numpy(float)
     lab = matrix["label"].to_numpy(int)
     cost = matrix["cost_bps"].to_numpy(float)
