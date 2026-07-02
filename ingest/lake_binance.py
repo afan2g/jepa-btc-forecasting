@@ -20,6 +20,11 @@ import json
 import os
 from dataclasses import dataclass
 
+# recon.ingest is pandas-only (NO boto3/lakeapi/pyarrow); importing it keeps this module CI-safe
+# while reusing the ONE authority for the single-axis engine-time convention (Requirement 4) rather
+# than duplicating it. pandas is a default dependency ("stdlib/pandas-light", plan file-structure).
+from recon.ingest import _ns, shared_engine_time_col
+
 MANIFEST_NAME = "_manifest.jsonl"
 
 # ----------------------------------------------------------------------------- registry (Req 1)
@@ -151,3 +156,41 @@ def cleanup_tmp(out_root: str) -> int:
                 os.remove(os.path.join(dirpath, fn))
                 removed += 1
     return removed
+
+
+# ----------------------------------------------------------------------------- engine-time resolver (Req 4)
+def _is_fully_populated(df, col: str) -> bool:
+    """True iff `col` is present and every row is populated (>0 ns) — the 100% gate recon applies
+    (recon calls `_require_populated`, which raises on ANY <=0/NaT row: recon/ingest.py:83-87). The
+    >99% `is_populated` selector is too coarse here — a 99.x% column passes it then crashes recon."""
+    return col in df.columns and bool((_ns(df[col]) > 0).all())
+
+
+def resolve_engine_time(*dfs):
+    """Choose ONE fully-populated engine-time column shared across ALL frames handed to recon
+    (deltas + the `book` seed), returning `(col, fallback_used, dfs_clean, dropped_rows)`.
+
+    Joint, never per-frame (plan Requirement 4): selecting per-frame could put deltas on
+    received_time and the seed on origin_time — a mixed exchange/capture axis that reorders
+    seed/reseed events relative to deltas. Policy:
+      1. `origin_time` if FULLY populated in every frame (exchange clock, no data loss);
+      2. else `received_time` if FULLY populated in every frame (documented whole-day fallback,
+         preferred over dropping rows);
+      3. else keep the best shared (>99%) column and DROP its <=0/NaT rows from each frame,
+         recording per-frame drop counts. Raises if no column is >99%-populated across all frames.
+
+    `dfs_clean` (aligned to inputs) are the frames the caller feeds to recon — never the originals
+    when rows were dropped. `col` + `dropped_rows` go in the manifest, never silent."""
+    if not dfs:
+        raise ValueError("resolve_engine_time requires at least one DataFrame")
+    if all(_is_fully_populated(df, "origin_time") for df in dfs):
+        return "origin_time", False, list(dfs), [0] * len(dfs)
+    if all(_is_fully_populated(df, "received_time") for df in dfs):
+        return "received_time", True, list(dfs), [0] * len(dfs)
+    col = shared_engine_time_col(*dfs)  # raises if no column is >99% across every frame
+    cleaned, dropped = [], []
+    for df in dfs:
+        keep = (_ns(df[col]) > 0).to_numpy()
+        cleaned.append(df[keep].reset_index(drop=True))
+        dropped.append(int((~keep).sum()))
+    return col, col != "origin_time", cleaned, dropped
