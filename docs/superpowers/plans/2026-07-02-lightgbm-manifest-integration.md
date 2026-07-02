@@ -35,7 +35,7 @@ Gaps this plan closes (severity → phase):
 3. **Correctness** — duplicate-column hazard: `matrix[feature_cols]` returns *every* label match, so a duplicated frame label silently widens X; duplicated `feature_cols` entries double-weight a column. v1 catches both; the legacy path and direct `run_study` callers catch neither. → Phase 1.
 4. **Correctness/UX** — `availability_lag_ns > 0` is schema-legal but collides with `validate_matrix`'s hard `t_available == t_event` requirement (`eval/matrix.py:28-30`), producing a confusing error deep inside `run_study` per horizon. → Phase 1 (reject up front for the baseline).
 5. **Correctness (edge)** — manifest-declared horizons absent from the frame produce silently missing entries in the result dict (`eval/runner.py:41-43`); legacy `str()`-coerces non-string horizon tags that v1 rejects. → Phase 1 (coverage check), Phase 3 (coercion path removed).
-6. **Correctness (crash asymmetry)** — feature columns have no numeric/NaN screening: `to_numpy(float)` dies opaquely on object dtypes, and NaN features crash Ridge mid-study while LightGBM would mask them. → Phase 1.
+6. **Correctness (crash asymmetry)** — feature columns have no numeric/NaN/inf screening: `to_numpy(float)` dies opaquely on object dtypes, and NaN or infinite features crash Ridge mid-study while LightGBM would mask NaN. → Phase 1.
 7. **Hygiene** — runner reads `manifest["feature_cols"]` raw instead of `feature_list()`; run output omits manifest identity despite the module docstring claiming runs are "reproducible from its own output"; CLI docstring/loader stale; LightGBM rungs have no pinned `random_state`. → Phases 1–2.
 
 Not a gap (verified): feature **order** is preserved end-to-end — manifest order → pandas label selection → numpy column order → LightGBM (`feature_list` returns the list in order; `matrix[feature_cols]` selects by label in list order regardless of frame column order). Phase 1 pins this with a test. Embargo flow is also not a gap: `embargo_ns >= max_lookback_ns` is enforced at schema level (`eval/manifest.py:174-176`) and re-checked at runtime against the observed per-row look-back (`eval/study.py:28-32`).
@@ -86,7 +86,7 @@ Signatures **unchanged**: `run_study(matrix, feature_cols, *, cost_default, n_gr
 | Declared horizons must exist in the frame | **NEW (phase 1):** runner coverage check | n/a |
 | Duplicate labels cannot widen X / smuggle a shadowed series past the screens | `validate_frame` + **NEW (phase 1):** `validate_matrix` dup checks + `evaluate_config` X-width assert | **NEW (phase 1):** same `validate_matrix`/`evaluate_config` checks (they run on both paths) |
 
-**Nullable-dtype caveat (closed by Task 4):** `validate_matrix`'s plain timing comparisons and `run_study`'s observed-lookback `.max()` fail **open** under pandas nullable dtypes with `pd.NA` (`Series.all()` skips NA — the very hazard `validate_frame`'s comment documents), so the legacy-column cells for the three timing rows above are only unconditionally true once Task 4 adds the same integer/non-null timing guard `validate_frame` already has. Task 4 also screens `cost_bps`/`half_spread_bps`/`uniqueness` for NaN/`pd.NA` — otherwise validated on **neither** path in any phase (a NaN cost silently forces no-trade and biases turnover/PnL; an NA weight poisons the weighted Sharpe).
+**Nullable-dtype caveat (closed by Task 4):** `validate_matrix`'s plain timing comparisons and `run_study`'s observed-lookback `.max()` fail **open** under pandas nullable dtypes with `pd.NA` (`Series.all()` skips NA — the very hazard `validate_frame`'s comment documents), so the legacy-column cells for the three timing rows above are only unconditionally true once Task 4 adds the same integer/non-null timing guard `validate_frame` already has. Task 4 also screens features, `y_fwd_bps`, and `cost_bps`/`half_spread_bps`/`uniqueness` for NaN/`pd.NA`/±inf — otherwise validated on **neither** path in any phase (a NaN or infinite cost silently forces no-trade and biases turnover/PnL; an NA weight poisons the weighted Sharpe; infinite X aborts Ridge mid-study).
 
 **Embargo vs label horizon (experiment-plan.md E0.4: "embargo >= max(label horizon, longest feature look-back)"):** deliberately NOT a new check. The label-horizon side is covered *structurally* by CPCV's per-test-span purge — `data/cv.py` merges the test rows' actual `[t0, t1] = [t_event, t_barrier]` spans and purges any train row overlapping them, so no train label span can straddle a test span regardless of embargo. `embargo_ns` guards the *feature look-back* side after the test block, and `embargo_ns >= max_lookback_ns` is enforced twice (schema + runtime). Adding `embargo_ns >= horizon_ns` would be redundant with the purge; if a future reviewer wants belt-and-braces, it belongs in `validate_manifest`, not the runner. (The reverse direction — test-row features reaching back toward earlier train labels — is deployment-realistic, not leakage: any train span overlapping a test span is purged, so surviving pre-test train labels are fully realized before the earliest test decision time in that interval.)
 
@@ -97,7 +97,7 @@ Signatures **unchanged**: `run_study(matrix, feature_cols, *, cost_default, n_gr
 ## Backward compatibility
 
 - **Before real manifests exist** (`data/processed/` is absent in this worktree): everything below the runner boundary keeps bare-list signatures, so `test_study.py`, `test_gate_synthetic.py`, `test_matrix.py`, `test_baseline.py` run unchanged, no manifests needed.
-- **Synthetic manifests ARE required** for runner-boundary tests. Phase 1 adds `eval.synthetic.make_manifest(feature_cols, max_lookback_ns, *, gate=None, **over)` — a schema-valid v1 manifest mirroring `make_matrix`'s defaults (`"10s"` horizon = 10^10 ns, embargo = look-back). `tests/test_manifest.py`'s hand-rolled `_manifest()` helper stays as-is (it tests the contract itself; hand-rolling is a feature there).
+- **Synthetic manifests ARE required** for runner-boundary tests. Phase 1 adds `eval.synthetic.make_manifest(feature_cols, max_lookback_ns, *, gate=None, **over)` — a schema-valid v1 manifest mirroring `make_matrix` (`"10s"` horizon tag with duration = the passed look-back, which matches the generator for any `horizon_ns` since it sets `lookback = horizon_ns`; embargo = look-back). `tests/test_manifest.py`'s hand-rolled `_manifest()` helper stays as-is (it tests the contract itself; hand-rolling is a feature there).
 - **Exactly one green test breaks** if v1 became required at the runner today: `tests/test_runner.py::test_run_from_manifest_runs_and_echoes_resolved_gate` (the only full legacy-shape builder). Phase 1 migrates it to v1 and adds an explicit legacy-pin test; phase 3 deletes the pin.
 - Two guard tests (`tests/test_manifest.py:311,321`) assert `ValueError` matching `"manifest_version"` for v1-fields-without-version dicts. They stay green through phase 3 **only if** the new rejection message keeps the literal `manifest_version` — phase 3's error message does.
 - The skip-gated `tests/test_baseline_integration.py` currently uses raw `json.load` — a landmine the day a legacy-shaped real manifest appears. Phase 2 switches it to `load_manifest`, pinning that the real artifact must be v1.
@@ -107,7 +107,7 @@ Signatures **unchanged**: `run_study(matrix, feature_cols, *, cost_default, n_gr
 
 ## File structure
 
-**Phase 1** — Modify: `eval/manifest.py` (public leak-screen helper), `eval/synthetic.py` (`make_manifest`), `eval/runner.py` (v1 hardening + legacy screen), `eval/matrix.py` (dup + numeric/NaN screens), `eval/baseline.py` (X-width assert, `random_state`), `scripts/run_baseline.py` (v1-only CLI), `tests/test_manifest.py` (+1), `tests/test_matrix.py` (+5), `tests/test_baseline.py` (+2). Create: `tests/test_synthetic.py`. Rewrite: `tests/test_runner.py`.
+**Phase 1** — Modify: `eval/manifest.py` (public leak-screen helper), `eval/synthetic.py` (`make_manifest`), `eval/runner.py` (v1 hardening + legacy screen), `eval/matrix.py` (dup + numeric/NaN screens), `eval/baseline.py` (X-width assert, `random_state`), `scripts/run_baseline.py` (v1-only CLI), `tests/test_manifest.py` (+1), `tests/test_matrix.py` (+6), `tests/test_baseline.py` (+2). Create: `tests/test_synthetic.py`. Rewrite: `tests/test_runner.py`.
 
 **Phase 2** — Modify: `tests/test_baseline_integration.py`, `docs/feature-manifest.md`.
 
@@ -211,10 +211,11 @@ and the function after `make_matrix`:
 
 ```python
 def make_manifest(feature_cols, max_lookback_ns, *, gate=None, **over):
-    """A schema-valid v1 feature manifest matching make_matrix's defaults ("10s" horizon,
-    embargo = look-back). Test/exploration helper — real builds write their own manifest.
-    NOTE: horizons is coupled to make_matrix's default horizon_ns; if you pass make_matrix
-    a different horizon_ns, override via **over (e.g. horizons={"2s": 2_000_000_000})."""
+    """A schema-valid v1 feature manifest mirroring make_matrix ("10s" horizon tag with
+    duration = max_lookback_ns — the generator sets lookback == horizon_ns, so this holds
+    for any horizon_ns override too; embargo = look-back). Test/exploration helper — real
+    builds write their own manifest. Override horizons via **over for multi-horizon or
+    custom-tag manifests."""
     man = {
         "manifest_version": MANIFEST_VERSION,
         "dataset_id": "synthetic",
@@ -225,7 +226,7 @@ def make_manifest(feature_cols, max_lookback_ns, *, gate=None, **over):
         "target_cols": ["y_fwd_bps", "label"],
         "reserved_cols": list(RESERVED),
         "venues": [{"exchange": "SYNTHETIC", "symbol": "BTC-TEST"}],
-        "horizons": {"10s": 10_000_000_000},
+        "horizons": {"10s": int(max_lookback_ns)},
         "sources": ["eval/synthetic.py"],
         "generated_at": "2026-07-02T00:00:00+00:00",
         "max_lookback_ns": int(max_lookback_ns),
@@ -515,6 +516,18 @@ def test_nan_feature_or_target_rejected():
         validate_matrix(bad3, feats)
 
 
+def test_infinite_feature_or_cost_rejected():
+    # np.inf passes both the dtype and isna screens: Ridge/sklearn abort on infinite X
+    # mid-study, and an infinite cost silently forces no-trade — require finite values.
+    df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
+    bad = df.copy(); bad.loc[0, "cvd"] = np.inf
+    with pytest.raises(ValueError, match="infinite"):
+        validate_matrix(bad, feats)
+    bad2 = df.copy(); bad2.loc[0, "cost_bps"] = -np.inf
+    with pytest.raises(ValueError, match="infinite"):
+        validate_matrix(bad2, feats)
+
+
 def test_nullable_or_datetime_timing_fails_closed():
     # Plain comparisons fail open under pd.NA (Series.all() skips NA) and run_study's
     # observed-lookback .max() skips NA rows — mirror validate_frame's integer/non-null
@@ -532,8 +545,8 @@ def test_nullable_or_datetime_timing_fails_closed():
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/test_matrix.py -k "duplicate or numeric or nan or fails_closed" -v`
-Expected: 5 FAILED (no raise, or a different error than the matched message). Note: plain `-k rejected` would over-match — `test_label_out_of_domain_rejected` and `test_negative_costs_rejected` already exist.
+Run: `.venv/bin/python -m pytest tests/test_matrix.py -k "duplicate or numeric or nan or fails_closed or infinite" -v`
+Expected: 6 FAILED (no raise, or a different error than the matched message). Note: plain `-k rejected` would over-match — `test_label_out_of_domain_rejected` and `test_negative_costs_rejected` already exist.
 
 - [ ] **Step 3: Implement**
 
@@ -542,6 +555,7 @@ Replace `eval/matrix.py` in full (existing checks unchanged; new: duplicate scre
 ```python
 """ModelMatrix contract: reserved-column registry + explicit feature manifest."""
 from __future__ import annotations
+import numpy as np
 import pandas as pd
 
 RESERVED = (
@@ -585,13 +599,18 @@ def validate_matrix(df: pd.DataFrame, feature_cols: list[str]) -> None:
         if df[c].isna().any():
             raise ValueError(f"timing column {c!r} contains nulls")
     for c in list(feature_cols) + list(_NUMERIC):
-        # Ridge (always in the ladder) raises on NaN mid-study while LightGBM masks it,
-        # to_numpy(float) dies opaquely on object dtypes, and NaN cost/uniqueness would
-        # silently bias the no-trade band / Sharpe weights — fail closed with the name.
+        # Ridge (always in the ladder) raises on NaN/inf mid-study while LightGBM masks
+        # NaN, to_numpy(float) dies opaquely on object dtypes, and NaN/inf cost or
+        # uniqueness silently biases the no-trade band / Sharpe weights — fail closed
+        # with the column name. Order matters: the NA check must precede to_numpy(float)
+        # (nullable arrays with pd.NA cannot convert).
         if not pd.api.types.is_numeric_dtype(df[c]):
             raise ValueError(f"column {c!r} must be numeric, got {df[c].dtype}")
         if df[c].isna().any():
             raise ValueError(f"column {c!r} contains NaN; impute or drop upstream")
+        if not np.isfinite(df[c].to_numpy(float)).all():
+            raise ValueError(f"column {c!r} contains infinite values (divide-by-zero "
+                             "feature?); fix upstream")
     if not (df["t_barrier"] >= df["t_event"]).all():
         raise ValueError("invalid span: require t_barrier >= t_event")
     if not (df["t_available"] >= df["t_event"]).all():
@@ -619,13 +638,13 @@ def validate_matrix(df: pd.DataFrame, feature_cols: list[str]) -> None:
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_matrix.py tests/test_study.py tests/test_manifest.py -v`
-Expected: all pass (`tests/test_matrix.py` = 8 existing + 5 new = 13 passed; adjust the total if the pre-existing count has drifted — the 5 new names must all pass). `test_study.py`/`test_manifest.py` confirm no synthetic fixture trips the new screens.
+Expected: all pass (`tests/test_matrix.py` = 8 existing + 6 new = 14 passed; adjust the total if the pre-existing count has drifted — the 6 new names must all pass). `test_study.py`/`test_manifest.py` confirm no synthetic fixture trips the new screens.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add eval/matrix.py tests/test_matrix.py
-git commit -m "feat: validate_matrix fails closed on duplicates, nullable timing, non-numeric/NaN inputs"
+git commit -m "feat: validate_matrix fails closed on duplicates, nullable timing, non-finite inputs"
 ```
 
 ---
@@ -1030,7 +1049,7 @@ Expected: all pass, `tests/test_baseline_integration.py` skipped unless real dat
 
 - **Strict horizon coverage** (declared ⊆ present) means a manifest cannot describe a superset build and run against a filtered slice that drops a whole tag. Accepted: the manifest pins `dataset_id`/`build_id` — it describes *this exact build* — and the alternative (silently missing result entries) is precisely gap 5. Regenerate the manifest when slicing away a horizon.
 - **Strict target equality** blocks manifests that declare extra bespoke reserved targets the baseline ignores. Accepted for the same misdescription reason; the JEPA path will relax via `require_targets=False`, not by weakening the baseline check.
-- **NaN/nullable fail-closed** (features, `y_fwd_bps`, cost/weight columns, nullable timing dtypes) could reject a real matrix whose features legitimately contain NaN — LightGBM alone would mask them. Accepted: imputation is an upstream, pre-registered modeling decision; silently letting LightGBM mask NaN while Ridge crashes is worse, and nullable `pd.NA` makes the existing plain-comparison checks fail *open*. If a real build needs NaN, that is a manifest/dtype design conversation, not a silent pass.
+- **NaN/inf/nullable fail-closed** (features, `y_fwd_bps`, cost/weight columns, nullable timing dtypes) could reject a real matrix whose features legitimately contain NaN — LightGBM alone would mask them. Accepted: imputation is an upstream, pre-registered modeling decision; silently letting LightGBM mask NaN while Ridge crashes is worse, and nullable `pd.NA` makes the existing plain-comparison checks fail *open*. If a real build needs NaN, that is a manifest/dtype design conversation, not a silent pass.
 - **Test-count claims**: `tests/test_matrix.py` totals assume 8 pre-existing tests (verified 2026-07-02); if drifted, the named new tests are authoritative, not the totals.
 
 ## Self-review
