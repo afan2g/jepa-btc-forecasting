@@ -176,6 +176,20 @@ class ReseedPolicy:
                                     else float(self.max_spread_frac))}
 
 
+def require_finite_deltas(price: np.ndarray, size: np.ndarray) -> None:
+    """Reject non-finite delta prices/sizes before replay (the `classify_snapshot` finite-values
+    bar, applied to the delta stream). A NaN price would silently DIVERGE the engines: the Python
+    book keys the raw float (`max()`/`min()` over a dict with a NaN key is insertion-order
+    dependent, and a fresh NaN key can never be popped), while the native book keys
+    `round(NaN * scale)` == tick 0 — different tops, different coverage runs, different fill
+    plans. Fail fast at both engines' ingest instead."""
+    for name, a in (("price", price), ("size", size)):
+        bad = int(np.count_nonzero(~np.isfinite(a)))
+        if bad:
+            raise ValueError(f"book_delta_v2 contains {bad} non-finite {name} value(s); refusing "
+                             "to replay (NaN/inf book keys are engine-divergent)")
+
+
 def _merge_time_ordered(deltas: Iterable[Delta], snapshots: list[BookSnapshot]):
     """Merge a (ts,seq)-ordered `Delta` iterable with a ts-sorted snapshot list into one
     non-decreasing event stream of `("delta", Delta)` / `("snap", BookSnapshot)`. At equal ts the
@@ -394,6 +408,7 @@ def reconstruct_lake_l2_at_samples_seeded(
     seq = df[seq_col].astype("int64").to_numpy()
     price = df["price"].astype("float64").to_numpy()
     size = df[size_col].astype("float64").to_numpy()
+    require_finite_deltas(price, size)
     sides = _decode_sides(df[side_col].to_numpy())
     order = np.lexsort((seq, ts))  # primary key = ts, secondary = seq (matches order_key)
     snaps = sorted(snapshots or [], key=lambda s: s.ts)

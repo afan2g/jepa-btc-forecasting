@@ -27,7 +27,7 @@ import pandas as pd
 
 from recon.ingest import _pick, _require_populated
 from recon.reconstruct import _decode_sides
-from recon.reseed import BookSnapshot, ReseedPolicy, classify_snapshot
+from recon.reseed import BookSnapshot, ReseedPolicy, classify_snapshot, require_finite_deltas
 
 # Snapshot reason-code enum — the ORDER is load-bearing: the u8 index passed to Rust and mapped back
 # to a string here must agree with the Rust side (`recon_native.N_REASONS == len(REASON_CODES)`).
@@ -211,6 +211,9 @@ def reconstruct_lake_l2_at_samples_seeded_native(
     seq = _c_i64(df[seq_col].astype("int64").to_numpy())
     price = _c_f64(df["price"].astype("float64").to_numpy())
     size = _c_f64(df[size_col].astype("float64").to_numpy())
+    # Same finite-values bar as the Python engine: NaN/inf book keys are engine-divergent (NaN
+    # casts to tick 0 here vs a poisoned float key in Python) — fail fast, identically, on both.
+    require_finite_deltas(price, size)
     # Side decode + validation stays in Python (raises on unknown encodings) — Rust takes a plain bool.
     sides = _decode_sides(df[side_col].to_numpy())
     side_is_bid = np.ascontiguousarray(sides == "bid", dtype=bool)

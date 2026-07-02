@@ -514,6 +514,54 @@ def test_native_coverage_multiple_runs_leading_and_trailing():
     assert m["coverage"]["n_invalid_runs"] == 2
 
 
+def test_python_replay_coverage_ignores_policy_min_levels():
+    # The coverage predicate is FIXED at min_levels_per_side=1 (the `valid_mask_from_frame`
+    # default the frame oracle uses) — it must never couple to the SEED-validation policy knob.
+    # A thin-but-two-sided cold-start book under the production seeding policy (min_levels=5)
+    # stays coverage-valid even while it counts as thin for k.
+    df = _lake_df([(10, 1, True, 100.0, 1.0), (10, 2, False, 101.0, 1.0)])
+    frame, meta = reconstruct_lake_l2_at_samples_seeded(
+        df, [5, 15, 25], k=2, engine_time_col="origin_time", snapshots=None,
+        policy=ReseedPolicy(enabled=False, min_levels_per_side=5))
+    assert meta["coverage"] == _frame_coverage(frame)
+    assert meta["coverage"]["invalid_runs_idx"] == [[0, 1]]   # only the empty-book prefix
+    assert meta["thin_depth_samples"] == 2                    # thin for k=2, yet coverage-valid
+
+
+@native
+def test_native_coverage_ignores_policy_min_levels():
+    df = _lake_df([(10, 1, True, 100.0, 1.0), (10, 2, False, 101.0, 1.0)])
+    _, m = _assert_conforms(df, [5, 15, 25], k=2, snapshots=None,
+                            policy=ReseedPolicy(enabled=False, min_levels_per_side=5))
+    assert m["coverage"]["invalid_runs_idx"] == [[0, 1]]
+
+
+# --------------------------------------------------------------------------- non-finite delta guard
+# A NaN delta price would silently DIVERGE the engines' books — Python keys the raw float
+# (max()/min() over a dict with a NaN key is insertion-order dependent, and a fresh NaN key can
+# never be popped), native keys round(NaN*scale) == tick 0 — so the coverage blocks (and therefore
+# the fill plans) would disagree. Both array entry points reject non-finite prices/sizes at ingest,
+# mirroring `classify_snapshot`'s finite-values bar on the snapshot path.
+def test_python_engine_rejects_non_finite_delta_price():
+    df = _lake_df([(10, 1, True, float("nan"), 1.0)])
+    with pytest.raises(ValueError, match="non-finite"):
+        reconstruct_lake_l2_at_samples_seeded(df, [20], k=1, engine_time_col="origin_time")
+
+
+def test_python_engine_rejects_non_finite_delta_size():
+    df = _lake_df([(10, 1, True, 100.0, float("inf"))])
+    with pytest.raises(ValueError, match="non-finite"):
+        reconstruct_lake_l2_at_samples_seeded(df, [20], k=1, engine_time_col="origin_time")
+
+
+@native
+def test_native_engine_rejects_non_finite_delta_price():
+    df = _lake_df([(10, 1, True, float("nan"), 1.0)])
+    with pytest.raises(ValueError, match="non-finite"):
+        rn.reconstruct_lake_l2_at_samples_seeded_native(
+            df, [20], k=1, engine_time_col="origin_time", price_scale=SCALE)
+
+
 # --------------------------------------------------------------------------- Python-only reference
 # (runs WITHOUT the extension — pins the invariant the native metrics-only mode relies on)
 def test_python_replay_metrics_equal_frame_quality():

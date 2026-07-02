@@ -530,6 +530,10 @@ def test_assess_native_coverage_invalid_runs_capped_with_full_count(monkeypatch)
     assert q["n_invalid_runs"] == 150
     assert len(q["invalid_runs"]) == qm.INVALID_RUNS_CAP == 100
     assert q["invalid_runs"][0] == [DAY_OPEN, DAY_OPEN + 1 * S]
+    # present_first_idx=0 while valid[0] is False: lake_present_start_ts must come from the
+    # PRESENCE bounds, not the validity complement (pins _masks_from_native_coverage's
+    # presence-bounds wiring — a valid-mask-derived presence would start one sample late).
+    assert q["lake_present_start_ts"] == DAY_OPEN
 
 
 @native
@@ -557,6 +561,35 @@ def test_assess_native_engine_clean_day_matches_python_lake_only():
     assert nat["stitch_plan"] == py["stitch_plan"]
     assert nat["stitch_plan"]["fill_profile"] == "lake_only"
     assert nat["quality"] == py["quality"]
+
+
+def _trailing_crossed_lake_df():
+    """Clean from day open, then a stranding bid at +50,000 s crosses the book to day end —
+    the trailing-partial shape whose PRESENCE (both tops still printed) outlives its validity."""
+    return _lake_df([
+        (DAY_OPEN + 1 * S, 1, True, 100.0, 1.0),
+        (DAY_OPEN + 1 * S, 2, False, 101.0, 1.0),
+        (DAY_OPEN + 50_000 * S, 3, True, 102.0, 1.0),   # strands ask101 → crossed to day end
+    ])
+
+
+@native
+def test_assess_native_trailing_crossed_day_presence_outlives_trust():
+    # present != valid at the day edge: crossed samples are PRESENT but invalid, so
+    # lake_present_end_ts must reach day end while trusted_lake_end_ts stops at the crossing.
+    # Pins the native presence-bounds wiring — a valid-mask-derived presence would end early —
+    # and the trailing-partial plan shape end-to-end on both engines.
+    kw = dict(day=DAY, k=1, seed_min_levels=1, cold_ab=False)
+    py = qm.assess_lake_day(_trailing_crossed_lake_df(), _valid_seed(), engine="python", **kw)
+    nat = qm.assess_lake_day(_trailing_crossed_lake_df(), _valid_seed(), engine="native",
+                             price_scale=100, **kw)
+    assert nat["classification"] == py["classification"] == qm.LAKE_PRESENT_DEGRADED
+    assert nat["stitch_plan"] == py["stitch_plan"]
+    assert nat["stitch_plan"]["fill_profile"] == "trailing_partial_fill"
+    assert nat["quality"] == py["quality"]
+    q = nat["quality"]
+    assert q["lake_present_end_ts"] == DAY_OPEN + 86_400 * S    # presence reaches day end…
+    assert q["trusted_lake_end_ts"] == DAY_OPEN + 50_000 * S    # …trust stops at the crossing
 
 
 # ------------------------------------------------------------------- coinapi_fill_block (composer)

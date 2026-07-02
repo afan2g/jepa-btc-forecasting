@@ -57,6 +57,12 @@ The result-dict contract is versioned: `recon_native.META_ABI` (currently **2**)
 `recon.native._META_ABI`, so a stale pre-coverage build is rejected at import — it reports
 unavailable with the rebuild hint instead of silently degrading partial-day plans to full-day.
 
+Both engines' array entry points also **reject non-finite delta prices/sizes** (`ValueError`,
+`recon.reseed.require_finite_deltas` — the `classify_snapshot` finite-values bar applied to the
+delta stream): a NaN price keys the books differently (Python keys the raw float, whose
+`max()`/`min()` with a NaN key is insertion-order dependent; native casts NaN to tick 0), so a
+single dirty row would otherwise make the engines silently disagree on coverage and fill plans.
+
 ### Verified tick contract (required for native)
 
 Native mode needs a verified `(exchange, symbol) → price_scale` where every price is an exact multiple
