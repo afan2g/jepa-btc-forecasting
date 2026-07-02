@@ -14,16 +14,20 @@ unlock the §5a CoinAPI backfill gate. Each generated batch still goes through t
 quota gate (`lakeapi.used_data` + headroom) when actually executed.
 
 Day categories (kept apart explicitly — the §5b calendar mixes them):
-  * batch days              — `lake_all_days` (Coinbase book+trades present in Lake): the days the
-                              broad map must actually download and reconstruct.
+  * batch days              — `lake_all_days` (Coinbase book+trades present in Lake) PLUS the
+                              trade-only fill days below: every day whose Lake `book_delta_v2` is
+                              present and must be downloaded and reconstructed by the broad map.
   * fill days (book gap)    — `coinbase_fill_days` with `book: true`: Lake book absent; they cost
                               ~0 GB and classify `missing_needs_coinapi` (map them separately via
                               the runner's `--include-gap-days`), so they are NOT batched here.
-  * fill days (trade-only)  — `coinbase_fill_days` with `book: false`: outside `lake_all_days`
-                              (trades gap) — recorded, not batched.
+  * fill days (trade-only)  — `coinbase_fill_days` with `book: false`: only trades are gapped, the
+                              Lake BOOK is present — batched (its reconstruction quality still
+                              needs validating before the backfill gate) and listed separately in
+                              the manifest because the day still needs a CoinAPI TRADES fill.
   * excluded days           — `excluded_days_by_reason` (non-Coinbase calendar exclusions, e.g. a
                               Binance gap): the runner skips them before any Lake load; batching
-                              them would only waste quota.
+                              them would only waste quota. Exclusion wins over every other
+                              category.
 
 Batch files are byte-deterministic for a given calendar + budget (sorted days, one per line); the
 manifest additionally records a generation timestamp.
@@ -125,21 +129,27 @@ def load_calendar(path: str) -> dict:
 # ----------------------------------------------------------------------------- day selection
 def select_days(cal: dict) -> dict:
     """Split the calendar into the day categories the plan keeps apart. Pure and deterministic:
-    same calendar ⇒ same (sorted) day lists."""
+    same calendar ⇒ same (sorted) day lists.
+
+    Batchable = every day with a PRESENT Lake book: `lake_all_days` plus the trade-only fill days
+    (`book: false` = only trades gapped) — a trade-only day's book quality still needs validating
+    before the backfill gate. Withheld: book-gap fill days (`book: true`, nothing to map) and
+    excluded days (exclusion wins over every other category)."""
     fill = cal["coinbase_fill_days"]
     excluded = cal["excluded_days_by_reason"]
     lake_all = set(cal["lake_all_days"])
-    not_batchable = set(fill) | set(excluded)
-    # Defensive: in a consistent calendar lake_all_days is disjoint from fill/excluded days; if a
-    # contradictory calendar overlaps them, surface the overlap instead of silently batching it.
-    dropped = sorted(lake_all & not_batchable)
+    book_gap = {d for d, v in fill.items() if (v or {}).get("book") is True}
+    trade_only = set(fill) - book_gap
+    excluded_set = set(excluded)
+    # Defensive: in a consistent calendar lake_all_days is disjoint from book-gap/excluded days; if
+    # a contradictory calendar overlaps them, surface the overlap instead of silently batching it.
+    dropped = sorted(lake_all & (book_gap | excluded_set))
     return {
-        "batch_days": sorted(lake_all - not_batchable),
-        "fill_days_book_gap": sorted(d for d, v in fill.items() if (v or {}).get("book") is True),
-        "fill_days_trade_only": sorted(d for d, v in fill.items()
-                                       if (v or {}).get("book") is not True),
+        "batch_days": sorted((lake_all | trade_only) - book_gap - excluded_set),
+        "fill_days_book_gap": sorted(book_gap),
+        "fill_days_trade_only_batched": sorted(trade_only - excluded_set),
         "excluded_days": {d: excluded[d] for d in sorted(excluded)},
-        "lake_days_dropped_as_excluded_or_fill": dropped,
+        "days_dropped_as_excluded_or_book_gap": dropped,
     }
 
 
@@ -201,16 +211,17 @@ def build_manifest(sel: dict, batches: list[list[str]], *, calendar_path: str, o
             "est_gb_per_batch": [r["est_gb"] for r in batch_rows],
             "total_est_gb": round(sum(len(b) for b in batches) * gb_per_day, 2),
             "n_fill_days_book_gap": len(sel["fill_days_book_gap"]),
-            "n_fill_days_trade_only": len(sel["fill_days_trade_only"]),
+            "n_fill_days_trade_only_batched": len(sel["fill_days_trade_only_batched"]),
             "n_excluded_days": len(sel["excluded_days"]),
         },
         "batches": batch_rows,
+        # batched (book present) but still needing a CoinAPI TRADES fill — for fill planning
+        "batched_trade_only_fill_days": sel["fill_days_trade_only_batched"],
         "skipped": {
             "fill_days_book_gap": sel["fill_days_book_gap"],
-            "fill_days_trade_only": sel["fill_days_trade_only"],
             "excluded_days_by_reason": sel["excluded_days"],
-            "lake_days_dropped_as_excluded_or_fill":
-                sel["lake_days_dropped_as_excluded_or_fill"],
+            "days_dropped_as_excluded_or_book_gap":
+                sel["days_dropped_as_excluded_or_book_gap"],
         },
     }
 
@@ -246,15 +257,16 @@ def print_plan(manifest: dict, *, dry_run: bool) -> None:
     print(f"  calendar:  {m['input_calendar']}")
     print(f"  budget:    {m['max_gb_per_batch']:g} GB/batch at {m['gb_per_day']:g} GB/day "
           f"(conservative) -> {m['days_per_batch']} day(s)/batch")
-    print(f"  days:      {s['n_batch_days']} present Lake day(s) to map in {s['n_batches']} "
-          f"batch(es), ~{s['total_est_gb']:g} GB total estimate")
+    print(f"  days:      {s['n_batch_days']} present-book day(s) to map in {s['n_batches']} "
+          f"batch(es), ~{s['total_est_gb']:g} GB total estimate "
+          f"(includes {s['n_fill_days_trade_only_batched']} trade-only fill day(s) — book "
+          "present, trades still need CoinAPI fill)")
     print(f"  skipped:   {s['n_fill_days_book_gap']} book-gap fill day(s) (map via "
-          f"--include-gap-days, ~0 GB), {s['n_fill_days_trade_only']} trade-only fill day(s), "
-          f"{s['n_excluded_days']} excluded day(s)")
-    dropped = manifest["skipped"]["lake_days_dropped_as_excluded_or_fill"]
+          f"--include-gap-days, ~0 GB), {s['n_excluded_days']} excluded day(s)")
+    dropped = manifest["skipped"]["days_dropped_as_excluded_or_book_gap"]
     if dropped:
-        print(f"  WARNING:   {len(dropped)} lake_all_days overlapped fill/excluded days and were "
-              f"dropped: {', '.join(dropped[:6])}{' …' if len(dropped) > 6 else ''}")
+        print(f"  WARNING:   {len(dropped)} lake_all_days overlapped book-gap/excluded days and "
+              f"were dropped: {', '.join(dropped[:6])}{' …' if len(dropped) > 6 else ''}")
     for r in manifest["batches"]:
         print(f"    {r['file']}  {r['n_days']:>4} day(s)  {r['first_day']} .. {r['last_day']}  "
               f"~{r['est_gb']:g} GB")

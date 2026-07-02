@@ -59,17 +59,25 @@ def _main(tmp_path, *extra, cal=None) -> tuple[int, str]:
 
 
 # --------------------------------------------------------------------------- day selection
+# trade-only fill days (book present, only trades gapped) are batched: their book quality still
+# needs validating before the backfill gate (Codex review, PR #12)
+BATCHABLE = sorted(LAKE_ALL + ["2025-01-11"])
+
+
 def test_batch_days_are_sorted_and_deterministic():
     sel = pm.select_days(_calendar_dict())
-    assert sel["batch_days"] == sorted(LAKE_ALL)
+    assert sel["batch_days"] == BATCHABLE
     assert pm.select_days(_calendar_dict()) == sel  # same input ⇒ identical plan
 
 
-def test_fill_days_split_book_gap_vs_trade_only_and_never_batched():
+def test_book_gap_fill_days_are_withheld_but_trade_only_fill_days_are_batched():
+    # book:true → Lake book ABSENT → nothing to quality-map (runner --include-gap-days territory);
+    # book:false → Lake book PRESENT (only trades gapped) → must be mapped like any present day
     sel = pm.select_days(_calendar_dict())
     assert sel["fill_days_book_gap"] == ["2025-01-10"]
-    assert sel["fill_days_trade_only"] == ["2025-01-11"]
-    assert not set(sel["batch_days"]) & set(FILL)
+    assert "2025-01-10" not in sel["batch_days"]
+    assert sel["fill_days_trade_only_batched"] == ["2025-01-11"]
+    assert "2025-01-11" in sel["batch_days"]
 
 
 def test_excluded_days_are_recorded_and_never_batched():
@@ -78,13 +86,22 @@ def test_excluded_days_are_recorded_and_never_batched():
     assert "2025-01-20" not in sel["batch_days"]
 
 
-def test_lake_day_overlapping_excluded_or_fill_is_dropped_and_recorded():
-    # Defensive: a contradictory calendar (a "present" Lake day that is also excluded / a fill day)
-    # must not be silently batched — the overlap is dropped and surfaced in the selection.
+def test_trade_only_fill_day_that_is_excluded_stays_excluded():
+    # exclusion wins: the runner would skip the day before any Lake load anyway
+    cal = _calendar_dict(excluded_days_by_reason={**EXCLUDED,
+                                                  "2025-01-11": ["missing:binF_book"]})
+    sel = pm.select_days(cal)
+    assert "2025-01-11" not in sel["batch_days"]
+    assert sel["fill_days_trade_only_batched"] == []
+
+
+def test_lake_day_overlapping_excluded_or_book_gap_is_dropped_and_recorded():
+    # Defensive: a contradictory calendar (a "present" Lake day that is also excluded / a book-gap
+    # fill day) must not be silently batched — the overlap is dropped and surfaced.
     cal = _calendar_dict(lake_all_days=LAKE_ALL + ["2025-01-10", "2025-01-20"])
     sel = pm.select_days(cal)
-    assert sel["batch_days"] == sorted(LAKE_ALL)
-    assert sel["lake_days_dropped_as_excluded_or_fill"] == ["2025-01-10", "2025-01-20"]
+    assert sel["batch_days"] == BATCHABLE
+    assert sel["days_dropped_as_excluded_or_book_gap"] == ["2025-01-10", "2025-01-20"]
 
 
 # --------------------------------------------------------------------------- batching / budget
@@ -181,7 +198,7 @@ def test_write_plan_emits_batch_files_and_manifest(tmp_path):
     assert files == ["batch_001_days.txt", "batch_002_days.txt", "batch_003_days.txt"]
     # one day per line, ascending across batches — the format resolve_days() accepts
     assert (out / "batch_001_days.txt").read_text() == "2025-01-01\n2025-01-02\n"
-    assert (out / "batch_003_days.txt").read_text() == "2025-01-05\n"
+    assert (out / "batch_003_days.txt").read_text() == "2025-01-05\n2025-01-11\n"
     json.loads((out / "manifest.json").read_text())  # strict JSON
 
 
@@ -192,15 +209,17 @@ def test_manifest_summarizes_the_plan(tmp_path):
     assert m["meta"]["generated_utc"]  # timestamp present (batch FILES are the deterministic part)
     assert m["meta"]["gb_per_day"] == 0.48
     assert m["meta"]["max_gb_per_batch"] == 1.0
-    assert m["summary"]["n_batch_days"] == 5
+    assert m["summary"]["n_batch_days"] == 6
     assert m["summary"]["n_batches"] == 3
-    assert m["summary"]["est_gb_per_batch"] == [0.96, 0.96, 0.48]
-    assert m["summary"]["total_est_gb"] == 2.4
+    assert m["summary"]["est_gb_per_batch"] == [0.96, 0.96, 0.96]
+    assert m["summary"]["total_est_gb"] == 2.88
     assert m["summary"]["n_fill_days_book_gap"] == 1
-    assert m["summary"]["n_fill_days_trade_only"] == 1
+    assert m["summary"]["n_fill_days_trade_only_batched"] == 1
     assert m["summary"]["n_excluded_days"] == 1
+    assert m["batched_trade_only_fill_days"] == ["2025-01-11"]
     assert m["skipped"]["fill_days_book_gap"] == ["2025-01-10"]
     assert m["skipped"]["excluded_days_by_reason"] == EXCLUDED
+    assert "fill_days_trade_only" not in m["skipped"]  # batched now, not skipped
 
 
 def test_manifest_contains_the_runner_command_template(tmp_path):

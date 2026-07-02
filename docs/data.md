@@ -526,14 +526,17 @@ passes.
 
 **Staging the broad map (batch planner).** `scripts/plan_coinbase_quality_map_batches.py` turns the
 stage-across-quota-windows requirement above into deterministic day batches: it reads
-`data/usable_calendar.json`, selects the present Lake days (`lake_all_days`, 652), keeps the documented
-Coinbase gap/fill days out of the batches (47 book-gap days classify `missing_needs_coinapi` at ~0 GB —
-map them separately via the runner's `--include-gap-days` — plus 5 trade-only fill days) along with the
-26 non-Coinbase `excluded_days_by_reason`, and chunks the rest into `--days-file` batches under a
-configurable GB budget. Default: **250 GB/batch** (current planning target — one batch per monthly
-quota window with headroom under the 300 GB cap) at the **conservative 0.48 GB/day** §6 estimate
-(matches the runner's quota estimator; measured wire rate is lower, ~0.26 GB/day). The current calendar
-plans **2 batches** (520 + 132 days ≈ 249.6 + 63.4 GB). Batch files plus a manifest (day counts,
+`data/usable_calendar.json` and selects every day with a PRESENT Lake book — `lake_all_days` (652)
+plus the 5 trade-only fill days (`book: false` = only trades gapped; their book quality still needs
+validating before the backfill gate, and they stay listed separately in the manifest because each
+still needs a CoinAPI trades fill) = **657 days**. It withholds the 47 book-gap fill days (Lake book
+absent — they classify `missing_needs_coinapi` at ~0 GB; map them separately via the runner's
+`--include-gap-days`) and the 26 non-Coinbase `excluded_days_by_reason`, then chunks the rest into
+`--days-file` batches under a configurable GB budget. Default: **250 GB/batch** (current planning
+target — one batch per monthly quota window with headroom under the 300 GB cap) at the
+**conservative 0.48 GB/day** §6 estimate (matches the runner's quota estimator; measured wire rate is
+lower, ~0.26 GB/day). The current calendar plans **2 batches** (520 + 137 days ≈ 249.6 + 65.8 GB,
+~315.4 GB total). Batch files plus a manifest (day counts,
 per-batch GB estimates, the exact runner command per batch) land under the git-ignored
 `data/tmp/coinbase_quality_map_batches/`; batch files are byte-deterministic for a given
 calendar + budget. **Planning only:** the planner performs no vendor I/O — it does not run Lake
