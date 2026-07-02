@@ -13,13 +13,14 @@ per-day/per-venue pass/warn/fail report and an explicit gate that the bar builde
 trades drive the bar clock (spec §5.1), so a mis-validated trade stream mis-times every bar, feature
 vector, and label.
 
-**Architecture:** A pure, vendor-dep-free checks module (`ingest/trade_checks.py`: thresholds,
+**Architecture:** A pure, **source-agnostic** checks module (`ingest/trade_checks.py`: thresholds,
 reason-code constants, per-frame metric functions, `classify(...)`, `build_report`/`write_report`,
-GB estimation, the Lake quota decision) plus a thin Crypto Lake CLI wrapper
-(`ingest/validate_trade_feeds.py`) that loads `trades` partitions via `lakeapi` and calls the pure
-module. This mirrors the repo's established split (pure `recon/stitch_policy.py` vs. the vendor
-`scripts/run_coinbase_quality_map.py` runner), so every check is synthetic-testable with **no vendor
-I/O in tests**.
+GB estimation, the Lake quota decision) that validates a *normalized* trade frame regardless of
+vendor, plus thin loader/CLI wrappers: `ingest/validate_trade_feeds.py` loads Lake `trades`
+partitions via `lakeapi`, and the gated Phase-3b path (§10) normalizes CoinAPI `TRADES` for fill days
+— **both call the same checks module unchanged**. This mirrors the repo's established split (pure
+`recon/stitch_policy.py` vs. the vendor `scripts/run_coinbase_quality_map.py` runner), so every check
+is synthetic-testable with **no vendor I/O in tests**.
 
 **Tech Stack:** Python 3.12, pandas/numpy, `lakeapi` + explicit boto3 session (Crypto Lake,
 `eu-west-1`), pytest. No new dependencies. Reads Crypto Lake `trades` only; **CoinAPI is not touched
@@ -41,8 +42,11 @@ reports, parquet/csv.gz, caches, `.env`, or secrets committed.
   Lake run, **ask-first** per `AGENTS.md`).
 - No changes to `ingest/verify_trades_and_calendar.py`'s existing one-day check or to the usable
   calendar's structure on this branch (Phase 3 integrates; it does not rewrite §5b's calendar).
-- No CoinAPI-sourced fill-day trade validation here — that needs a bounded single-day CoinAPI pull
-  and stays behind the still-locked backfill gate (deferred to a follow-up, §8).
+- No CoinAPI-sourced fill-day trade validation *executed* here — it is specified as **Phase 3b /
+  Task 5** (§10: download CoinAPI `TRADES`, normalize to the Lake schema, reuse `trade_checks.py`,
+  clear `coinapi_fill_deferred`) but needs a bounded single-day CoinAPI pull and stays behind the
+  still-locked backfill gate. It is the required mechanism to clear the deferral, not an optional
+  extra (§8).
 - No bar-builder changes on this branch (Phase 4 enforces the gate; the builder does not exist yet).
 - No new market-regime taxonomy — regimes reuse the days already characterized in §5a-QualityMap.
 
@@ -485,11 +489,18 @@ accumulator blocks (above).
 **How CoinAPI-fill days are handled.** A Coinbase day whose Lake `trades` are missing/partial and
 which appears in `coinbase_fill_days` (with `trades: true`, i.e. Lake trades need CoinAPI fill) is
 **not failed** for the missing Lake side. It is routed to `status = "coinapi_fill"` (reason
-`coinapi_fill_day`), listed under `summary.gate.coinapi_fill_deferred`, and its *trade-feed* validity
-is judged against the **CoinAPI** trade file — which is a **gated follow-up**: it needs a bounded
-single-day CoinAPI pull, and **the CoinAPI backfill gate stays LOCKED** until the §5a multi-day
-parity/quality-map passes. Until then a fill day is "pass-conditional-on-CoinAPI," exactly parallel
-to the quality-map `needs_fill` semantics. A day in `excluded_days_by_reason` is `status =
+`coinapi_fill_day`) and listed under `summary.gate.coinapi_fill_deferred`. Its *trade-feed* validity
+is then judged against the **CoinAPI** trade file by the **Phase 3b / Task 5** path — which
+downloads the CoinAPI `TRADES` dataset, normalizes it to the Lake schema, and runs the **same**
+`ingest/trade_checks.py::validate_trade_frame` on it (`vendor_source: "coinapi"`); a pass/warn
+removes the day from `coinapi_fill_deferred`. This is the *only* mechanism that clears the deferral,
+so it is required for `bars_ready` to hold on fill-day spans (all **52** of them, §5b) — without it
+the gate is a dead-end. It is a **gated follow-up**: it needs a bounded single-day CoinAPI pull, and
+**the CoinAPI backfill gate stays LOCKED** until the §5a multi-day parity/quality-map passes. Until
+then a fill day is "pass-conditional-on-CoinAPI" (deferred, correctly not `bars_ready`), exactly
+parallel to the quality-map `needs_fill` semantics. Because `trade_checks.py` is **source-agnostic**
+(it validates a normalized frame and never imports a vendor client), the Lake and CoinAPI paths reuse
+one validator — only the loader/normalizer differs. A day in `excluded_days_by_reason` is `status =
 "excluded"` (out of scope; already dropped by the usable calendar) and never blocks.
 
 **`summary.gate` fields (the bar builder gates on `bars_ready`, never `lake_required_pass`).** The two
@@ -668,12 +679,31 @@ clean day classifies `pass`, not a coverage `fail`.
   new exclusion reason (`trade_validation_fail:<venue>`) or a fill route; the feature/build manifest
   records the trade-validation report path + `generated_utc` as a source artifact (the
   feature-manifest `sources` list already accepts extra keys).
+- **Phase 3b — CoinAPI trade-fill validation path (gated; clears `coinapi_fill_deferred`).** Without
+  this phase `coinapi_fill_deferred` can never empty, so `bars_ready` (and thus Phase 4) is
+  permanently `false` for every span touching one of the **52 Coinbase trade-fill days** (§5b) — i.e.
+  most of the 2-year calendar. It has three concrete pieces, all behind the **still-LOCKED §5a
+  backfill gate** (bounded single-day pulls only once unlocked; **not run on any docs branch**):
+  1. **Download** — extend the CoinAPI fetch to the `TRADES` dataset. `ingest/download_coinapi.py`
+     today hard-codes `DATA_TYPE = "LIMITBOOK_FULL"` (book only); add a trades mode
+     (`--data-type TRADES` → `coinbase_btc_file(..., "TRADES")`, partitioned under
+     `data/raw/trades/exchange=COINBASE/symbol=BTC-USD/dt=…`). `verify_trades_and_calendar.py` already
+     probes `TRADES` *presence* per fill day — this fetches the file.
+  2. **Normalize** — map CoinAPI TRADES columns to the loaded Lake schema
+     (`origin_time`, `received_time`, `price`, `quantity`, `side`∈{buy,sell}, `trade_id`): CoinAPI's
+     `is_buy`/`taker_side` → `side`, its exchange/received timestamps → `origin_time`/`received_time`
+     (§4.2/§4.3). The result is a **vendor-normalized frame** the *same* `ingest/trade_checks.py`
+     validates unchanged (the pure module is source-agnostic — it never imports a vendor client).
+  3. **Validate + clear** — run `validate_trade_frame` on the normalized CoinAPI frame for each fill
+     day, emit its own pass/warn/fail verdict (same schema, `vendor_source: "coinapi"`), and on a
+     pass/warn **remove that `(venue, day)` from `coinapi_fill_deferred`** so `bars_ready` can become
+     true for its span. A CoinAPI-side fail keeps the day deferred (surfaced, not silently dropped).
 - **Phase 4 — enforce in the bar builder.** The bar builder refuses to emit bars for a `(venue,
   span)` unless `summary.gate.bars_ready` holds for that span — i.e. `lake_required_pass` **and** no
   `coinapi_fill_deferred` entry touches it (every required day passed, and every fill day is a
-  *validated* CoinAPI fill). It gates on `bars_ready`, **not** `lake_required_pass`, so it can never
-  span an unvalidated/locked Coinbase trade gap. CoinAPI-fill-day trade validation (which clears
-  `coinapi_fill_deferred`) lands here only after the §5a backfill gate unlocks.
+  *validated* CoinAPI fill from Phase 3b). It gates on `bars_ready`, **not** `lake_required_pass`, so
+  it can never span an unvalidated/locked Coinbase trade gap. Lake-only spans (no fill days) become
+  buildable after Phase 2; fill-day spans wait on Phase 3b (hence the §5a backfill unlock).
 
 ## Implementation Tasks
 
@@ -702,18 +732,29 @@ commit per task.
 ### Task 3 (Phase 2): bounded live run + estimate refinement — **ask-first**
 
 - Run the default sample once; commit no data/report; update `meta.trades_gb_per_day` defaults and
-  §5b prose with measured multi-day results; annotate the §10 item (still open until Phases 3–4).
+  §5b prose with measured multi-day results; annotate the §10 item (still open until the integration
+  and enforcement phases 3, 3b, and 4 land).
 
 ### Task 4 (Phase 3): calendar / manifest integration
 
 - Wire verdicts into the usable calendar (new `trade_validation_fail:<venue>` reason) and record the
   report as a build-manifest source artifact.
 
-### Task 5 (Phase 4): bar-builder enforcement (with the bar builder)
+### Task 5 (Phase 3b): CoinAPI trade-fill validation path — **gated (backfill LOCKED)**
 
-- Gate bar emission on `summary.gate.bars_ready` (not `lake_required_pass`); CoinAPI-fill-day trade
-  validation (which clears `coinapi_fill_deferred`) only after the §5a backfill
-  gate unlocks.
+- Extend `ingest/download_coinapi.py` with a `TRADES` dataset mode (currently `LIMITBOOK_FULL` only);
+  add a CoinAPI-TRADES → Lake-schema normalizer (`is_buy`/`taker_side` → `side`, timestamps →
+  `origin_time`/`received_time`); run the **same** `ingest/trade_checks.py::validate_trade_frame` on
+  the normalized frame (`vendor_source: "coinapi"`), and clear passing/warning fill days from
+  `coinapi_fill_deferred`. Synthetic tests for the normalizer (CoinAPI-shaped frame → normalized
+  schema → verdict) run with no vendor I/O; the live single-day CoinAPI pulls stay behind the §5a
+  backfill gate and are **not run** until it unlocks.
+
+### Task 6 (Phase 4): bar-builder enforcement (with the bar builder)
+
+- Gate bar emission on `summary.gate.bars_ready` (not `lake_required_pass`). Lake-only spans build
+  after Task 3; fill-day spans build only once Task 5 clears their `coinapi_fill_deferred` entries,
+  which itself waits on the §5a backfill unlock.
 
 ## Validation Commands
 
@@ -734,7 +775,8 @@ agent worktrees have no `.venv` — use `/home/aaron/jepa-btc-forecasting/.venv/
   calls run**; **Validation** (`git diff --check`, `git status -sb`); **Risks and assumptions**
   (provisional `trades_gb_per_day` estimates until Phase 2 measures them; CoinAPI-fill-day trade
   validation deferred behind the still-locked backfill gate; thresholds are first-pass and
-  Phase-2-tunable); **Follow-ups** (Tasks 1–5).
+  Phase-2-tunable; the CoinAPI trade-fill path (Task 5) is required to clear `coinapi_fill_deferred`
+  and stays behind the locked backfill gate); **Follow-ups** (Tasks 1–6).
 - Commit only docs — no data, reports, parquet/csv.gz, caches, or secrets. **CoinAPI backfill status:
   still LOCKED.**
 
