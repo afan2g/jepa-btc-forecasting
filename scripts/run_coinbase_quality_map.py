@@ -94,6 +94,11 @@ CLASSES = (LAKE_USABLE, LAKE_PRESENT_DEGRADED, MISSING_NEEDS_COINAPI, EXCLUDED, 
 # The reason code that routes a day inconclusive because its accepted seed's `book` SOURCE is itself
 # crossed above the bar — the case the 2026-07-01 CoinAPI cross-validation resolved to "fill".
 SEED_SOURCE_UNRELIABLE = "seed_accepted_but_source_unreliable"
+# The stable reason code for a thin-depth usable-bar failure — the one degraded dimension the
+# top-of-book validity mask cannot see (mask predicate: best bid/ask present + uncrossed at
+# min_levels_per_side=1, the shared parity-gate warmup predicate), so the fill composer must not
+# keep mask-planned Lake spans on such days (Codex P2).
+THIN_DEPTH_OVER_BAR = "thin_depth_over_usable_bar"
 
 # ----------------------------------------------------------------------------- quota constants
 QUOTA_GB = 300.0           # Crypto Lake individual-plan monthly download cap (docs/data.md §2.1/§8)
@@ -139,7 +144,14 @@ THRESHOLDS = Thresholds()
 # ----------------------------------------------------------------------------- pure helpers
 def build_grid(day: dt.date, grid_ms: int) -> list[int]:
     """Exchange-time sample grid (int ns) spanning the partition day at `grid_ms` spacing.
-    Mirrors `scripts/run_coinbase_parity.py::build_grid` (the shared sampling convention)."""
+    Mirrors `scripts/run_coinbase_parity.py::build_grid` (the shared sampling convention), plus a
+    divisibility guard: a `grid_ms` that does not divide the 24 h day would silently truncate the
+    grid, so mask-derived stitch-plan day bounds (`last sample + grid_ns`) would stop short of the
+    midnight bound synthesized full-day plans use (Codex P3) — fail fast instead."""
+    if grid_ms <= 0 or DAY_MS % grid_ms:
+        raise ValueError(f"grid_ms must be positive and divide the {DAY_MS} ms day evenly "
+                         f"(got {grid_ms}); otherwise the grid truncates and fill-segment day "
+                         "bounds fall short of midnight")
     day_open = int(pd.Timestamp(day).value)
     step_ns = grid_ms * NS_PER_MS
     n = DAY_MS // grid_ms
@@ -226,6 +238,8 @@ def classify_day(*, have_lake: bool, meta: dict | None, lake_q: dict | None,
     if missing > thresholds.missing_usable_max:
         over.append(f"missing_book_fraction={missing:.4f}>{thresholds.missing_usable_max}")
     if thin > thresholds.thin_usable_max:
+        # Stable code first, metric detail second — the SEED_SOURCE_UNRELIABLE pattern.
+        over.append(THIN_DEPTH_OVER_BAR)
         over.append(f"thin_depth_fraction={thin:.4f}>{thresholds.thin_usable_max}")
     if over:
         return LAKE_PRESENT_DEGRADED, ["seed_accepted", *over]
@@ -300,8 +314,12 @@ def coinapi_fill_block(classification: str, reasons, *, day: str, grid_ms: int =
     if base["needs_fill"] is not True:
         return {**base, **_NO_PLAN_FIELDS}
     plan = stitch_plan
-    if plan is not None and plan["fill_profile"] == LAKE_ONLY:
-        plan = None  # day-level bar failed but the mask shows no fillable window → full-day
+    if plan is not None and plan["fill_profile"] != FULL_DAY_FILL and (
+            plan["fill_profile"] == LAKE_ONLY or THIN_DEPTH_OVER_BAR in set(reasons or ())):
+        # No mask-supported narrower fill: either the mask shows no fillable window (lake_only),
+        # or the thin-depth bar failed — a depth failure the top-of-book mask cannot see, so its
+        # Lake spans (even beside a real gap — Codex P2) cannot be vouched for → full-day.
+        plan = None
     if plan is None:
         if stitch_plan is not None:  # reuse the mask plan's exact day bounds
             day_open, day_end = int(stitch_plan["day_open_ts"]), int(stitch_plan["day_end_ts"])
@@ -536,12 +554,13 @@ def build_report(per_day_results, *, meta: dict) -> dict:
         rec["coinapi_fill"] = coinapi_fill_block(
             rec["classification"], rec.get("reasons"), day=rec["day"],
             grid_ms=(rec.get("quality") or {}).get("grid_ms") or 1000, stitch_plan=plan)
-        if (plan is not None and plan["fill_profile"] == LAKE_ONLY
+        if (plan is not None and plan["fill_profile"] != FULL_DAY_FILL
                 and rec["coinapi_fill"]["fill_profile"] == FULL_DAY_FILL and rec.get("quality")):
-            # The lake_only mask plan was overridden to a full-day fill: no Lake coverage survives
-            # a full-day route (plan-doc definitions table), so the report's trusted_lake_* must be
-            # None. Presence/invalid-run facts stay; copy-on-write keeps the caller's record (the
-            # mask-level view, consistent with its lake_only plan) unmutated.
+            # A non-full-day mask plan (lake_only, or a partial plan on a thin-depth failure) was
+            # overridden to a full-day fill: no Lake coverage survives a full-day route (plan-doc
+            # definitions table), so the report's trusted_lake_* must be None. Presence/invalid-run
+            # facts stay; copy-on-write keeps the caller's record (the mask-level view, consistent
+            # with its own plan) unmutated.
             rec["quality"] = {**rec["quality"], "trusted_lake_start_ts": None,
                               "trusted_lake_end_ts": None}
         days.append(rec)
@@ -827,7 +846,12 @@ def parse_args(argv=None):
     ap.add_argument("--allow-broad", action="store_true",
                     help="override the auto cap for a deliberate broad pull (still refused if it "
                          "would breach the monthly quota headroom)")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.grid_ms <= 0 or DAY_MS % args.grid_ms:
+        # Fail before any Lake session: a non-divisor grid truncates the day (see build_grid).
+        ap.error(f"--grid-ms must be positive and divide the {DAY_MS} ms day evenly "
+                 f"(got {args.grid_ms})")
+    return args
 
 
 def main(argv=None) -> int:

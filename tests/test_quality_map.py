@@ -563,6 +563,66 @@ def test_stitch_coverage_invalid_runs_list_is_capped_with_full_count():
     assert cov["invalid_runs"][0] == [DAY_OPEN + 0 * S, DAY_OPEN + 1 * S]
 
 
+def test_classify_thin_over_bar_emits_stable_reason_code():
+    # Thin depth is the one degraded dimension the top-of-book validity mask cannot see, so the
+    # classifier emits a stable code (the SEED_SOURCE_UNRELIABLE pattern) for the fill composer.
+    meta = {"seed_accepted": True, "seed_reason": "ok", "thin_depth_fraction": 0.50,
+            "snapshot_reason_codes": {"ok": 10}}
+    lake_q = {"crossed_rate": 0.0, "missing_book_fraction": 0.0}
+    cls, reasons = qm.classify_day(have_lake=True, meta=meta, lake_q=lake_q,
+                                   thresholds=qm.THRESHOLDS)
+    assert cls == qm.LAKE_PRESENT_DEGRADED
+    assert qm.THIN_DEPTH_OVER_BAR in reasons
+    # ...and a thin-clean degraded day does not carry the code
+    meta2 = {**meta, "thin_depth_fraction": 0.0}
+    lake_q2 = {"crossed_rate": 0.40, "missing_book_fraction": 0.0}
+    _, reasons2 = qm.classify_day(have_lake=True, meta=meta2, lake_q=lake_q2,
+                                  thresholds=qm.THRESHOLDS)
+    assert qm.THIN_DEPTH_OVER_BAR not in reasons2
+
+
+def test_fill_block_thin_failure_discards_a_partial_mask_plan():
+    # Codex P2: a thin-degraded day that ALSO has a real gap must not keep its mask-planned Lake
+    # span — the mask can't vouch for depth, so the whole day routes to CoinAPI.
+    plan = _day_grid_plan(50_000)
+    b = qm.coinapi_fill_block(
+        qm.LAKE_PRESENT_DEGRADED,
+        ["seed_accepted", "missing_book_fraction=0.5787>0.02", qm.THIN_DEPTH_OVER_BAR,
+         "thin_depth_fraction=0.5000>0.1"],
+        day="2025-01-07", stitch_plan=plan)
+    assert b["fill_profile"] == "full_day_fill"
+    assert b["full_day_reason"] == "quality_over_usable_bar"
+    seg, = b["fill_segments"]
+    assert (seg["start_ts"], seg["end_ts"]) == (plan["day_open_ts"], plan["day_end_ts"])
+
+
+def test_thin_partial_day_end_to_end_routes_full_day_and_nulls_trust():
+    # k=2 with a one-level book AND a leading gap: mask plans a leading partial fill, but the
+    # thin-depth bar failed → report routes full-day and nulls trusted_lake_*.
+    res = qm.assess_lake_day(_leading_partial_lake_df(), _late_seed(), day=DAY, k=2,
+                             seed_min_levels=1)
+    assert res["classification"] == qm.LAKE_PRESENT_DEGRADED
+    assert qm.THIN_DEPTH_OVER_BAR in res["reasons"]
+    assert res["stitch_plan"]["fill_profile"] == "leading_partial_fill"   # mask-level view intact
+    rep = qm.build_report([res], meta={})
+    cf = rep["days"][0]["coinapi_fill"]
+    assert cf["fill_profile"] == "full_day_fill"
+    assert cf["full_day_reason"] == "quality_over_usable_bar"
+    assert rep["days"][0]["quality"]["trusted_lake_start_ts"] is None
+    assert res["quality"]["trusted_lake_start_ts"] is not None            # caller record unmutated
+
+
+def test_build_grid_and_cli_reject_non_divisor_grid_ms():
+    # Codex P3: a grid_ms that does not divide the 24 h day truncates the grid, so mask-plan day
+    # bounds would stop short of midnight while synthesized full-day plans use 24:00. Fail fast.
+    with pytest.raises(ValueError, match="divide"):
+        qm.build_grid(DAY, 7000)
+    with pytest.raises(SystemExit):
+        qm.parse_args(["--grid-ms", "7000"])
+    assert len(qm.build_grid(DAY, 1000)) == 86_400
+    assert len(qm.build_grid(DAY, 500)) == 172_800
+
+
 def test_fill_block_crossed_source_without_a_mask_plan_falls_back_full_day():
     # Metrics-only (native-engine) records carry no stitch plan; the crossed-source fill decision
     # still gets a conservative full-day plan with the stable crossed-source reason.
