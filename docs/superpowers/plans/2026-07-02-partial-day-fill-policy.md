@@ -43,7 +43,7 @@ default 1 s, `day_end_ts = day_open_ts + 86_400e9`.
 
 | term | definition |
 |---|---|
-| **valid sample** | grid sample where the seeded Lake frame has both top-of-book prices, uncrossed (`bid_0_price < ask_0_price`), and ≥ `min_levels_per_side` levels per side — exactly the `good` predicate of `recon/parity.py::lake_warmup_cutoff`. |
+| **valid sample** | grid sample where the seeded Lake frame has both top-of-book prices, uncrossed (`bid_0_price < ask_0_price`), and ≥ `min_levels_per_side` levels per side — exactly the `good` predicate of `recon/parity.py::lake_warmup_cutoff` at its operative default **`min_levels_per_side = 1`** (the parity gate's `--warmup-min-levels` default; distinct from the seed-validation knob `seed_min_levels = 5`, which gates snapshot acceptance, not sample validity). Depth is deliberately NOT a per-sample validity dimension: top-of-book usability decides segment planning, while depth degradation is governed day-level by `thin_usable_max` + the `THIN_DEPTH_OVER_BAR` full-day override (a thin-failed day never keeps mask-planned Lake spans — Codex P2), and a thin-but-two-sided span inside a trusted segment still emits NaN beyond its real depth, so depth-consuming features are masked naturally rather than fed fabricated liquidity. |
 | `lake_present_start_ts` / `lake_present_end_ts` | first / (exclusive) last-plus-one-grid-step grid sample where both top-of-book prices are present. Presence only — no trust implied. `None` when Lake never has a top-of-book. (When no presence mask is supplied to the helper, the fields fall back to the validity mask — strictly narrower, conservative.) |
 | first accepted Lake seed | the existing `seed_ts` metric (`recon/reseed.py`): engine ts of the first `classify_snapshot == "ok"` Lake `book` snapshot. |
 | `warmup_qualified_ts` (boundary primitive) | the ts of the `warmup_consecutive`-th **consecutive valid** grid sample, counting only samples with `ts >= seed_ts`. `None` if the seeded book never sustains. A strictly conservative refinement of the parity gate's `cutoff = max(lake_warmup_cutoff, seed_ts)` clamp: the run restarts at the seed, so it is `>=` the clamp, equal whenever no valid run straddles the seed. |
@@ -292,7 +292,9 @@ Live/integration (follow-up branches, before unlock):
 18. A trailing-partial and an internal-gap day located from the broad map (if none exist, synthetic
     coverage stands).
 19. Native-engine conformance for the new coverage metrics (present/trusted timestamps, invalid
-    runs) once wired — byte-equal Python vs native.
+    runs) once wired — byte-equal Python vs native. **Done 2026-07-02 (Task 3, synthetic):**
+    native meta == Python meta and identical assess-level plans/quality blocks pinned in
+    `tests/test_native_recon.py` / `tests/test_quality_map.py`.
 20. Report schema tests: extended `quality`/`coinapi_fill` blocks schema-consistent across
     assessed/excluded/load-failed days; `jq empty` passes.
 21. Fill-manifest budget check: every `needs_fill` day (full or partial) appears with a whole-day
@@ -363,9 +365,10 @@ artifact records the policy that produced it.
 - `scripts/run_coinbase_quality_map.py` (follow-up): compute the valid mask on the Python frame path
   (`valid_mask_from_frame`), emit the Q7 `quality` coverage keys and `coinapi_fill` plan block via
   `plan_day_stitch`; extend `_empty_quality_block`; add the `partial_fill` summary list.
-- `recon/reseed.py` + native engine (follow-up): the native path is metrics-only (no frame), so
-  `_replay_seeded`/Rust must emit invalid-run boundaries (the `crossed_sample_ts` precedent shows
-  how) — conformance-pinned before the broad map relies on native coverage metrics.
+- `recon/reseed.py` + native engine (**implemented 2026-07-02**, Task 3): the native path is
+  frame-free, so `_replay_seeded`/Rust emit invalid-run boundaries (the `crossed_sample_ts`
+  precedent) as the compact `meta["coverage"]` block — conformance-pinned before the broad map
+  relies on native coverage metrics.
 - Future stitcher/backfill manifest: consumes `coinapi_fill.fill_segments` + `coinapi.fillable`;
   downloads whole days (backfill gate unchanged); realizes CoinAPI segments by restricting
   `sample_ts` with `size_policy="decrement"`; realizes Lake segments through the existing seeded
@@ -396,9 +399,19 @@ Emit coverage keys + fill plan in the report (Python engine first); schema-consi
 (`coinapi_fill_block` + `_stitch_and_coverage`) with `full_day_plan`/`invalid_runs` helpers in
 `recon/stitch_policy.py`; synthetic tests in `tests/test_quality_map.py`.
 
-### Task 3 (follow-up branch): native coverage metrics
+### Task 3 (follow-up branch): native coverage metrics — **implemented 2026-07-02**
 
-Invalid-run boundaries from the Rust core; conformance tests vs the Python frame path.
+Invalid-run boundaries from the Rust core; conformance tests vs the Python frame path. Landed as a
+compact `meta["coverage"]` block — maximal half-open `[i0, i1)` invalid-run sample-index pairs (the
+shared `valid_mask_from_frame` predicate at `min_levels_per_side=1`) plus presence bound indices —
+emitted by BOTH `recon.reseed._replay_seeded` and the Rust core (`recon_native.META_ABI = 2` rejects
+stale builds at import). `scripts/run_coinbase_quality_map.py` reconstructs the masks
+(`_masks_from_native_coverage`) and feeds the shared `_stitch_and_coverage_masks`, so
+`--engine native` emits the same Q7 coverage keys and partial fill plans as the Python frame path,
+with the conservative full-day fallback kept for coverage-less meta. Conformance pinned in
+`tests/test_native_recon.py` (Python replay coverage == frame-derived mask; native meta == Python
+meta) and `tests/test_quality_map.py` (identical stitch plans/quality blocks at the assess level,
+plus the report-cap and fallback paths). See docs/native-recon.md "Coverage metrics".
 
 ### Task 4 (follow-up branch): seam-day live validation
 

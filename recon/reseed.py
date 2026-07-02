@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from math import isfinite
+from math import isfinite, isnan
 from typing import Iterable
 
 import numpy as np
@@ -176,6 +176,20 @@ class ReseedPolicy:
                                     else float(self.max_spread_frac))}
 
 
+def require_finite_deltas(price: np.ndarray, size: np.ndarray) -> None:
+    """Reject non-finite delta prices/sizes before replay (the `classify_snapshot` finite-values
+    bar, applied to the delta stream). A NaN price would silently DIVERGE the engines: the Python
+    book keys the raw float (`max()`/`min()` over a dict with a NaN key is insertion-order
+    dependent, and a fresh NaN key can never be popped), while the native book keys
+    `round(NaN * scale)` == tick 0 — different tops, different coverage runs, different fill
+    plans. Fail fast at both engines' ingest instead."""
+    for name, a in (("price", price), ("size", size)):
+        bad = int(np.count_nonzero(~np.isfinite(a)))
+        if bad:
+            raise ValueError(f"book_delta_v2 contains {bad} non-finite {name} value(s); refusing "
+                             "to replay (NaN/inf book keys are engine-divergent)")
+
+
 def _merge_time_ordered(deltas: Iterable[Delta], snapshots: list[BookSnapshot]):
     """Merge a (ts,seq)-ordered `Delta` iterable with a ts-sorted snapshot list into one
     non-decreasing event stream of `("delta", Delta)` / `("snap", BookSnapshot)`. At equal ts the
@@ -202,7 +216,15 @@ def _replay_seeded(sample_ts, events, *, k: int, policy: ReseedPolicy,
     `collect_frame=False` (metrics-only) skips the per-sample top-K `snapshot()` and the output
     DataFrame build — used by the A/B 'before' arm, which only needs the cold-start crossed rate, so
     a discarded 86,400-row frame is never materialized on a 34M-row day; crossed/missing/thin
-    counters still come from the O(1)/best-bid-ask state."""
+    counters still come from the O(1)/best-bid-ask state.
+
+    `metrics["coverage"]` (partial-day fill plan doc, Task 3) is the compact per-sample coverage the
+    quality map plans partial CoinAPI fills from WITHOUT the frame: `invalid_runs_idx` = maximal
+    half-open `[i0, i1)` sample-INDEX runs where the sample fails the shared stitch-policy validity
+    predicate (`recon.stitch_policy.valid_mask_from_frame` at `min_levels_per_side=1`: both
+    top-of-book prices present, non-NaN, `bid < ask` — pinned equal to the frame-derived mask by
+    test), plus `present_first_idx`/`present_last_idx`, the bound indices of the notna both-tops
+    presence predicate behind `lake_present_*` (bounds only — that is all `plan_day_stitch` reads)."""
     ob = OrderBook()
     sample_ts = [int(t) for t in sample_ts]
     n = len(sample_ts)
@@ -227,13 +249,33 @@ def _replay_seeded(sample_ts, events, *, k: int, policy: ReseedPolicy,
     crossed_duration_ns = 0
     last_t: int | None = None
 
+    present_first_idx: int | None = None
+    present_last_idx: int | None = None
+    invalid_runs_idx: list[list[int]] = []
+    invalid_open: int | None = None  # start index of the currently-open invalid run
+
     def emit(g: int) -> None:
         nonlocal crossed_samples, missing_book_samples, thin_depth_samples
+        nonlocal present_first_idx, present_last_idx, invalid_open
         if collect_frame:
             snap = ob.snapshot(k)
             snap["sample_ts"] = int(g)
             rows.append(snap)
         bb, ba = ob.best_bid(), ob.best_ask()
+        # Per-sample coverage (`si` is the current grid index at every emit call site): `present`
+        # is the notna both-tops predicate; `valid` additionally requires uncrossed — exactly
+        # `valid_mask_from_frame` at min_levels_per_side=1 (a non-empty side ⟺ its top is set).
+        present = bb is not None and ba is not None and not (isnan(bb) or isnan(ba))
+        if present and bb < ba:
+            if invalid_open is not None:
+                invalid_runs_idx.append([invalid_open, si])
+                invalid_open = None
+        elif invalid_open is None:
+            invalid_open = si
+        if present:
+            if present_first_idx is None:
+                present_first_idx = si
+            present_last_idx = si
         if bb is None or ba is None:
             missing_book_samples += 1
         elif bb >= ba:
@@ -300,6 +342,8 @@ def _replay_seeded(sample_ts, events, *, k: int, policy: ReseedPolicy,
     close_t = max(close_candidates) if close_candidates else None
     if crossed_since is not None and close_t is not None and close_t > crossed_since:
         crossed_duration_ns += close_t - crossed_since
+    if invalid_open is not None:  # close a trailing invalid run at the grid end (half-open at n)
+        invalid_runs_idx.append([invalid_open, n])
 
     frame = pd.DataFrame(rows) if collect_frame else None
     metrics = {
@@ -321,6 +365,10 @@ def _replay_seeded(sample_ts, events, *, k: int, policy: ReseedPolicy,
         "missing_book_fraction": (float(missing_book_samples / n) if n else 0.0),
         "thin_depth_samples": int(thin_depth_samples),
         "thin_depth_fraction": (float(thin_depth_samples / n) if n else 0.0),
+        "coverage": {"present_first_idx": present_first_idx,
+                     "present_last_idx": present_last_idx,
+                     "n_invalid_runs": len(invalid_runs_idx),
+                     "invalid_runs_idx": invalid_runs_idx},
         "policy": policy.as_dict(),
     }
     return frame, metrics
@@ -360,6 +408,7 @@ def reconstruct_lake_l2_at_samples_seeded(
     seq = df[seq_col].astype("int64").to_numpy()
     price = df["price"].astype("float64").to_numpy()
     size = df[size_col].astype("float64").to_numpy()
+    require_finite_deltas(price, size)
     sides = _decode_sides(df[side_col].to_numpy())
     order = np.lexsort((seq, ts))  # primary key = ts, secondary = seq (matches order_key)
     snaps = sorted(snapshots or [], key=lambda s: s.ts)

@@ -430,15 +430,20 @@ policy, see below); other `inconclusive` → `null` (unresolved — surfaced in 
 `not_in_scope` list, so out-of-scope (e.g. Binance-gap) days are never read as unresolved fills.
 **Since 2026-07-02 the block also carries the partial-day stitch plan** (plan-doc Q7): every
 `needs_fill` day gets `fill_profile`/`full_day_reason`/`fill_segments`/`seams`/`seam_policy` from
-`recon/stitch_policy.py` — mask-derived via `plan_day_stitch` on the Python engine path (which also
-fills the new `quality` coverage keys `lake_present_*`/`trusted_lake_*`/`n_invalid_runs`/
-`invalid_runs`), and a conservative synthesized full-day plan when no mask supports a narrower fill
-(Lake absent; the metrics-only native engine, whose per-sample coverage is the plan's Task-3
-follow-up; or a thin-depth bar failure — the one degraded dimension the top-of-book mask cannot
-see, so its Lake spans are never kept, even beside a real gap; such override days'
-`quality.trusted_lake_*` are nulled, since no Lake coverage survives a full-day route). No-fill /
-no-verdict / out-of-scope days carry `fill_profile: null`. `summary.coinapi_fill` adds
-`partial_fill` (day list ⊆ `needs_fill`), `fill_counts`, and `full_day_reason_counts`.
+`recon/stitch_policy.py` — mask-derived via `plan_day_stitch` on BOTH engine paths, which also
+fills the `quality` coverage keys `lake_present_*`/`trusted_lake_*`/`n_invalid_runs`/
+`invalid_runs`: the Python path derives the masks from the materialized top-K frame (the
+correctness oracle), and the native path (plan Task 3, **implemented 2026-07-02**) reconstructs the
+same masks from the engine's compact `meta["coverage"]` block (maximal invalid-run index pairs +
+presence bound indices, conformance-pinned equal to the frame-derived mask — docs/native-recon.md
+"Coverage metrics") without materializing the frame. A conservative synthesized full-day plan
+remains for days where no mask supports a narrower fill (Lake absent; a meta lacking `coverage` —
+stale extension builds are rejected at import via `recon_native.META_ABI`; or a thin-depth bar
+failure — the one degraded dimension the top-of-book mask cannot see, so its Lake spans are never
+kept, even beside a real gap; such override days' `quality.trusted_lake_*` are nulled, since no
+Lake coverage survives a full-day route). No-fill / no-verdict / out-of-scope days carry
+`fill_profile: null`. `summary.coinapi_fill` adds `partial_fill` (day list ⊆ `needs_fill`),
+`fill_counts`, and `full_day_reason_counts`.
 
 **Quota-aware (docs §2.1/§6/§8).** It prints `lakeapi.used_data(sess)` before/after, estimates the
 request from measured per-day sizes (`book_delta_v2` ~0.30 GB/day from §6; the `book` 20-level snapshot
@@ -541,7 +546,9 @@ Findings:
    `docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md` + `recon/stitch_policy.py`
    (segment planning + seam masks, synthetic-tested); the quality-map report **wiring is
    IMPLEMENTED (2026-07-02)** — per-day `coinapi_fill` stitch plans + coverage keys, see the
-   §5a-QualityMap contract paragraph above; the seam-day live validation is still a follow-up —
+   §5a-QualityMap contract paragraph above — and the **native coverage metrics are IMPLEMENTED
+   (2026-07-02)**, so `--engine native` emits the same coverage keys and partial fill plans as the
+   Python frame path (plan Task 3); the seam-day live validation is still a follow-up —
    backfill stays locked.
 3. **Gap days route correctly and are fillable.** All 3 documented book-gap days raise lakeapi
    `NoFilesFound` → `missing_needs_coinapi`, and each is calendar-verified fillable from CoinAPI flat
@@ -713,7 +720,9 @@ integer-tick order book with O(log L) best-bid/ask and no per-row object boxing.
 a verified tick scale, else Python; explicit `--engine native` fails before any Lake load if
 unavailable/unverified), and record the selected engine in the report JSON. The native path preserves
 the Python seed/reseed semantics exactly (pinned by native-vs-Python conformance tests) and, in
-quality-map mode, classifies from metrics-only meta without materializing the top-K frame. On a
+quality-map mode, classifies from metrics-only meta AND derives the partial-day stitch plans /
+Q7 coverage keys from the compact per-sample `coverage` runs (docs/native-recon.md "Coverage
+metrics", 2026-07-02) — all without materializing the top-K frame. On a
 synthetic 1M-row / 10 000-level / 20%-churn fixture the native engine is **~1293× faster than Python**
 (244.35 s → 0.189 s) with byte-identical output (`scripts/bench_recon_engine.py`; 12th Gen i5-12400F,
 Python 3.12, rustc 1.94). The default two-day live quality-map smoke and the expanded 10-day validation
@@ -892,7 +901,9 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       those days get CoinAPI fill. Remaining gate: partial-day fill
       handling for seam days (policy DEFINED 2026-07-02 —
       `docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md` + `recon/stitch_policy.py`;
-      quality-map wiring IMPLEMENTED 2026-07-02, seam-day live validation open), plus the full-window map (~313 GB
+      quality-map wiring IMPLEMENTED 2026-07-02; native coverage metrics IMPLEMENTED 2026-07-02,
+      so the broad map's `--engine native` runs emit partial fill plans too; seam-day live
+      validation open), plus the full-window map (~313 GB
       conservative / ~170 GB measured wire-rate → staged across quota windows); backfill stays
       locked until it passes.)*
 
