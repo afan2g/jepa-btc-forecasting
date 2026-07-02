@@ -182,7 +182,7 @@ loaded/renamed columns (§2). `null` timestamp = the existing sentinel `value < 
 | 6 | `was_presorted` | whether the *file* arrived `origin_time`-monotonic (pre-sort) | informational (Coinbase→False, Binance→True) |
 | 7 | `dup_ts_cluster_count` / `dup_ts_max_cluster` | `origin_time` values with count>1; max multiplicity | warn if `dup_ts_max_cluster > dup_ts_cluster_warn` |
 | 8 | `dup_trade_id_count` / `dup_trade_id_frac` | `len(df) - trade_id.nunique()` (if `trade_id` present) | warn if `> 0` |
-| 9 | `price_min` / `price_max` / `price_p99_abs_ret` | min/max; p99 of `abs(price.pct_change())` after sort | fail on non-positive/NaN price; warn if `price_p99_abs_ret > price_jump_warn` |
+| 9 | `price_min` / `price_max` / `price_median` / `price_p99_abs_ret` / `price_max_abs_ret` / `price_out_of_band_count` | min/max/median; p99 **and max** of `abs(price.pct_change())` after sort; count of prices outside `[median/price_range_factor, median*price_range_factor]` | fail on non-positive/NaN price; warn if `price_p99_abs_ret > price_jump_warn` **or** `price_max_abs_ret > price_spike_warn` **or** `price_out_of_band_count > 0` (a lone corrupt spike two-diffs among 10⁵ trades never moves p99, so `price_max_abs_ret` + the robust band catch it) |
 | 10 | `size_min` / `size_max` / `size_zero_frac` / `size_neg_frac` | on `quantity` | **hard fail** if `size_zero_frac>0` or `size_neg_frac>0`; warn if `size_max > size_max_btc` |
 | 11 | `notional_sum` / `notional_max_trade` | `Σ price*quantity`; `max(price*quantity)` | fail if `notional_sum<=0`/NaN; warn on absurd single-trade notional |
 | 12 | `interarrival_median_s` / `_p95_s` / `_p99_s` / `_max_s` | `diff(origin_time).dt.total_seconds()` after sort | warn if `interarrival_max_s > interarrival_gap_warn_s` (calendar-context-exempt) |
@@ -252,8 +252,8 @@ passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "day
                           "sort": "stable_by_engine_clock_then_file_order"},
     "thresholds": { "origin_time_null_max": 0.01, "min_rows_hard": 1000,
                     "interarrival_gap_warn_s": 120.0, "sparse_hour_min_rows": 60,
-                    "price_jump_warn": 0.10, "size_max_btc": 5000.0,
-                    "dup_ts_cluster_warn": 50, "lag_neg_frac_max": 0.001 },
+                    "price_jump_warn": 0.10, "price_spike_warn": 0.50, "price_range_factor": 10.0,
+                    "size_max_btc": 5000.0, "dup_ts_cluster_warn": 50, "lag_neg_frac_max": 0.001 },
     "trades_gb_per_day": {"binance_perp": 0.12, "binance_spot": 0.10, "coinbase": 0.05},
     "quota": { "ok": true, "reason": "ok", "est_gb": 1.35, "used_gb": 42.0,
                "quota_gb": 300.0, "max_auto_gb": 3.0, "allow_broad": false, "headroom_gb": 10.0,
@@ -290,7 +290,9 @@ passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "day
                    "was_presorted": false, "used_received_time_fallback": false,
                    "dup_ts_cluster_count": 3, "dup_ts_max_cluster": 4,
                    "dup_trade_id_count": 0, "price_min": 49500.0, "price_max": 58000.0,
-                   "price_p99_abs_ret": 0.004, "size_min": 0.0001, "size_max": 42.5,
+                   "price_median": 55200.0, "price_p99_abs_ret": 0.004,
+                   "price_max_abs_ret": 0.031, "price_out_of_band_count": 0,
+                   "size_min": 0.0001, "size_max": 42.5,
                    "size_zero_frac": 0.0, "size_neg_frac": 0.0, "notional_sum": 3.1e9,
                    "interarrival_median_s": 0.08, "interarrival_p99_s": 3.2,
                    "interarrival_max_s": 41.0, "missing_hour_count": 16, "sparse_hour_count": 0,
@@ -315,8 +317,8 @@ stable code first — the `run_coinbase_quality_map.classify_day` convention):
 | `missing_partition` | no partition for the day | fail (unless fill/excluded) |
 | `load_error` | load raised | fail |
 | `origin_time_column_missing` | no `origin_time`/`timestamp` column | fail |
-| `origin_time_null_fraction_high` | `> origin_time_null_max` | fail if no fallback; else `received_time_fallback_used` warn |
-| `received_time_fallback_used` | null `origin_time` rows fell back | warn |
+| `origin_time_null_fraction_high` | `origin_time_null_frac > origin_time_null_max` | **fail** on its own (too much off exchange time), even though every recoverable row was substituted (§5) |
+| `received_time_fallback_used` | sub-threshold null `origin_time` rows fell back to `received_time` | warn |
 | `received_time_fallback_unavailable` | needed fallback but `received_time` null/absent | fail |
 | `nonmonotonic_after_sort` | sorted engine clock not non-decreasing / has `NaT` | fail |
 | `price_out_of_range` | any price `<= 0` or NaN | fail |
@@ -325,7 +327,8 @@ stable code first — the `run_coinbase_quality_map.classify_day` convention):
 | `row_count_implausibly_low` | `< min_rows_hard` | fail |
 | `duplicate_timestamp_cluster` | large same-ns cluster | warn |
 | `duplicate_trade_id` | repeated `trade_id` | warn |
-| `price_jump_excess` | `price_p99_abs_ret > price_jump_warn` | warn |
+| `price_jump_excess` | `price_p99_abs_ret > price_jump_warn` (broad churn) | warn |
+| `price_spike` | `price_max_abs_ret > price_spike_warn` or `price_out_of_band_count > 0` (a lone corrupt outlier p99 misses) | warn |
 | `size_out_of_range` | `size_max > size_max_btc` | warn |
 | `interarrival_gap_excess` | `interarrival_max_s > interarrival_gap_warn_s` | warn |
 | `missing_hour` / `sparse_hour` | empty / sparse UTC hour | warn |
@@ -344,6 +347,8 @@ stable code first — the `run_coinbase_quality_map.classify_day` convention):
 | `min_rows_hard` | 1000 | a `trades` day under ~1k rows is a broken/near-empty partition, not a quiet day |
 | `dup_ts_cluster_warn` | 50 | same-ns trades are normal in bursts; a >50-deep single-ns cluster is worth a look |
 | `price_jump_warn` | 0.10 | a >10% gap between consecutive trades — real flash moves exist, so warn not fail |
+| `price_spike_warn` | 0.50 | max single-trade abs return; a >50% one-tick move is almost always one corrupt print (p99 can't see a lone outlier) |
+| `price_range_factor` | 10.0 | any price outside `[median/10, median×10]` is grossly implausible intraday (BTC never moves 10× within a day), regime-agnostic vs. a hardcoded band |
 | `size_max_btc` | 5000.0 | a single BTC-denominated trade > 5000 BTC is implausible on these venues |
 | `interarrival_gap_warn_s` | 120.0 | a >2 min no-trade gap in a normally-active market; quiet-hour context exempts it |
 | `sparse_hour_min_rows` | 60 | < 1 trade/min for a whole UTC hour is sparse |
@@ -410,18 +415,25 @@ mirroring the "never silently dropped" discipline (a fail is surfaced in
 
 - `missing_partition` / `empty_partition` on a required (non-fill) day
 - `load_error`, `origin_time_column_missing`
-- `origin_time_null_fraction_high` **and** `received_time_fallback_unavailable`
+- `origin_time_null_fraction_high` — `origin_time_null_frac > origin_time_null_max`, **on its own**
+  (too much of the bar clock is on receive-time even though every recoverable row was substituted;
+  per §5 the threshold is a hard-fail bound, not merely a warn)
+- `received_time_fallback_unavailable` — a null-`origin_time` row whose `received_time` is also
+  null (unresolvable engine clock), **on its own**, at any fraction
 - `nonmonotonic_after_sort` (the sorted engine clock **is** the bar clock — non-monotonic is fatal)
 - `price_out_of_range`, `size_nonpositive`, `notional_nonpositive`
 - `row_count_implausibly_low` (`< min_rows_hard`)
 - `lag_negative` above `lag_neg_frac_max`
 
 **Warn (usable, surfaced, non-blocking):** `duplicate_timestamp_cluster`, `duplicate_trade_id`,
-`price_jump_excess`, `size_out_of_range`, `interarrival_gap_excess`, `missing_hour`/`sparse_hour`,
-`side_value_unexpected`, `received_time_fallback_used`, `row_count_low`. These are either legitimate
-market behaviour (flash moves, dead Sundays, same-ns bursts) or informational; the bar builder may
-consume the day but the report retains the flags for stratified diagnostics (experiment-plan
-"stratify all results by regime").
+`price_jump_excess`, `price_spike`, `size_out_of_range`, `interarrival_gap_excess`,
+`missing_hour`/`sparse_hour`, `side_value_unexpected`, `received_time_fallback_used`, `row_count_low`.
+These are either legitimate market behaviour (flash moves, dead Sundays, same-ns bursts) or
+informational; the bar builder may consume the day but the report retains the flags for stratified
+diagnostics (experiment-plan "stratify all results by regime"). `price_spike` is warn-only on
+purpose — a real flash print and a corrupt one look alike, so it surfaces for review rather than
+silently dropping data; a corrupt price that also drives `notional_nonpositive`/non-positive price
+still hard-fails.
 
 **How CoinAPI-fill days are handled.** A Coinbase day whose Lake `trades` are missing/partial and
 which appears in `coinbase_fill_days` (with `trades: true`, i.e. Lake trades need CoinAPI fill) is
@@ -453,7 +465,7 @@ SENTINEL = pd.Timestamp("1970-01-01")          # < 2015-01-01 → treated as nul
 
 def _trades_df(n=1000, start="2025-06-01T00:00:00Z", step_ms=80, *, presorted=True,
                full_day=False, null_origin=0.0, null_received=0.0, dup_ids=0,
-               bad_price=False, bad_size=False, empty_hours=()):
+               bad_price=False, bad_size=False, spike_price=False, empty_hours=()):
     """Deterministic synthetic Crypto Lake `trades` frame (loaded/renamed columns).
 
     full_day=True spreads the n rows evenly across [00:00, 24:00) (step = 86_400_000 // n ms) so the
@@ -461,6 +473,9 @@ def _trades_df(n=1000, start="2025-06-01T00:00:00Z", step_ms=80, *, presorted=Tr
     null_origin / null_received are FRACTIONS of leading rows set to the 1970 sentinel; the same
     leading rows overlap, so null_origin>0 with null_received>0 makes those rows unrecoverable.
     dup_ids is the number of EXTRA duplicate trade_ids created (first dup_ids+1 rows share one id).
+    spike_price sets one middle row to an 11× price (660000 among constant 60000, just past the
+    median×10 band) — an isolated corrupt print p99 abs-return cannot see but price_max_abs_ret /
+    the robust band catch.
     """
     base = pd.Timestamp(start)
     step = (86_400_000 // n) if full_day else step_ms
@@ -480,6 +495,7 @@ def _trades_df(n=1000, start="2025-06-01T00:00:00Z", step_ms=80, *, presorted=Tr
     if dup_ids:       df.loc[df.index[: dup_ids + 1], "trade_id"] = df["trade_id"].iloc[0]
     if bad_price:     df.loc[df.index[0], "price"] = 0.0
     if bad_size:      df.loc[df.index[0], "quantity"] = -1.0
+    if spike_price:   df.loc[df.index[n // 2], "price"] = 660000.0   # one 11× print among constants
     for h in empty_hours: df = df[df["origin_time"].dt.hour != h]
     return df.reset_index(drop=True)
 ```
@@ -505,6 +521,10 @@ Required test cases (TDD — write each failing test first):
    extra duplicates) → `dup_trade_id_count == 5`, `duplicate_trade_id` warn.
 5. **Invalid price / size** — `bad_price=True` → `price_out_of_range` fail; `bad_size=True` →
    `size_nonpositive` fail; a zero-size row → `size_nonpositive` fail.
+5b. **Isolated positive price spike** — `spike_price=True` (one 11× print among 1000 constant prices)
+   → `price_p99_abs_ret ≈ 0` (p99 misses the two spike diffs) **but** `price_max_abs_ret` large and
+   `price_out_of_band_count == 1` → `price_spike` warn. Pins that a lone corrupt outlier surfaces even
+   though it never moves the 99th percentile (the P2 review gap).
 6. **Sparse / missing hour** — build a **full-day** frame (`_trades_df(n=2400, full_day=True)` →
    ~100 rows in each of the 24 UTC hours); `empty_hours=(3,4)` → `missing_hour_count == 2`,
    `missing_hour` warn; thinning one hour below `sparse_hour_min_rows` (e.g. drop all but 30 of its
