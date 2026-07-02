@@ -14,7 +14,7 @@
 
 ## Scope, altitude, and non-goals
 
-**This is a docs/spec branch.** It writes exactly one file — this plan. No code is added on this branch, so no `pytest` run is required (AGENTS.md: docs-only PRs validate with `git diff --check`).
+**This is a docs/spec branch.** It adds this plan doc and adds a one-line cross-link to it from `docs/data.md` §10 (source-of-truth discoverability) — **no code**. No `pytest` run is required (AGENTS.md: docs-only PRs validate with `git diff --check`).
 
 **No vendor/API calls are run on this branch:** no Crypto Lake `load_data`/`list_data`, no CoinAPI, no native benchmark, no quality-map batch. All commands below are for the *future* implementation branch.
 
@@ -511,7 +511,7 @@ Optional live validation (Phase 2, **explicit approval + one day only**, record 
 - **Scope** — the two instruments/feeds above; explicitly *not* Coinbase/CoinAPI.
 - **No vendor/API calls run** — state which cheap local checks ran (unit tests, `py_compile`) and that no live Lake/CoinAPI pull, no bulk download, and no broad quality map ran; CoinAPI backfill stays locked.
 - **Validation** — test results with/without the native extension; any Phase-2 one-day run with exact day, `used_data` before/after, and report path.
-- **Risks/follow-ups** — the Risks Q1–Q8 above; the streaming Arrow reader follow-on; staged archive still pending.
+- **Risks/follow-ups** — the Risks Q1–Q9 above; the streaming Arrow reader follow-on; staged archive still pending.
 
 ---
 
