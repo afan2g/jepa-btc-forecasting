@@ -1,0 +1,595 @@
+# Multi-Day Trade-Feed Validation Breadth — Implementation Plan
+
+> **For agentic workers:** this is a **spec + implementation plan** for the open `docs/data.md`
+> §10 item "Trade validation breadth." **This branch ships the doc only** — no code, no vendor
+> calls. The follow-up implementation branches (§Implementation Tasks) build
+> `ingest/trade_checks.py` (pure, synthetic-tested) + `ingest/validate_trade_feeds.py` (the Lake
+> CLI). Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans for
+> those follow-ups. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Extend the one-day, three-venue §5b trade-feed validation to **multiple days and market
+regimes per venue** (Coinbase BTC-USD, Binance BTC-USDT spot, Binance BTC-USDT-PERP), with a
+per-day/per-venue pass/warn/fail report and an explicit gate that the bar builder consumes — because
+trades drive the bar clock (spec §5.1), so a mis-validated trade stream mis-times every bar, feature
+vector, and label.
+
+**Architecture:** A pure, vendor-dep-free checks module (`ingest/trade_checks.py`: thresholds,
+reason-code constants, per-frame metric functions, `classify(...)`, `build_report`/`write_report`,
+GB estimation, the Lake quota decision) plus a thin Crypto Lake CLI wrapper
+(`ingest/validate_trade_feeds.py`) that loads `trades` partitions via `lakeapi` and calls the pure
+module. This mirrors the repo's established split (pure `recon/stitch_policy.py` vs. the vendor
+`scripts/run_coinbase_quality_map.py` runner), so every check is synthetic-testable with **no vendor
+I/O in tests**.
+
+**Tech Stack:** Python 3.12, pandas/numpy, `lakeapi` + explicit boto3 session (Crypto Lake,
+`eu-west-1`), pytest. No new dependencies. Reads Crypto Lake `trades` only; **CoinAPI is not touched
+and the CoinAPI backfill gate stays LOCKED** (Coinbase CoinAPI-fill-day trade validation is a
+gated follow-up, §8/§10-rollout).
+
+**Interpreter:** commands use the repo-convention `.venv/bin/python`, run from the repo root. Agent
+worktrees have **no `.venv`** — substitute the main checkout's interpreter
+`/home/aaron/jepa-btc-forecasting/.venv/bin/python` from the worktree root; the commands are
+otherwise unchanged.
+
+**Scope (this branch):** this document + one minimal `docs/data.md` pointer edit (§10). **No new
+Python, no tests run, no Crypto Lake / CoinAPI / native / bulk pulls, no full pytest.** No raw data,
+reports, parquet/csv.gz, caches, `.env`, or secrets committed.
+
+## Non-Goals
+
+- No live Crypto Lake trade downloads and no CoinAPI pulls on this branch (Phase 2 does a bounded
+  Lake run, **ask-first** per `AGENTS.md`).
+- No changes to `ingest/verify_trades_and_calendar.py`'s existing one-day check or to the usable
+  calendar's structure on this branch (Phase 3 integrates; it does not rewrite §5b's calendar).
+- No CoinAPI-sourced fill-day trade validation here — that needs a bounded single-day CoinAPI pull
+  and stays behind the still-locked backfill gate (deferred to a follow-up, §8).
+- No bar-builder changes on this branch (Phase 4 enforces the gate; the builder does not exist yet).
+- No new market-regime taxonomy — regimes reuse the days already characterized in §5a-QualityMap.
+
+## Background (what exists today)
+
+`ingest/verify_trades_and_calendar.py::check_trades(sess, exch, sym, day)` validates **one day
+(2025-06-01), one symbol per venue**, printing to stdout (no per-day JSON report, no gate). It
+measures: row count + columns; `origin_time`/`received_time` "empty" fraction (sentinel
+`< pd.Timestamp("2015-01-01")`); `received − origin` lag median/p95/negative; `side` value counts;
+`trade_id` uniqueness + monotonic-in-file; and whether the file is ordered by `origin_time`. The
+§5b table records the single-day result:
+
+| Venue | rows (2025-06-01) | origin/recv empty | recv−origin lag med/p95 | `trade_id` | file order |
+|---|---|---|---|---|---|
+| Binance perp | 812,701 | 0% / 0% | 57 / 200 ms | int64, unique, monotonic | sorted by `origin_time` |
+| Binance spot | 645,930 | 0% / 0% | 5 / 63 ms | int64, unique, monotonic | sorted by `origin_time` |
+| Coinbase | 274,489 | 0% / 0% | 164 / 238 ms | int64, unique, **not** monotonic | **NOT** sorted by `origin_time` |
+
+The load-bearing finding (§5b): **Coinbase trades are not stored in `origin_time` order and
+`trade_id` is not monotonic — the clock must sort Coinbase trades by `origin_time`** (Binance feeds
+are already ordered). "One day, one symbol each — extend to multi-day before relying on it." That
+extension is this plan.
+
+---
+
+## 1. Validation goals
+
+For every selected `(venue, day)` the validator answers, with machine-readable reason codes:
+
+1. **Existence** — the `trades` partition exists and is non-empty for the venues/days needed by the
+   modeling calendar (a missing/empty required partition is a hard fail; a missing partition on a
+   known Coinbase CoinAPI-fill day is expected → routed, not failed).
+2. **Timestamp fields & sorting semantics** — `origin_time` (exchange time) is present and populated;
+   the frame yields a **non-decreasing engine clock after the chosen sort** (§5). Coinbase is the
+   only venue where the sort changes the order; the check must confirm the sort *repairs* it.
+3. **Row-count plausibility** — the day is not implausibly empty for the venue/regime (hard floor +
+   a soft, regime-aware surface).
+4. **Empty / missing / sparse partitions** — detect empty partitions, missing partitions, and
+   missing/sparse *hours within* a present partition (quiet night vs. a real intraday gap,
+   disambiguated against the calendar).
+5. **Duplicate / non-monotonic exchange-time issues** — duplicate `origin_time` clusters, duplicate
+   `trade_id`s, and any residual non-monotonicity of the engine clock after the sort.
+6. **Price / size sanity** — prices positive & finite, single-trade jump distribution sane; sizes
+   positive & finite (zero/negative sizes corrupt dollar bars), max-size plausible; notional volume
+   plausible.
+7. **Bar-clock suitability** — the trade stream can drive the notional bar clock: a monotonic engine
+   clock, positive notional, and an inter-arrival distribution that supports the E0.3 gate ("median
+   active-regime bar ≤ 2 s"). This is the summary judgement the bar builder gates on (§8).
+
+Every result is either **pass**, **warn** (usable but surfaced), or **fail** (blocking) — plus the
+structural states **empty**, **missing**, **load_error**, and the routed states **coinapi_fill** and
+**excluded** (§8).
+
+## 2. Venues & products
+
+Reuse the exact Crypto Lake identifiers already used in `ingest/verify_trades_and_calendar.py` and
+`ingest/verify_lake.py` (do not invent new ones):
+
+| Venue key | `exchange` | `symbol` | table | notes |
+|---|---|---|---|---|
+| `binance_perp` | `BINANCE_FUTURES` | `BTC-USDT-PERP` | `trades` | primary signal side; drives perp-notional bar clock (spec §5.1) |
+| `binance_spot` | `BINANCE` | `BTC-USDT` | `trades` | primary signal side; combined-notional option |
+| `coinbase` | `COINBASE` | `BTC-USD` | `trades` | label venue; Lake + CoinAPI-fill; the sort-order defect lives here |
+
+Load (identical call shape to `check_trades`), one whole day `[00:00, next-00:00)`:
+
+```python
+df = lakeapi.load_data(table="trades", start=s, end=e, symbols=[sym], exchanges=[exch],
+                       boto3_session=sess, drop_partition_cols=True)
+```
+
+`sess` is `verify_lake.lake_session()` (explicit boto3 `Session` with `.env` AWS keys, region
+`eu-west-1`). Loaded/renamed trade columns (`lakeapi` renames `timestamp→origin_time`,
+`receipt_timestamp→received_time`): **`origin_time`, `received_time`** (datetime64[ns]), **`price`**,
+**`quantity`** (NOT `size` — `size` is a `book_delta_v2` field), **`side`** ∈ {`buy`, `sell`} (taker
+side), **`trade_id`** (int64). Column-project by passing the RAW names if reducing bytes:
+`columns=["timestamp", "receipt_timestamp", "price", "quantity", "side", "trade_id"]`.
+
+## 3. Day selection strategy
+
+Selection is **bounded by design** — no broad default run. Precedence (first match wins):
+
+1. `--days D1,D2,…` — an explicit comma-separated `YYYY-MM-DD` list (exact days).
+2. `--days-file PATH` — one `YYYY-MM-DD` per line (the format the batch planner emits and
+   `run_coinbase_quality_map --days-file` accepts).
+3. `--start/--end` — the **regime cohort** whose members fall in `[start, end]` (below), **plus** a
+   deterministic, seeded stratified random sample of `--sample-n` additional *usable* days drawn
+   across the train/val/test split spans (reproducible via `--seed`). Intersected with the usable
+   calendar.
+4. **no day args** — the **safe small default sample** (4 curated days, ≈1 GB, runs without
+   `--allow-broad`): `2025-06-01`, `2024-08-05`, `2025-01-07`, `2026-04-15`.
+
+**Regime cohort** (each a `docs/data.md` §5a-QualityMap-characterized day, so the validator's output
+can be cross-checked against known ground truth):
+
+| Cohort member | day(s) | regime / why it exercises the checks |
+|---|---|---|
+| Clean known overlap | `2025-06-01` | the pilot day; all 3 venues Lake-present, clean — the pass baseline |
+| High-volatility / crash + seam | `2024-08-05` | crash morning; Coinbase Lake book resumes 16:08:35Z (67.3% of day missing) → Coinbase trades sparse-hours in the AM; Binance = extreme-volume, wide-jump high-vol stress |
+| Crash-adjacent full gap | `2024-08-06` | Coinbase Lake absent → `missing_partition`; a known CoinAPI-fill day → must route to `coinapi_fill`, not fail |
+| Coinbase gap/fill seam (leading partial) | `2025-01-07` | 33-day-hole end; Coinbase resumes 14:45:00Z (61.5% missing) → leading sparse-hours; clean where present |
+| High-vol vendor seam | `2024-12-04` | 63.2 M L3 events; a `lake_present_degraded`/seam candidate |
+| Recent OOS | `2026-04-15` | inside the April-2026 OOS usable run (`2026-02-06→2026-05-05`); all 3 venues Lake-present |
+| Late-window clean | `2026-06-15` | `lake_usable` late-window control |
+
+**Random sample across splits** (requirement: "random sampled days across train/val/test"): given
+`--start/--end`, draw `--sample-n` days deterministically (seeded `random.Random(seed)`) stratified
+across the three split spans (SSL-pretrain / head-finetune / the untouched OOS ≈ April 2026),
+restricted to `usable_days` from `data/usable_calendar.json`. Deterministic so a re-run validates the
+same days (the report records the resolved `days_selected`).
+
+**Crash-context requirement** is satisfied by `2024-08-05` (+ its `2024-08-06` gap neighbour) in
+both the cohort and the default sample.
+
+**Bounded-live discipline:** the union of selected days × selected venues is passed through the GB
+gate (§7) *before any load*. The curated cohort + default sample stay under the auto cap; a large
+`--start/--end` span or a long `--days` list that exceeds the cap is refused unless `--allow-broad`
+(exit 5), exactly like `run_coinbase_quality_map`.
+
+## 4. Metrics
+
+Computed per `(venue, day)` on the loaded frame **after** the §5 sort. Every metric lands in the
+report's `days[].metrics`; the pass/warn/fail role is defined in §8. `<field>` names are the
+loaded/renamed columns (§2). `null` timestamp = the existing sentinel `value < pd.Timestamp(
+"2015-01-01")`.
+
+| # | metric key | how computed | role |
+|---|---|---|---|
+| 1 | `row_count` | `len(df)` | hard-fail below `min_rows_hard`; soft surface below regime floor |
+| 2 | `first_ts` / `last_ts` | ISO of `origin_time.min()` / `.max()` after sort | reported; used for hour coverage |
+| 3 | `origin_time_null_frac` | `(origin_time < 2015-01-01).mean()` | fail if `> origin_time_null_max` and no `received_time` fallback |
+| 4 | `received_time_available` / `received_time_null_frac` | column present; `(received_time < 2015-01-01).mean()` | fallback availability (§5) |
+| 5 | `monotonic_after_sort` | `engine_clock.is_monotonic_increasing` after the §5 sort, with no `NaT` | **hard fail** if False |
+| 6 | `was_presorted` | whether the *file* arrived `origin_time`-monotonic (pre-sort) | informational (Coinbase→False, Binance→True) |
+| 7 | `dup_ts_cluster_count` / `dup_ts_max_cluster` | `origin_time` values with count>1; max multiplicity | warn if `dup_ts_max_cluster > dup_ts_cluster_warn` |
+| 8 | `dup_trade_id_count` / `dup_trade_id_frac` | `len(df) - trade_id.nunique()` (if `trade_id` present) | warn if `> 0` |
+| 9 | `price_min` / `price_max` / `price_p99_abs_ret` | min/max; p99 of `abs(price.pct_change())` after sort | fail on non-positive/NaN price; warn if `price_p99_abs_ret > price_jump_warn` |
+| 10 | `size_min` / `size_max` / `size_zero_frac` / `size_neg_frac` | on `quantity` | **hard fail** if `size_zero_frac>0` or `size_neg_frac>0`; warn if `size_max > size_max_btc` |
+| 11 | `notional_sum` / `notional_max_trade` | `Σ price*quantity`; `max(price*quantity)` | fail if `notional_sum<=0`/NaN; warn on absurd single-trade notional |
+| 12 | `interarrival_median_s` / `_p95_s` / `_p99_s` / `_max_s` | `diff(origin_time).dt.total_seconds()` after sort | warn if `interarrival_max_s > interarrival_gap_warn_s` (calendar-context-exempt) |
+| 13 | `missing_hour_count` / `sparse_hour_count` | of the 24 UTC hours: 0 rows / `< sparse_hour_min_rows` | warn; escalates only via §8 gating vs. calendar |
+| 14 | `recv_origin_lag_median_ms` / `_p95_ms` / `_neg_frac` | `(received_time-origin_time)` ms | informational (Coinbase inherently higher); fail only if `_neg_frac > lag_neg_frac_max` |
+| 15 | `side_values` | `side.value_counts()` dict | warn if any value ∉ {`buy`,`sell`} |
+| 16 | `calendar_state` | crossed with `data/usable_calendar.json` (§8) | routes `coinapi_fill` / `excluded` |
+
+All float metrics pass through `_json_safe` (non-finite → `null`) so the report is strict JSON.
+
+## 5. Timestamp policy
+
+- **Engine clock = `origin_time` (exchange/origin time).** It is the §5.3 engine-time axis
+  (`shared_engine_time_col`) and is measured 100% populated (0% empty) on all three venues, so it is
+  the primary sort key and bar-clock timestamp.
+- **Fallback to `received_time`.** If `origin_time_null_frac > origin_time_null_max` (default 1%),
+  rows with a null `origin_time` fall back to `received_time` **for the engine clock only** (the
+  original `origin_time` is retained in the frame for audit). If `received_time` is also
+  null/absent for those rows → **hard fail** (`received_time_fallback_unavailable`). A day that
+  needed *any* fallback is recorded (`used_received_time_fallback: true`) and downgraded to **warn**
+  even when it otherwise passes — falling off exchange time is never silently accepted.
+- **Sorting rule (explicit):** sort ascending by the engine clock, **stable**, tie-breaking by
+  original file/row order — i.e. `df.sort_values(clock_col, kind="mergesort")` on a
+  `reset_index`-preserved frame. This matches the resolved CoinAPI within-timestamp policy (file/`seq`
+  order is canonical; ties break by original row index; IDs are never an ordering key —
+  `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`).
+- **Per-venue implications:**
+  - **Coinbase** — the sort is **load-bearing**: the file is not `origin_time`-ordered and
+    `trade_id` is not monotonic, so the validator both applies the sort *and* asserts the sorted
+    clock is monotonic (`monotonic_after_sort`). `was_presorted=False` is expected, not a fault.
+  - **Binance spot & perp** — already `origin_time`-sorted with monotonic `trade_id`; the sort is a
+    no-op but is still applied uniformly. `was_presorted=True`.
+  - Positive-lag observation (`recv−origin ≥ 0`, measured 0% negative) is enforced softly
+    (`lag_neg_frac_max`); Coinbase's larger lag (164/238 ms vs. Binance 5–57 ms) is informational.
+
+## 6. Report / output schema
+
+Written to `data/reports/trade_feed_validation.json` (the git-ignored `data/reports/` dir; CLI
+`--out-dir`, default `data/reports`). Strict JSON via `write_report`:
+`json.dump(_json_safe(report), f, indent=2, allow_nan=False)` + trailing newline, so `jq empty`
+passes. Top-level shape mirrors the quality-map report `{"meta", "summary", "days"}`:
+
+```json
+{
+  "meta": {
+    "script": "ingest/validate_trade_feeds.py",
+    "table": "trades",
+    "anchor_end": "2026-06-22",
+    "venues": ["binance_perp", "binance_spot", "coinbase"],
+    "days_requested": ["2025-06-01", "2024-08-05", "2025-01-07", "2026-04-15"],
+    "days_selected": ["2025-06-01", "2024-08-05", "2025-01-07", "2026-04-15"],
+    "selection_mode": "default_sample",
+    "seed": 0,
+    "timestamp_policy": {"engine_clock": "origin_time", "fallback": "received_time",
+                          "sort": "stable_by_engine_clock_then_file_order"},
+    "thresholds": { "origin_time_null_max": 0.01, "min_rows_hard": 1000,
+                    "interarrival_gap_warn_s": 120.0, "sparse_hour_min_rows": 60,
+                    "price_jump_warn": 0.10, "size_max_btc": 5000.0,
+                    "dup_ts_cluster_warn": 50, "lag_neg_frac_max": 0.001 },
+    "trades_gb_per_day": {"binance_perp": 0.12, "binance_spot": 0.10, "coinbase": 0.05},
+    "quota": { "ok": true, "reason": "ok", "est_gb": 1.08, "used_gb": 42.0,
+               "quota_gb": 300.0, "max_auto_gb": 3.0, "allow_broad": false, "headroom_gb": 10.0,
+               "used_gb_before": 42.0, "used_gb_after": 43.1 },
+    "vendor_api": { "source": "crypto_lake", "region": "eu-west-1", "table": "trades",
+                    "lakeapi_calls": 12, "dry_run": false, "coinapi_used": false },
+    "source_artifacts": { "usable_calendar": "data/usable_calendar.json",
+                          "usable_calendar_anchor_end": "2026-06-22" },
+    "generated_utc": "2026-07-02T00:00:00+00:00",
+    "note": "VALIDATION only (docs/data.md §5b / §10 trade-validation breadth). Reads Crypto Lake trades; the CoinAPI backfill gate stays LOCKED and this tool does not unlock it."
+  },
+  "summary": {
+    "n_days": 4, "n_venues": 3,
+    "counts": { "pass": 9, "warn": 2, "fail": 0, "coinapi_fill": 1, "excluded": 0,
+                "empty": 0, "missing": 0, "load_error": 0 },
+    "fail_day_venues": [],
+    "warn_day_venues": [{"day": "2024-08-05", "venue": "coinbase", "reason_codes": ["sparse_hour"]}],
+    "by_venue": { "coinbase": {"pass": 2, "warn": 1, "fail": 0, "coinapi_fill": 1},
+                  "binance_spot": {"pass": 4}, "binance_perp": {"pass": 3, "warn": 1} },
+    "gate": { "all_required_pass": true, "blocking_failures": [],
+              "coinapi_fill_deferred": [{"day": "2024-08-06", "venue": "coinbase"}] }
+  },
+  "days": [
+    {
+      "day": "2024-08-05", "venue": "coinbase", "exchange": "COINBASE", "symbol": "BTC-USD",
+      "status": "warn", "reason_codes": ["sparse_hour", "sparse_hour:hours_missing=0..15"],
+      "vendor_source": "lake",
+      "metrics": { "row_count": 61234, "first_ts": "2024-08-05T16:08:35.412Z",
+                   "last_ts": "2024-08-05T23:59:59.771Z", "origin_time_null_frac": 0.0,
+                   "received_time_available": true, "monotonic_after_sort": true,
+                   "was_presorted": false, "used_received_time_fallback": false,
+                   "dup_ts_cluster_count": 3, "dup_ts_max_cluster": 4,
+                   "dup_trade_id_count": 0, "price_min": 49500.0, "price_max": 58000.0,
+                   "price_p99_abs_ret": 0.004, "size_min": 0.0001, "size_max": 42.5,
+                   "size_zero_frac": 0.0, "size_neg_frac": 0.0, "notional_sum": 3.1e9,
+                   "interarrival_median_s": 0.08, "interarrival_p99_s": 3.2,
+                   "interarrival_max_s": 41.0, "missing_hour_count": 16, "sparse_hour_count": 0,
+                   "recv_origin_lag_median_ms": 168.0, "recv_origin_lag_neg_frac": 0.0,
+                   "side_values": {"buy": 30110, "sell": 31124} },
+      "calendar_state": { "class": "coinbase_fill_seam", "in_usable_days": true,
+                          "fill": {"book": true, "trades": false},
+                          "reasons": ["coinbase_book_partial_2024-08-05"] }
+    }
+  ]
+}
+```
+
+**Reason codes** (stable module-level string constants, `SCREAMING_SNAKE` name → `snake_case`
+value; a reason entry is either the bare code or a `code:detail`/`metric=value>threshold` string,
+stable code first — the `run_coinbase_quality_map.classify_day` convention):
+
+| code | meaning | default role |
+|---|---|---|
+| `ok` | all checks pass | pass |
+| `empty_partition` | partition loaded but 0 rows | fail (unless fill/excluded) |
+| `missing_partition` | no partition for the day | fail (unless fill/excluded) |
+| `load_error` | load raised | fail |
+| `origin_time_column_missing` | no `origin_time`/`timestamp` column | fail |
+| `origin_time_null_fraction_high` | `> origin_time_null_max` | fail if no fallback; else `received_time_fallback_used` warn |
+| `received_time_fallback_used` | null `origin_time` rows fell back | warn |
+| `received_time_fallback_unavailable` | needed fallback but `received_time` null/absent | fail |
+| `nonmonotonic_after_sort` | sorted engine clock not non-decreasing / has `NaT` | fail |
+| `price_out_of_range` | any price `<= 0` or NaN | fail |
+| `size_nonpositive` | any `quantity <= 0` or NaN | fail |
+| `notional_nonpositive` | `notional_sum <= 0`/NaN | fail |
+| `row_count_implausibly_low` | `< min_rows_hard` | fail |
+| `duplicate_timestamp_cluster` | large same-ns cluster | warn |
+| `duplicate_trade_id` | repeated `trade_id` | warn |
+| `price_jump_excess` | `price_p99_abs_ret > price_jump_warn` | warn |
+| `size_out_of_range` | `size_max > size_max_btc` | warn |
+| `interarrival_gap_excess` | `interarrival_max_s > interarrival_gap_warn_s` | warn |
+| `missing_hour` / `sparse_hour` | empty / sparse UTC hour | warn |
+| `lag_negative` | `recv_origin_lag_neg_frac > lag_neg_frac_max` | fail |
+| `side_value_unexpected` | `side ∉ {buy,sell}` | warn |
+| `row_count_low` | below the regime soft floor | warn |
+| `coinapi_fill_day` | Coinbase Lake trades missing on a known fill day | routed → `coinapi_fill` |
+| `calendar_excluded_day` | day in `excluded_days_by_reason` | routed → `excluded` |
+
+**Thresholds** are a frozen `TradeThresholds` dataclass with `as_dict()`, emitted into `meta.thresholds`
+(the `Thresholds.as_dict()` pattern — every artifact records the knobs that produced it):
+
+| knob | default | rationale |
+|---|---|---|
+| `origin_time_null_max` | 0.01 | matches `verify_lake`'s `< 0.01 → USABLE (exchange time)` bar |
+| `min_rows_hard` | 1000 | a `trades` day under ~1k rows is a broken/near-empty partition, not a quiet day |
+| `dup_ts_cluster_warn` | 50 | same-ns trades are normal in bursts; a >50-deep single-ns cluster is worth a look |
+| `price_jump_warn` | 0.10 | a >10% gap between consecutive trades — real flash moves exist, so warn not fail |
+| `size_max_btc` | 5000.0 | a single BTC-denominated trade > 5000 BTC is implausible on these venues |
+| `interarrival_gap_warn_s` | 120.0 | a >2 min no-trade gap in a normally-active market; quiet-hour context exempts it |
+| `sparse_hour_min_rows` | 60 | < 1 trade/min for a whole UTC hour is sparse |
+| `lag_neg_frac_max` | 0.001 | `received ≥ origin` should hold; a nonzero negative-lag fraction is a clock fault |
+
+## 7. CLI shape (future implementation)
+
+Script: `ingest/validate_trade_feeds.py` (thin Lake wrapper over `ingest/trade_checks.py`).
+
+| arg | type / default | meaning |
+|---|---|---|
+| `--start` | `YYYY-MM-DD` | range start for cohort + stratified-sample selection (§3) |
+| `--end` | `YYYY-MM-DD`, default `$END`/`2026-06-22` | range end / anchor (the `END=` convention) |
+| `--days` | comma list | explicit `YYYY-MM-DD` days (highest precedence) |
+| `--days-file` | path | one `YYYY-MM-DD` per line (batch-planner day-file format) |
+| `--venues` | comma list, default all 3 | subset of `binance_perp,binance_spot,coinbase` |
+| `--sample-n` | int, default 0 | extra deterministic stratified-random usable days for `--start/--end` |
+| `--seed` | int, default 0 | seed for the stratified sample (reproducible) |
+| `--usable-calendar` | path, default `data/usable_calendar.json` | calendar-crossing + fill/excluded routing (§8) |
+| `--max-auto-gb` | float, default 3.0 | auto-allowed est-GB cap; larger needs `--allow-broad` |
+| `--quota-gb` | float, default 300.0 | Crypto Lake monthly cap (mirrors `run_coinbase_quality_map.QUOTA_GB`) |
+| `--headroom-gb` | float, default 10.0 | quota GB always left unused |
+| `--allow-broad` | store_true | override the auto cap (still refused if it breaches quota headroom) |
+| `--out-dir` | path, default `data/reports` | report dir (git-ignored); writes `trade_feed_validation.json` |
+| `--strict` | store_true | exit `7` if any blocking fail (for CI gating); default exits 0 after writing the report |
+| `--dry-run` | store_true | print the resolved plan (days × venues, est GB, quota decision) and write nothing — **no vendor calls** |
+
+**No broad default run:** with no day args the validator runs the **safe small default sample** (4
+curated days, ≈1 GB) which passes the auto cap. `--dry-run` runs full selection + GB estimation +
+calendar crossing with **zero** Lake I/O (like the batch planner's dry-run: everything but the load
+runs). The GB gate reuses the `run_coinbase_quality_map` pattern — `estimate_trades_gb(venues, days,
+per_venue_gb)` + `quota_decision(...)` returning `ok`/`quota_headroom`/`exceeds_auto_cap`; a refused
+plan exits `5` (`QUOTA_REFUSED_EXIT`); on failure to read `used_data` it fail-safe assumes
+`used_gb = quota_gb`.
+
+**Exit-code contract** (extends the repo's small-int convention `2` CoinAPI-quota / `3` parity / `4`
+CoinAPI-backfill / `5` Lake-quota / `6` native): `0` ok; `5` Lake quota refused; `7`
+(`VALIDATION_FAILED_EXIT`) when `--strict` and ≥1 blocking fail.
+
+Examples:
+
+```bash
+# dry-run the default sample: prints days × venues, est GB, quota decision — NO vendor calls
+.venv/bin/python ingest/validate_trade_feeds.py --dry-run
+
+# bounded live run over an explicit regime set, all 3 venues (Phase 2)
+.venv/bin/python ingest/validate_trade_feeds.py --days 2025-06-01,2024-08-05,2025-01-07,2026-04-15
+
+# a broad sweep across a range (deliberate, budgeted) — refused without --allow-broad
+.venv/bin/python ingest/validate_trade_feeds.py --start 2024-06-22 --end 2026-05-05 \
+    --sample-n 20 --seed 7 --allow-broad
+```
+
+## 8. Gating decision
+
+**What must pass before bars/features may use a venue's trade feed for a span.** For every
+`(venue, day)` in the span that is a **required Lake day** (present in `usable_days`, not a Coinbase
+CoinAPI-fill day for that product, not `excluded`), `status ∈ {pass, warn}`. Any `fail` blocks the
+bar builder for that `(venue, span)` until fixed, filled, or the day is excluded from the calendar —
+mirroring the "never silently dropped" discipline (a fail is surfaced in
+`summary.gate.blocking_failures`, never quietly skipped).
+
+**Fail (blocking)** — these break the bar clock or its inputs and cannot be warn-only:
+
+- `missing_partition` / `empty_partition` on a required (non-fill) day
+- `load_error`, `origin_time_column_missing`
+- `origin_time_null_fraction_high` **and** `received_time_fallback_unavailable`
+- `nonmonotonic_after_sort` (the sorted engine clock **is** the bar clock — non-monotonic is fatal)
+- `price_out_of_range`, `size_nonpositive`, `notional_nonpositive`
+- `row_count_implausibly_low` (`< min_rows_hard`)
+- `lag_negative` above `lag_neg_frac_max`
+
+**Warn (usable, surfaced, non-blocking):** `duplicate_timestamp_cluster`, `duplicate_trade_id`,
+`price_jump_excess`, `size_out_of_range`, `interarrival_gap_excess`, `missing_hour`/`sparse_hour`,
+`side_value_unexpected`, `received_time_fallback_used`, `row_count_low`. These are either legitimate
+market behaviour (flash moves, dead Sundays, same-ns bursts) or informational; the bar builder may
+consume the day but the report retains the flags for stratified diagnostics (experiment-plan
+"stratify all results by regime").
+
+**How CoinAPI-fill days are handled.** A Coinbase day whose Lake `trades` are missing/partial and
+which appears in `coinbase_fill_days` (with `trades: true`, i.e. Lake trades need CoinAPI fill) is
+**not failed** for the missing Lake side. It is routed to `status = "coinapi_fill"` (reason
+`coinapi_fill_day`), listed under `summary.gate.coinapi_fill_deferred`, and its *trade-feed* validity
+is judged against the **CoinAPI** trade file — which is a **gated follow-up**: it needs a bounded
+single-day CoinAPI pull, and **the CoinAPI backfill gate stays LOCKED** until the §5a multi-day
+parity/quality-map passes. Until then a fill day is "pass-conditional-on-CoinAPI," exactly parallel
+to the quality-map `needs_fill` semantics. A day in `excluded_days_by_reason` is `status =
+"excluded"` (out of scope; already dropped by the usable calendar) and never blocks.
+
+**Interaction with the modeling calendar (§5b) & CV (§8/E0.4):** the effective modeling calendar is
+the contiguous usable runs (`2024-06-22→2026-02-04`, `2026-02-06→2026-05-05`, OOS ≈ April 2026).
+Purged+embargoed CPCV already drops label-span-overlapping bars at gap/seam boundaries, so a
+warn-heavy seam day (e.g. `2025-01-07`) loses its boundary bars to embargo regardless; trade
+validation gates the *interior* of each usable run.
+
+## 9. Tests (future implementation)
+
+All in `tests/test_trade_checks.py` against `ingest/trade_checks.py` — **pure, no vendor I/O**.
+Synthetic frames come from a module-level helper (not a fixture), matching the repo pattern
+(`_lake_df`, `make_matrix`, `simple_world`) and the existing synthetic-trades frame in
+`tests/test_ingest.py`:
+
+```python
+import numpy as np, pandas as pd
+
+def _trades_df(n=1000, start="2025-06-01T00:00:00Z", step_ms=80, *, presorted=True,
+               null_origin=0.0, dup_ids=0, bad_price=False, bad_size=False, empty_hours=()):
+    """Deterministic synthetic Crypto Lake `trades` frame (loaded/renamed columns)."""
+    base = pd.Timestamp(start)
+    origin = base + pd.to_timedelta(np.arange(n) * step_ms, unit="ms")
+    if not presorted:                          # Coinbase shape: shuffle the file order
+        origin = origin[np.random.RandomState(0).permutation(n)]
+    df = pd.DataFrame({
+        "origin_time": origin,
+        "received_time": origin + pd.to_timedelta(160, unit="ms"),
+        "price": np.full(n, 60000.0),
+        "quantity": np.full(n, 0.01),
+        "side": np.where(np.arange(n) % 2, "buy", "sell"),
+        "trade_id": np.arange(n, dtype="int64"),
+    })
+    if null_origin: df.loc[df.index[: int(n*null_origin)], "origin_time"] = pd.Timestamp("1970-01-01")
+    if dup_ids:     df.loc[df.index[:dup_ids], "trade_id"] = df["trade_id"].iloc[0]
+    if bad_price:   df.loc[df.index[0], "price"] = 0.0
+    if bad_size:    df.loc[df.index[0], "quantity"] = -1.0
+    for h in empty_hours: df = df[df["origin_time"].dt.hour != h]
+    return df.reset_index(drop=True)
+```
+
+Required test cases (TDD — write each failing test first):
+
+1. **Missing timestamp field** — a frame with no `origin_time`/`timestamp` column →
+   `origin_time_column_missing`, status `fail`.
+2. **`origin_time` null fallback** — `null_origin=0.02` with `received_time` present → engine clock
+   uses `received_time` for those rows, `received_time_fallback_used`, status `warn`; with
+   `received_time` also null → `received_time_fallback_unavailable`, status `fail`.
+3. **Non-monotonic → repaired by sort** — `presorted=False` frame becomes `monotonic_after_sort=True`
+   → `pass` (proves the Coinbase sort works); a frame with a `NaT` engine clock that the sort cannot
+   repair → `nonmonotonic_after_sort`, `fail`.
+4. **Duplicate trade IDs** — `dup_ids=5` → `dup_trade_id_count == 5`, `duplicate_trade_id` warn.
+5. **Invalid price / size** — `bad_price=True` → `price_out_of_range` fail; `bad_size=True` →
+   `size_nonpositive` fail; a zero-size row → `size_nonpositive` fail.
+6. **Sparse / missing hour** — `empty_hours=(3,4)` → `missing_hour_count == 2`, `missing_hour` warn;
+   a thinned hour → `sparse_hour`.
+7. **Duplicate-timestamp cluster** — many rows sharing one `origin_time` above `dup_ts_cluster_warn`
+   → `duplicate_timestamp_cluster` warn; a small burst does not trip it.
+8. **Inter-arrival gap** — inject a 200 s gap → `interarrival_max_s ≈ 200`, `interarrival_gap_excess`
+   warn.
+9. **Calendar crossing** — write a synthetic `usable_calendar.json` to `tmp_path` (the
+   `_calendar_dict`/`_write_calendar` pattern); a fill day (`coinbase_fill_days` with
+   `trades: true`) with a missing Lake frame → `status "coinapi_fill"`; an excluded day →
+   `"excluded"`; both are excluded from `gate.blocking_failures`.
+10. **Report JSON stability** — `build_report([...])` → `write_report` to `tmp_path`; assert
+    `"NaN" not in txt and "Infinity" not in txt`, `json.loads(txt)` round-trips, and **byte-for-byte
+    determinism across two runs** (the `generated_utc` timestamp is the only exempted field — pass a
+    fixed timestamp in tests); every reason code / venue present in `summary` even at zero count
+    (stable schema, the `for c in CLASSES: assert c in ...` pattern).
+11. **Malformed-input validation** — a malformed calendar entry (`coinbase_fill_days` value not a
+    `{book,trades}` dict) → `pytest.raises(ValueError, match="coinbase_fill_days")` (the parametrized
+    malformed-input pattern).
+12. **GB gate** — `estimate_trades_gb` + `quota_decision`: a plan over the auto cap without
+    `--allow-broad` → `reason == "exceeds_auto_cap"`; over headroom → `"quota_headroom"`; within →
+    `"ok"` (no vendor call; pure).
+13. **No live vendor calls** — an import-side-effect guard test (like `test_verify_script.py`):
+    importing `ingest.validate_trade_feeds` does not touch Lake (`main()` guarded), and a
+    `monkeypatch` that replaces the load seam with a raiser asserts the synthetic path never calls
+    `lakeapi.load_data`.
+
+## 10. Rollout
+
+- **Phase 1 — dry-run / sample day selection (first implementation branch).** Build
+  `ingest/trade_checks.py` (thresholds, reason codes, metric functions, `classify`,
+  `estimate_trades_gb`, `quota_decision`, `build_report`/`write_report`/`_json_safe`) and
+  `ingest/validate_trade_feeds.py` (CLI, day selection, calendar crossing, `--dry-run`). Ship the
+  full synthetic test suite (§9). **No vendor calls** — `--dry-run` prints the plan; CI runs the pure
+  tests only.
+- **Phase 2 — bounded live validation (ask-first).** Run the **safe small default sample** (4 days ×
+  3 venues, ≈1 GB) once against Crypto Lake, write `trade_feed_validation.json`, and record measured
+  per-venue `trades_gb_per_day` to replace the provisional estimates. `AGENTS.md`: live/vendor pulls
+  only when the user explicitly asks; document GB used and that the report artifact is git-ignored.
+  Optionally widen to the full regime cohort (still bounded, still `--allow-broad`-gated).
+- **Phase 3 — integrate into usable-calendar / build manifest.** Feed each `(venue, day)` verdict
+  into the calendar/build provenance: a required day failing trade validation for a venue becomes a
+  new exclusion reason (`trade_validation_fail:<venue>`) or a fill route; the feature/build manifest
+  records the trade-validation report path + `generated_utc` as a source artifact (the
+  feature-manifest `sources` list already accepts extra keys).
+- **Phase 4 — enforce in the bar builder.** The bar builder refuses to emit bars for a `(venue,
+  span)` unless every required day passed trade validation (or is a validated CoinAPI fill), reusing
+  `summary.gate` as the gate artifact. CoinAPI-fill-day trade validation lands here only after the
+  §5a backfill gate unlocks.
+
+## Implementation Tasks
+
+Follow-up branches (this branch ships only the doc + the §11 `docs/data.md` edit). Each is TDD;
+commit per task.
+
+### Task 1 (Phase 1a): pure checks module + tests
+
+- Create `ingest/trade_checks.py`: `TradeThresholds` (frozen dataclass + `as_dict()`), reason-code
+  constants (§6), the per-metric functions (§4), `classify(metrics, thresholds, calendar_state) ->
+  (status, reason_codes)`, `validate_trade_frame(df, venue, day, thresholds, calendar_state) ->
+  dict`, `estimate_trades_gb`, `quota_decision` (mirroring `run_coinbase_quality_map`),
+  `build_report`, `write_report`, `_json_safe`. Pandas/numpy only — **no lakeapi/boto3 imports**.
+- Create `tests/test_trade_checks.py`: the §9 cases (1–12), `_trades_df` helper, `tmp_path` calendar
+  fixtures, strict-JSON + byte-determinism. TDD (tests first).
+
+### Task 2 (Phase 1b): Lake CLI wrapper + guard test
+
+- Create `ingest/validate_trade_feeds.py`: argparse (§7), day selection (§3), `lake_session` reuse,
+  the `load_data(table="trades", …)` call per `(venue, day)`, calendar crossing, the GB gate
+  (`--dry-run`/`--allow-broad`/exit 5), `main(argv)` guarded under `if __name__ == "__main__"`, exit
+  codes (§7).
+- Add §9 case 13 (import-side-effect guard + load-seam monkeypatch) to `tests/test_trade_checks.py`
+  (or a sibling `tests/test_validate_trade_feeds.py`).
+
+### Task 3 (Phase 2): bounded live run + estimate refinement — **ask-first**
+
+- Run the default sample once; commit no data/report; update `meta.trades_gb_per_day` defaults and
+  §5b prose with measured multi-day results; annotate the §10 item (still open until Phases 3–4).
+
+### Task 4 (Phase 3): calendar / manifest integration
+
+- Wire verdicts into the usable calendar (new `trade_validation_fail:<venue>` reason) and record the
+  report as a build-manifest source artifact.
+
+### Task 5 (Phase 4): bar-builder enforcement (with the bar builder)
+
+- Gate bar emission on `summary.gate`; CoinAPI-fill-day trade validation only after the §5a backfill
+  gate unlocks.
+
+## Validation Commands
+
+This branch is **docs-only** — no code, so no pytest:
+
+```bash
+git diff --check          # no whitespace/conflict errors
+git status -sb            # only the plan doc + the docs/data.md pointer edit
+```
+
+(Interpreter note for the follow-up branches: `.venv/bin/python -m pytest -q tests/test_trade_checks.py`;
+agent worktrees have no `.venv` — use `/home/aaron/jepa-btc-forecasting/.venv/bin/python`.)
+
+## PR Requirements
+
+- Title: `docs: plan trade validation breadth`.
+- Body: **Summary**; **Scope** (docs-only; the two-file split and rollout phases); **No vendor/API
+  calls run**; **Validation** (`git diff --check`, `git status -sb`); **Risks and assumptions**
+  (provisional `trades_gb_per_day` estimates until Phase 2 measures them; CoinAPI-fill-day trade
+  validation deferred behind the still-locked backfill gate; thresholds are first-pass and
+  Phase-2-tunable); **Follow-ups** (Tasks 1–5).
+- Commit only docs — no data, reports, parquet/csv.gz, caches, or secrets. **CoinAPI backfill status:
+  still LOCKED.**
+
+## Review Checklist
+
+- [ ] Venue/product identifiers match `ingest/verify_trades_and_calendar.py` verbatim
+      (`BINANCE_FUTURES`/`BTC-USDT-PERP`, `BINANCE`/`BTC-USDT`, `COINBASE`/`BTC-USD`, table `trades`).
+- [ ] Engine clock = `origin_time` with an explicit `received_time` fallback and a stable
+      sort-by-clock-then-file-order rule; Coinbase sort is asserted to repair monotonicity.
+- [ ] Every JSON-facing string (statuses, reason codes) is a stable module constant; report is strict
+      JSON (`allow_nan=False`, `jq empty` passes) and byte-deterministic apart from `generated_utc`.
+- [ ] Fail vs. warn split is justified per code; CoinAPI-fill days route (not fail) and stay behind
+      the locked backfill gate; excluded days are out of scope.
+- [ ] No vendor I/O in the pure module or its tests; `--dry-run` makes no Lake calls; the GB gate
+      reuses the `run_coinbase_quality_map` quota pattern (exit 5).
+- [ ] Day selection has no broad default; the no-arg default sample stays under the auto cap.
+- [ ] `docs/data.md` §10 item is annotated (pointer only), **not** marked done; no unrelated
+      Coinbase quality-map sections rewritten.

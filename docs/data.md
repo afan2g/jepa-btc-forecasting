@@ -898,6 +898,10 @@ Hard gates before the hybrid Coinbase plan is production-validated:
 
 Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
+      Plan: `docs/superpowers/plans/2026-07-02-trade-validation-breadth-plan.md` (validator
+      `ingest/validate_trade_feeds.py` + pure `ingest/trade_checks.py`; per-day/per-venue
+      pass/warn/fail JSON report, timestamp/sort policy, gating + 4-phase rollout). Docs-only so far;
+      no vendor calls run — item stays open until the bounded live run + bar-builder enforcement land.
 - [x] **Within-timestamp ordering for CoinAPI** — resolved 2026-07-02: file/`seq` order is
       canonical, ties break by original row index, `order_id` is never an ordering key
       (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,
