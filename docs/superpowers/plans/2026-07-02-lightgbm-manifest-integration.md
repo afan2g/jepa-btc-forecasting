@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.12, pandas/numpy, lightgbm + scikit-learn, pytest. No new dependencies.
 
+**Interpreter:** commands use the repo-convention `.venv/bin/python`, run from the repo root. If your checkout has no `.venv` (local agent worktrees share the main checkout's venv), substitute that venv's absolute `bin/python`; the commands are otherwise unchanged.
+
 **Scope:** Consumption side only. Producing the real `data/processed/feature_manifest.json` belongs to the bars (E0.3) / labels (E0.4) build jobs and is out of scope here (see Non-goals).
 
 ---
@@ -138,7 +140,7 @@ def test_leaky_feature_names_public_helper():
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_manifest.py -k public_helper -v`
+Run: `.venv/bin/python -m pytest tests/test_manifest.py -k public_helper -v`
 Expected: **collection error** (not a FAILED test) with `ImportError: cannot import name 'leaky_feature_names'` — the top-of-module import takes the whole file down, so `-k` cannot deselect around it; nonzero exit is the signal.
 
 - [ ] **Step 3: Implement**
@@ -155,7 +157,7 @@ def leaky_feature_names(cols) -> list[str]:
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_manifest.py -k public_helper -v`
+Run: `.venv/bin/python -m pytest tests/test_manifest.py -k public_helper -v`
 Expected: 1 passed
 
 - [ ] **Step 5: Commit**
@@ -193,7 +195,7 @@ def test_make_manifest_matches_make_matrix_frame():
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_synthetic.py -v`
+Run: `.venv/bin/python -m pytest tests/test_synthetic.py -v`
 Expected: **collection error** with `ImportError: cannot import name 'make_manifest'`
 
 - [ ] **Step 3: Implement**
@@ -237,7 +239,7 @@ def make_manifest(feature_cols, max_lookback_ns, *, gate=None, **over):
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_synthetic.py -v`
+Run: `.venv/bin/python -m pytest tests/test_synthetic.py -v`
 Expected: 2 passed
 
 - [ ] **Step 5: Commit**
@@ -357,7 +359,7 @@ def test_legacy_manifest_missing_keys_fail_with_contract_error():
 
 - [ ] **Step 2: Run to verify the new tests fail**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_runner.py -v`
+Run: `.venv/bin/python -m pytest tests/test_runner.py -v`
 Expected: the 3 `resolve_gate` tests and `test_legacy_manifest_dict_still_runs` PASS; the 4 v1 tests fail (`KeyError: 'manifest'` / no raise), `test_legacy_manifest_rejects_leaky_feature_names` and `test_legacy_manifest_missing_keys_fail_with_contract_error` fail (no raise / KeyError instead of ValueError).
 
 - [ ] **Step 3: Implement**
@@ -449,7 +451,7 @@ def run_from_manifest(matrix: pd.DataFrame, manifest: dict) -> dict:
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_runner.py tests/test_manifest.py -v`
+Run: `.venv/bin/python -m pytest tests/test_runner.py tests/test_manifest.py -v`
 Expected: `tests/test_runner.py` 10 passed; every `tests/test_manifest.py` test still passes (in particular `test_run_from_manifest_accepts_valid_versioned_manifest` — its `_manifest` defaults declare exactly `["y_fwd_bps", "label"]` and one `"10s"` horizon — and `test_run_from_manifest_categorical_horizon_with_unused_categories`, since `.unique()` on a categorical returns observed values only, so the coverage check sees `{"10s"} - {"10s"} = ∅`).
 
 - [ ] **Step 5: Commit**
@@ -530,7 +532,7 @@ def test_nullable_or_datetime_timing_fails_closed():
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_matrix.py -k "duplicate or numeric or nan or fails_closed" -v`
+Run: `.venv/bin/python -m pytest tests/test_matrix.py -k "duplicate or numeric or nan or fails_closed" -v`
 Expected: 5 FAILED (no raise, or a different error than the matched message). Note: plain `-k rejected` would over-match — `test_label_out_of_domain_rejected` and `test_negative_costs_rejected` already exist.
 
 - [ ] **Step 3: Implement**
@@ -616,7 +618,7 @@ def validate_matrix(df: pd.DataFrame, feature_cols: list[str]) -> None:
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_matrix.py tests/test_study.py tests/test_manifest.py -v`
+Run: `.venv/bin/python -m pytest tests/test_matrix.py tests/test_study.py tests/test_manifest.py -v`
 Expected: all pass (`tests/test_matrix.py` = 8 existing + 5 new = 13 passed; adjust the total if the pre-existing count has drifted — the 5 new names must all pass). `test_study.py`/`test_manifest.py` confirm no synthetic fixture trips the new screens.
 
 - [ ] **Step 5: Commit**
@@ -662,7 +664,7 @@ def test_feature_matrix_follows_manifest_order_not_frame_order():
 
 - [ ] **Step 2: Run to verify the first fails**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_baseline.py -k "duplicate or order" -v`
+Run: `.venv/bin/python -m pytest tests/test_baseline.py -k "duplicate or order" -v`
 Expected: `test_evaluate_config_duplicate_guards` FAILED (no raise); the order pin passes (it documents existing behavior).
 
 - [ ] **Step 3: Implement**
@@ -704,7 +706,7 @@ In `_fit_predict`, add `random_state=0` to both LightGBM constructors:
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_baseline.py tests/test_gate_synthetic.py -v`
+Run: `.venv/bin/python -m pytest tests/test_baseline.py tests/test_gate_synthetic.py -v`
 Expected: `tests/test_baseline.py` = 6 existing + 2 new = 8 passed; `tests/test_gate_synthetic.py` 2 passed (PASS on planted signal / FAIL on noise unchanged — confirms `random_state=0` did not alter results).
 
 - [ ] **Step 5: Commit**
@@ -769,13 +771,13 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Syntax check + synthetic smoke**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m py_compile scripts/run_baseline.py`
+Run: `.venv/bin/python -m py_compile scripts/run_baseline.py`
 Expected: exit 0, no output.
 
 Run (end-to-end smoke on a temp synthetic build; **run from the worktree root** — the heredoc uses relative paths):
 
 ```bash
-/home/aaron/jepa-btc-forecasting/.venv/bin/python - <<'EOF'
+.venv/bin/python - <<'EOF'
 import json, subprocess, sys, tempfile, pathlib
 sys.path.insert(0, ".")
 from eval.synthetic import make_matrix, make_manifest
@@ -798,7 +800,7 @@ Expected: prints `manifest: synthetic / seeded (5 features)`, the resolved gate,
 
 Resource rule: first check `ps -o pid,etimes,pcpu,pmem,args -C python -C pytest`; skip (and note in the PR) if another agent is running a full suite or heavy data job.
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest -q`
 Expected: all pass; integration tests (`test_baseline_integration.py`, `test_fixture_integration.py`, and other data-gated tests) skip without real data.
 
 - [ ] **Step 4: Commit**
@@ -847,7 +849,7 @@ def test_real_matrix_runs_through_manifest():
 
 - [ ] **Step 2: Verify it still skips cleanly**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_baseline_integration.py -v`
+Run: `.venv/bin/python -m pytest tests/test_baseline_integration.py -v`
 Expected: 1 skipped (data/processed absent in agent worktrees).
 
 - [ ] **Step 3: Commit**
@@ -895,7 +897,7 @@ for unsupervised pretraining; everything else still applies).
 Run: `git diff --check`
 Expected: no output.
 
-Resource rule as in Task 6 Step 3, then run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest -q`
+Resource rule as in Task 6 Step 3, then run: `.venv/bin/python -m pytest -q`
 Expected: all pass; data-gated integration tests skip.
 
 - [ ] **Step 3: Commit**
@@ -932,7 +934,7 @@ def test_run_from_manifest_requires_versioned_manifest():
         run_from_manifest(m, man)
 ```
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_runner.py -v`
+Run: `.venv/bin/python -m pytest tests/test_runner.py -v`
 Expected: `test_run_from_manifest_requires_versioned_manifest` FAILED (legacy dict still runs); other 7 pass.
 
 - [ ] **Step 2: Implement**
@@ -989,7 +991,7 @@ The guard message keeps the literal `manifest_version`, so `tests/test_manifest.
 
 - [ ] **Step 3: Run to verify**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest tests/test_runner.py tests/test_manifest.py -v`
+Run: `.venv/bin/python -m pytest tests/test_runner.py tests/test_manifest.py -v`
 Expected: `tests/test_runner.py` 8 passed; `tests/test_manifest.py` all pass.
 
 - [ ] **Step 4: Sync docs + commit**
@@ -1009,7 +1011,7 @@ git commit -m "feat!: run_from_manifest requires a v1 feature manifest (legacy d
 
 - [ ] **Step 5: Full suite (resource rule: check `ps -o pid,etimes,pcpu,pmem,args -C python -C pytest` first; skip if another agent runs a heavy job)**
 
-Run: `/home/aaron/jepa-btc-forecasting/.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest -q`
 Expected: all pass, `tests/test_baseline_integration.py` skipped unless real data exists.
 
 ---
