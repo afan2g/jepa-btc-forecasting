@@ -223,8 +223,11 @@ def coinapi_fill_decision(classification: str, reasons) -> dict:
     fill manifests consume, so the doc-level fill policy never needs manual reinterpretation of
     reason strings (docs/data.md §5a-QualityMap "CoinAPI cross-validation").
 
-    Returns `{"needs_fill": True|False|None, "why": <code>}`. `needs_fill=None` means NO VERDICT —
-    such days are unresolved, not clean; a fill manifest must surface them, never silently drop them.
+    Returns `{"needs_fill": True|False|None, "why": <code>}`. `needs_fill=None` means the day has no
+    fill decision — either `why="no_verdict"` (an unresolved `inconclusive` day: a fill manifest must
+    surface it, never silently drop it) or `why="excluded_not_in_scope"` (out of the usable calendar
+    for a non-Coinbase reason — not a Coinbase fill candidate at all; `build_report` buckets the two
+    separately).
 
     `inconclusive` days carrying `seed_accepted_but_source_unreliable` map to `needs_fill=True` per
     the 2026-07-01 CoinAPI cross-validation: on 2 of the 4 such days (the extremes of the observed
@@ -409,15 +412,24 @@ def build_report(per_day_results, *, meta: dict) -> dict:
     """Aggregate per-day results into the report: stable per-class counts + day lists + the rows.
     Every per-day record is stamped with its machine-readable `coinapi_fill` decision
     (`coinapi_fill_decision`), and the summary carries the fill day-lists — the contract a fill
-    manifest reads, so no consumer re-parses reason strings."""
+    manifest reads, so no consumer re-parses reason strings. `no_verdict` holds only genuinely
+    unresolved days; calendar-excluded days go to the separate `not_in_scope` list so out-of-scope
+    (e.g. Binance-gap) days are never mistaken for unresolved Coinbase fills."""
     days = [{**r, "coinapi_fill": coinapi_fill_decision(r["classification"], r.get("reasons"))}
             for r in per_day_results]
     by_class: dict[str, list] = {c: [] for c in CLASSES}
-    fill: dict[str, list] = {"needs_fill": [], "no_fill": [], "no_verdict": []}
+    fill: dict[str, list] = {"needs_fill": [], "no_fill": [], "no_verdict": [], "not_in_scope": []}
     for r in days:
         by_class.setdefault(r["classification"], []).append(r["day"])
         nf = r["coinapi_fill"]["needs_fill"]
-        fill["needs_fill" if nf else ("no_fill" if nf is False else "no_verdict")].append(r["day"])
+        if nf:
+            key = "needs_fill"
+        elif nf is False:
+            key = "no_fill"
+        else:
+            key = ("not_in_scope" if r["coinapi_fill"]["why"] == "excluded_not_in_scope"
+                   else "no_verdict")
+        fill[key].append(r["day"])
     counts = {c: len(by_class[c]) for c in by_class}
     return {"meta": meta,
             "summary": {"n_days": len(days), "counts": counts, "by_class": by_class,

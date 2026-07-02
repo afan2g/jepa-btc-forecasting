@@ -345,6 +345,7 @@ def test_build_report_stamps_coinapi_fill_per_day_and_summary():
         {"day": "2025-03-03", "classification": qm.INCONCLUSIVE, "reasons": ["no_seed_snapshots"]},
         {"day": "2024-12-05", "classification": qm.MISSING_NEEDS_COINAPI,
          "reasons": ["lake_book_delta_v2_absent"]},
+        {"day": "2025-02-02", "classification": qm.EXCLUDED, "reasons": ["binance_gap"]},
     ]
     rep = qm.build_report(days, meta={"k": 10})
     stamped = {r["day"]: r["coinapi_fill"] for r in rep["days"]}
@@ -354,8 +355,10 @@ def test_build_report_stamps_coinapi_fill_per_day_and_summary():
     assert stamped["2025-06-01"]["needs_fill"] is False
     fill = rep["summary"]["coinapi_fill"]
     assert fill["needs_fill"] == ["2026-04-01", "2024-12-05"]
-    assert fill["no_verdict"] == ["2025-03-03"]
+    assert fill["no_verdict"] == ["2025-03-03"]          # unresolved ONLY — no excluded days here
     assert fill["no_fill"] == ["2025-06-01"]
+    # calendar-excluded days are out of Coinbase-fill scope, NOT unresolved: separate bucket
+    assert fill["not_in_scope"] == ["2025-02-02"]
     # input records are not mutated (build_report stamps copies)
     assert "coinapi_fill" not in days[0]
 

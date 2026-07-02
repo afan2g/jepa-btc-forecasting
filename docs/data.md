@@ -425,7 +425,9 @@ Each report record is also stamped with a **machine-readable `coinapi_fill` deci
 (`{"needs_fill": true|false|null, "why": …}`, summary day-lists under `summary.coinapi_fill`) so fill
 manifests never re-parse reason strings: `missing_needs_coinapi`/`lake_present_degraded` → fill;
 `inconclusive` via the crossed-seed-source bar → fill (the provisional 2026-07-01 cross-validation
-policy, see below); other `inconclusive` → `null` (unresolved — must be surfaced, never dropped).
+policy, see below); other `inconclusive` → `null` (unresolved — surfaced in the summary's
+`no_verdict` list, never dropped); calendar-`excluded` days → `null` too but bucketed in a separate
+`not_in_scope` list, so out-of-scope (e.g. Binance-gap) days are never read as unresolved fills.
 
 **Quota-aware (docs §2.1/§6/§8).** It prints `lakeapi.used_data(sess)` before/after, estimates the
 request from measured per-day sizes (`book_delta_v2` ~0.30 GB/day from §6; the `book` 20-level snapshot
