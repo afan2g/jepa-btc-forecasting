@@ -92,9 +92,14 @@ For every selected `(venue, day)` the validator answers, with machine-readable r
    clock, positive notional, and an inter-arrival distribution that supports the E0.3 gate ("median
    active-regime bar ≤ 2 s"). This is the summary judgement the bar builder gates on (§8).
 
-Every result is either **pass**, **warn** (usable but surfaced), or **fail** (blocking) — plus the
-structural states **empty**, **missing**, **load_error**, and the routed states **coinapi_fill** and
-**excluded** (§8).
+Every result carries exactly one `status` from a **closed set of five**: **pass**, **warn** (usable
+but surfaced), **fail** (blocking), and the two routed states **coinapi_fill** and **excluded**.
+Structural problems — `empty_partition`, `missing_partition`, `load_error` — are **reason codes, not
+statuses**: on a required non-fill day they resolve to `status: "fail"` (so they always land in
+`summary.gate.blocking_failures`); a clean "no partition" on a calendar `trades`-fill day resolves to
+`coinapi_fill`, and any day in the excluded calendar resolves to `excluded`. Keeping `fail` the single
+blocking status means a consumer that keys off `status == "fail"` / `summary.counts.fail` can never
+let a missing/empty/load-error partition escape the gate (§8).
 
 ## 2. Venues & products
 
@@ -288,8 +293,7 @@ below are illustrative (schema shape, not measured) — the live run fills them 
   },
   "summary": {
     "n_days": 5, "n_venues": 3,
-    "counts": { "pass": 11, "warn": 3, "fail": 0, "coinapi_fill": 1, "excluded": 0,
-                "empty": 0, "missing": 0, "load_error": 0 },
+    "counts": { "pass": 11, "warn": 3, "fail": 0, "coinapi_fill": 1, "excluded": 0 },
     "fail_day_venues": [],
     "warn_day_venues": [
       {"day": "2024-08-05", "venue": "coinbase", "reason_codes": ["sparse_hour"]},
@@ -434,10 +438,13 @@ bar builder for that `(venue, span)` until fixed, filled, or the day is excluded
 mirroring the "never silently dropped" discipline (a fail is surfaced in
 `summary.gate.blocking_failures`, never quietly skipped).
 
-**Fail (blocking)** — these break the bar clock or its inputs and cannot be warn-only:
+**Fail (blocking)** — each is a reason code that sets `status: "fail"` (the single blocking status,
+§1) on a required non-fill day, so it always appears in `summary.gate.blocking_failures`:
 
-- `missing_partition` / `empty_partition` on a required (non-fill) day
-- `load_error`, `origin_time_column_missing`
+- `missing_partition` / `empty_partition` on a required (non-fill) day (a clean "no partition" on a
+  calendar `trades`-fill day routes to `coinapi_fill` instead; on an excluded day → `excluded`)
+- `load_error` (an unexpected load exception — always `fail`, distinct from an expected
+  "no files" → `missing_partition`), `origin_time_column_missing`
 - `origin_time_null_fraction_high` — `origin_time_null_frac > origin_time_null_max`, **on its own**
   (too much of the bar clock is on receive-time even though every recoverable row was substituted;
   per §5 the threshold is a hard-fail bound, not merely a warn)
@@ -491,9 +498,13 @@ Synthetic frames come from a module-level helper (not a fixture), matching the r
 ```python
 import numpy as np, pandas as pd
 
-SENTINEL = pd.Timestamp("1970-01-01")          # < 2015-01-01 → treated as null (§4/§5)
+# lakeapi returns origin_time/received_time as tz-NAIVE datetime64[ns] (§4), and the validator's
+# null sentinel `< pd.Timestamp("2015-01-01")` is tz-naive too. Keep every synthetic timestamp naive
+# (no "Z"/tz on `start`) — a tz-aware column vs. the naive cutoff raises "Cannot compare tz-naive and
+# tz-aware", and assigning the naive SENTINEL into a tz-aware column coerces it to object.
+SENTINEL = pd.Timestamp("1970-01-01")          # < 2015-01-01 → treated as null (§4/§5), tz-naive
 
-def _trades_df(n=1000, start="2025-06-01T00:00:00Z", step_ms=80, *, presorted=True,
+def _trades_df(n=1000, start="2025-06-01T00:00:00", step_ms=80, *, presorted=True,
                full_day=False, null_origin=0.0, null_received=0.0, dup_ids=0,
                bad_price=False, bad_size=False, spike_price=False, empty_hours=()):
     """Deterministic synthetic Crypto Lake `trades` frame (loaded/renamed columns).
@@ -530,7 +541,16 @@ def _trades_df(n=1000, start="2025-06-01T00:00:00Z", step_ms=80, *, presorted=Tr
     return df.reset_index(drop=True)
 ```
 
-Required test cases (TDD — write each failing test first):
+Required test cases (TDD — write each failing test first).
+
+**Test at the right altitude (avoids the coverage-gate footgun).** Because `missing_hours_excess` is
+now blocking (§8), a short (`full_day=False`, ~80 s) fixture has 23 empty hours and would fail *any*
+whole-day `classify(...)` regardless of what the case targets. So each per-dimension case (1–5b, 7, 8)
+asserts the **isolated pure check/metric function** it names (`dup_trade_ids(df)`,
+`price_checks(df)`, `interarrival(df)`, …) on a short frame — never the whole-day `classify`. The
+hour-coverage case (6) and the end-to-end `classify`/report cases (9, 10) use a **full-day frame with
+≥ `sparse_hour_min_rows` rows per hour** (e.g. `_trades_df(n=2400, full_day=True)` → ~100/hour) so a
+clean day classifies `pass`, not a coverage `fail`.
 
 1. **Missing timestamp field** — a frame with no `origin_time`/`timestamp` column →
    `origin_time_column_missing`, status `fail`.
@@ -544,9 +564,10 @@ Required test cases (TDD — write each failing test first):
      off-exchange-time day and weakening the gate).
    - **Unrecoverable fail:** `null_origin=0.005, null_received=0.005` (the same leading rows null in
      both) → `received_time_fallback_unavailable`, status `fail`, at any fraction.
-3. **Non-monotonic → repaired by sort** — `presorted=False` frame becomes `monotonic_after_sort=True`
-   → `pass` (proves the Coinbase sort works); a frame with a `NaT` engine clock that the sort cannot
-   repair → `nonmonotonic_after_sort`, `fail`.
+3. **Non-monotonic → repaired by sort** (asserts `monotonic_after_sort(df)` in isolation, so the
+   short fixture's hour coverage is irrelevant) — a `presorted=False` frame yields
+   `monotonic_after_sort == True` (proves the Coinbase sort works); a frame with a `NaT` engine clock
+   the sort cannot repair → `monotonic_after_sort == False` → `nonmonotonic_after_sort`, `fail`.
 4. **Duplicate trade IDs** — `dup_ids=5` (the helper makes the first 6 rows share one id → exactly 5
    extra duplicates) → `dup_trade_id_count == 5`, `duplicate_trade_id` warn.
 5. **Invalid price / size** — `bad_price=True` → `price_out_of_range` fail; `bad_size=True` →
