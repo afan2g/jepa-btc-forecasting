@@ -127,12 +127,14 @@ def load_calendar(path: str) -> dict:
         if field not in cal:
             raise PlanError(f"usable calendar {path} is missing required field '{field}'")
         _require_days(field, cal[field], allow_dict=allow_dict)
-    # fill VALUES drive the book-gap/trade-only split — a corrupted entry must fail here, not
-    # crash later in select_days
+    # fill VALUES drive the book-gap vs trade-only (BATCHED) split off `book is True` — flags must
+    # be strict bools, or a corrupted entry (e.g. "book": "true", or missing flags) would silently
+    # route a book-gap day into a Lake download batch instead of failing here
     for d, v in cal["coinbase_fill_days"].items():
-        if not isinstance(v, dict):
+        if not isinstance(v, dict) or not all(isinstance(v.get(k), bool)
+                                              for k in ("book", "trades")):
             raise PlanError(f"usable calendar field 'coinbase_fill_days' entry {d} must be a "
-                            f"{{'book': bool, 'trades': bool}} dict, got {type(v).__name__}")
+                            f"{{'book': bool, 'trades': bool}} dict, got {v!r}")
     return cal
 
 

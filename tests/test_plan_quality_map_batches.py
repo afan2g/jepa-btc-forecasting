@@ -167,9 +167,17 @@ def test_invalid_day_string_fails_clearly(tmp_path):
         pm.load_calendar(_write_calendar(tmp_path, cal))
 
 
-@pytest.mark.parametrize("bad_value", ["book", ["book"], None])
+@pytest.mark.parametrize("bad_value", [
+    "book", ["book"], None,                    # not a dict at all
+    {},                                        # flags missing entirely
+    {"book": True},                            # trades flag missing
+    {"book": "true", "trades": True},          # stringly-typed flag — would batch a book-gap day
+    {"book": True, "trades": 1},               # int is not bool
+])
 def test_malformed_fill_day_value_fails_clearly(tmp_path, bad_value):
-    # a corrupted/hand-edited fill entry must fail at load, not crash later in select_days
+    # a corrupted/hand-edited fill entry must fail at load — select_days keys the book-gap vs
+    # trade-only (batched!) split off `book is True`, so a non-strict-bool flag would silently
+    # emit a book-gap day into a Lake download batch
     cal = _calendar_dict(coinbase_fill_days={"2025-01-10": bad_value})
     with pytest.raises(ValueError, match="coinbase_fill_days"):
         pm.load_calendar(_write_calendar(tmp_path, cal))
