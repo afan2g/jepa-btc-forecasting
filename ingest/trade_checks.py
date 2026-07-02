@@ -563,9 +563,16 @@ def validate_trade_frame(df, venue: str, day: str, thresholds: TradeThresholds =
     route per the calendar (a trades-fill day → `coinapi_fill`, an excluded day → `excluded`,
     otherwise `fail`). A present frame is metric-classified — unless the calendar routes the whole day
     away (fill/excluded days are deferred/out-of-scope; the calendar is authoritative for fill routing,
-    §3). Pure: no vendor I/O."""
+    §3). Pure: no vendor I/O.
+
+    `vendor_source="coinapi"` is the Phase-3b reuse (§8): the frame IS the normalized CoinAPI trade
+    file that REPLACES the missing Lake side, so the `coinapi_fill` route (which means "Lake trades
+    absent → defer") no longer applies — the CoinAPI frame is validated on its own metrics so a
+    pass/warn can CLEAR `coinapi_fill_deferred`. An excluded day stays out of scope regardless."""
     cs = calendar_state if calendar_state is not None else {"route": ROUTE_REQUIRED}
     route = cs.get("route", ROUTE_REQUIRED)
+    if vendor_source == "coinapi" and route == ROUTE_COINAPI_FILL:
+        route = ROUTE_REQUIRED                               # validate the CoinAPI replacement itself
 
     if df is None or len(df) == 0:
         code = MISSING_PARTITION if df is None else EMPTY_PARTITION

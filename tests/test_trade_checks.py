@@ -312,6 +312,24 @@ def test_gate_booleans_reflect_fails_and_deferred_fills():
                for f in g3["blocking_failures"])
 
 
+def test_coinapi_source_fill_day_is_validated_not_re_deferred():
+    # §8: Phase 3b runs the SAME validate_trade_frame on the normalized CoinAPI trade file for a fill
+    # day with vendor_source="coinapi"; a pass/warn is what CLEARS coinapi_fill_deferred. So a clean
+    # CoinAPI fill must classify on its own metrics, NOT route straight back to coinapi_fill (which
+    # would leave bars_ready permanently false for every fill-day span).
+    fill = {"route": tc.ROUTE_COINAPI_FILL}
+    clean = tc.validate_trade_frame(_clean_full_day(), "coinbase", "2024-08-06",
+                                    calendar_state=fill, vendor_source="coinapi")
+    assert clean["status"] == tc.PASS and clean["vendor_source"] == "coinapi"
+    # a bad CoinAPI fill still fails on its merits (surfaced, not silently deferred)
+    bad = tc.validate_trade_frame(_trades_df(n=2400, full_day=True, bad_size=True), "coinbase",
+                                  "2024-08-06", calendar_state=fill, vendor_source="coinapi")
+    assert bad["status"] == tc.FAIL
+    # the Lake-side path on the same fill day still defers (unchanged: the missing Lake side)
+    assert tc.validate_trade_frame(None, "coinbase", "2024-08-06",
+                                   calendar_state=fill)["status"] == tc.COINAPI_FILL
+
+
 # --------------------------------------------------------------------------- 10. report JSON stability
 def test_report_is_strict_json_and_byte_deterministic(tmp_path):
     records = [
