@@ -299,6 +299,9 @@ def price_checks(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS) -> 
         "price_p99_abs_ret": p99,
         "price_max_abs_ret": max_ret,
         "price_out_of_band_count": out_of_band,
+        # NaN/±inf prices are invisible to nanmin/nansum/the robust band, so count them explicitly —
+        # any non-finite price is invalid (§4 row 9 / §6 `price_out_of_range`) and corrupts the clock.
+        "price_nonfinite_count": int(np.sum(~np.isfinite(price))) if len(price) else 0,
     }
 
 
@@ -446,7 +449,8 @@ def classify(metrics: dict, thresholds: TradeThresholds = THRESHOLDS,
 
     # --- price (§4 row 9) ---------------------------------------------------------------------
     pmin = metrics["price_min"]
-    if not (isinstance(pmin, float) and math.isfinite(pmin)) or pmin <= 0.0:
+    if (metrics["price_nonfinite_count"] > 0                  # any NaN/±inf price is invalid
+            or not (isinstance(pmin, float) and math.isfinite(pmin)) or pmin <= 0.0):
         fails.append(PRICE_OUT_OF_RANGE)
     max_ret = metrics["price_max_abs_ret"]
     spike = ((isinstance(max_ret, float) and math.isfinite(max_ret)
@@ -521,6 +525,7 @@ def _empty_metrics() -> dict:
         "dup_trade_id_count": None, "dup_trade_id_frac": None, "trade_id_available": None,
         "price_min": None, "price_max": None, "price_median": None,
         "price_p99_abs_ret": None, "price_max_abs_ret": None, "price_out_of_band_count": None,
+        "price_nonfinite_count": None,
         "size_min": None, "size_max": None, "size_zero_frac": None, "size_neg_frac": None,
         "notional_sum": None, "notional_max_trade": None,
         "interarrival_median_s": None, "interarrival_p95_s": None,

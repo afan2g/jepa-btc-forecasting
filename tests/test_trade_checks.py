@@ -139,6 +139,17 @@ def test_nonpositive_price_fails():
     assert tc.PRICE_OUT_OF_RANGE in res["reason_codes"]
 
 
+def test_nan_price_is_rejected():
+    # §4 row 9 / §6: "any price <= 0 OR NaN" must fail. An isolated NaN among positive prices slips
+    # past np.nanmin/np.nansum and the robust band, so without an explicit non-finite count it would
+    # read `pass` and corrupt the notional bar clock.
+    df = _clean_full_day()
+    df.loc[10, "price"] = np.nan
+    assert tc.price_checks(df)["price_nonfinite_count"] == 1
+    res = tc.validate_trade_frame(df, "coinbase", "2025-06-01")
+    assert res["status"] == tc.FAIL and tc.PRICE_OUT_OF_RANGE in res["reason_codes"]
+
+
 def test_negative_and_zero_size_fail():
     neg = tc.size_checks(_trades_df(n=1000, bad_size=True))
     assert neg["size_neg_frac"] > 0.0
