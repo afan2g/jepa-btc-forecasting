@@ -45,8 +45,10 @@ DEFAULT_GB_PER_DAY = RUNNER_GB_PER_DAY
 
 # Both in-scope instruments are pulled per day (pinned copy of ingest.lake_binance.INSTRUMENTS keys).
 INSTRUMENT_KEYS = ("binance-perp", "binance-spot")
-COMMAND_TEMPLATE = (".venv/bin/python ingest/download_lake_binance.py --instrument {instrument} "
-                    "--start {first} --end {last} --allow-broad")
+# ONE invocation per batch, both instruments, driven by the exact days-file (not a --start/--end
+# range). See batch_command for why this is the quota-safe shape.
+COMMAND_TEMPLATE = (".venv/bin/python ingest/download_lake_binance.py "
+                    "--instrument {instruments} --days-file {days_file} --allow-broad")
 
 DEFAULT_CALENDAR_FIELD = "binance_present_days"
 MANIFEST_NAME = "manifest.json"
@@ -140,12 +142,17 @@ def plan_batches(days: list[str], *, max_gb_per_batch: float, gb_per_day: float)
     return [days[i:i + per_batch] for i in range(0, len(days), per_batch)]
 
 
-def batch_command(first: str, last: str) -> str:
-    """Downloader invocation(s) for a batch — one per instrument over the batch's [first, last]. The
-    `batch_NNN_days.txt` file is the authoritative day list; a sparse (calendar) batch's range may
-    span absent days, which the downloader records as `missing` and skips (no quota)."""
-    return " && ".join(COMMAND_TEMPLATE.format(instrument=k, first=first, last=last)
-                       for k in INSTRUMENT_KEYS)
+def batch_command(days_file: str) -> str:
+    """The single downloader invocation for a batch: BOTH instruments together over the EXACT day
+    list in `days_file`.
+
+    Combining instruments in ONE invocation lets the downloader estimate + gate the COMBINED request
+    once. Per-instrument commands (`perp && spot`) would each gate against only their own estimate;
+    because `used_data` lags ~60 min, the second could miss the first's transfer and a ~250 GB batch
+    could breach the monthly quota/headroom (Codex P1). Passing the authoritative days-file (not
+    --start/--end) runs exactly the batch's days, so a sparse `--calendar` batch never executes the
+    absent days its enclosing range would span and the run matches `est_gb` (Codex P2)."""
+    return COMMAND_TEMPLATE.format(instruments=",".join(INSTRUMENT_KEYS), days_file=days_file)
 
 
 # ----------------------------------------------------------------------------- manifest
@@ -155,14 +162,15 @@ def build_manifest(batches: list[list[str]], *, day_source: str, out_dir: str,
     per_batch, capped = days_per_batch(max_gb_per_batch, gb_per_day)
     batch_rows = []
     for i, days in enumerate(batches, start=1):
+        fname = batch_file_name(i)
         batch_rows.append({
-            "file": batch_file_name(i),
+            "file": fname,
             "n_days": len(days),
             "first_day": days[0],
             "last_day": days[-1],
             "est_gb": round(len(days) * gb_per_day, 2),
             "runner_est_gb": round(len(days) * RUNNER_GB_PER_DAY, 2),
-            "command": batch_command(days[0], days[-1]),
+            "command": batch_command(os.path.join(out_dir, fname)),
         })
     if generated_utc is None:
         generated_utc = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -178,9 +186,11 @@ def build_manifest(batches: list[list[str]], *, day_source: str, out_dir: str,
             "out_dir": out_dir,
             "note": "PLANNING ONLY. No vendor I/O: this plans Lake batches, it does not download "
                     "anything and consumes no quota. Run at most one batch per monthly quota window "
-                    "and re-check lakeapi.used_data before each run. The batch_NNN_days.txt file is "
-                    "the authoritative day list; each command's --start/--end range may span absent "
-                    "days (the downloader records them `missing` and skips them).",
+                    "and re-check lakeapi.used_data before each run. Each command runs BOTH "
+                    "instruments in ONE download_lake_binance.py invocation over the exact "
+                    "batch_NNN_days.txt list (--days-file), so the downloader gates the COMBINED "
+                    "estimate once and executes exactly the listed days — never the absent days a "
+                    "sparse-calendar batch's enclosing range would span.",
         },
         "summary": {
             "n_batch_days": sum(len(b) for b in batches),

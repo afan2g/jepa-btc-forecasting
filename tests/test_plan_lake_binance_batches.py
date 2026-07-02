@@ -146,15 +146,38 @@ def test_manifest_records_capped_flag_when_runner_gate_binds(tmp_path):
     assert m["meta"]["days_per_batch_capped_by_runner_gate"] is True
 
 
-def test_manifest_command_targets_downloader_with_range_and_both_instruments(tmp_path):
+def test_manifest_command_runs_both_instruments_over_the_exact_days_file(tmp_path):
+    # ONE invocation per batch (so the downloader gates the COMBINED estimate once, no per-instrument
+    # used_data-lag gap) driven by the exact days-file (not a --start/--end range that could span
+    # absent calendar days). Guards Codex P1 + P2.
     _, out_dir = _run(tmp_path)
     m = json.loads((pathlib.Path(out_dir) / "manifest.json").read_text())
     cmd0 = m["batches"][0]["command"]
+    days_file = str(pathlib.Path(out_dir) / "batch_001_days.txt")
     assert "ingest/download_lake_binance.py" in cmd0
-    assert "--start 2026-04-01" in cmd0
-    assert "--end 2026-04-02" in cmd0
+    assert "--instrument binance-perp,binance-spot" in cmd0    # one combined-gated invocation
+    assert f"--days-file {days_file}" in cmd0                  # exact day list, not a range
     assert "--allow-broad" in cmd0
-    assert "binance-perp" in cmd0 and "binance-spot" in cmd0  # both instruments per batch
+    assert "--start" not in cmd0 and "--end" not in cmd0       # never a range that spans gaps
+
+
+def test_calendar_batch_command_uses_exact_days_not_enclosing_range(tmp_path):
+    # Codex P2: a sparse calendar batch must execute ONLY its listed days, never the absent days its
+    # first..last range spans. Two days 29 apart in one batch -> command points at the days-file and
+    # est_gb reflects 2 days, not 30.
+    cal = tmp_path / "cal.json"
+    cal.write_text(json.dumps({"binance_present_days": ["2026-04-01", "2026-04-30"]}))
+    out_dir = str(tmp_path / "b")
+    rc = pm.main(["--calendar", str(cal), "--out-dir", out_dir,
+                  "--max-gb-per-batch", "2.5", "--gb-per-day", str(RATE)])
+    assert rc == 0
+    out = pathlib.Path(out_dir)
+    assert (out / "batch_001_days.txt").read_text() == "2026-04-01\n2026-04-30\n"  # exactly 2 days
+    b0 = json.loads((out / "manifest.json").read_text())["batches"][0]
+    assert b0["n_days"] == 2
+    assert b0["est_gb"] == round(2 * RATE, 2)                  # 2 listed days, not the 30-day span
+    assert "batch_001_days.txt" in b0["command"]
+    assert "--start" not in b0["command"] and "--end" not in b0["command"]
 
 
 # --------------------------------------------------------------------------- calendar day source
