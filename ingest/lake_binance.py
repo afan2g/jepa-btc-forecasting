@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 
 # recon.ingest is pandas-only (NO boto3/lakeapi/pyarrow); importing it keeps this module CI-safe
@@ -194,3 +195,95 @@ def resolve_engine_time(*dfs):
         cleaned.append(df[keep].reset_index(drop=True))
         dropped.append(int((~keep).sum()))
     return col, col != "origin_time", cleaned, dropped
+
+
+# ----------------------------------------------------------------------------- schema versions (Req 6)
+RAW_SCHEMA_VERSION = "lake_binance/1"           # normalized raw store (all feeds + `book` seed)
+PROCESSED_SCHEMA_VERSION = {                     # per-output processed store; bump on any schema change
+    "topk_l2":       "topk_l2/1",
+    "trades":        "trades/1",
+    "funding":       "funding/1",
+    "open_interest": "open_interest/1",
+    "liquidations":  "liquidations/1",
+}
+
+
+# ----------------------------------------------------------------------------- quota + broad gate (Req 7/8)
+QUOTA_GB = 300.0            # Crypto Lake individual-plan monthly download cap (docs §2.1/§8)
+DEFAULT_MAX_GB = 5.0        # a request larger than this is a "broad" pull → needs --allow-broad
+DEFAULT_HEADROOM_GB = 10.0  # never plan to use the last N GB of the quota (used_data lags ~60 min)
+BROAD_GATE_EXIT = 4         # exit-code contract (Requirement 8; cf. _common.BACKFILL_GATE_EXIT)
+
+# Conservative per-day Lake footprint by (exchange, symbol) then feed, GB. book_delta_v2 (perp
+# 573.8 MB) is MEASURED (docs §6); the per-feed splits of the ~33 MB perp scalar/event feeds and the
+# 261 MB spot combined total are DERIVED from §6 combined figures; the `book` seed (~180 MB/instrument)
+# is DERIVED from the Coinbase reference (docs §5a-QualityMap) — NOT measured for Binance. Phase 1
+# re-measures every value and updates this table (plan Requirement 7 / Risk Q7). Sum over both
+# instruments (all feeds + seed) ≈ 1.23 GB/day (see full_pull_gb_per_day).
+LAKE_GB_PER_DAY = {
+    ("BINANCE_FUTURES", "BTC-USDT-PERP"): {
+        "book_delta_v2": 0.5738,   # measured (§6: 573.8 MB/day)
+        "trades":        0.025,    # derived (perp trades+funding+OI+liq ≈ 33 MB combined, §6)
+        "funding":       0.001,    # derived
+        "open_interest": 0.004,    # derived
+        "liquidations":  0.003,    # derived (sparse, Risk Q2)
+        "book":          0.18,     # seed product — derived (Coinbase ref ~180 MB/day)
+    },
+    ("BINANCE", "BTC-USDT"): {
+        "book_delta_v2": 0.240,    # derived (spot book_delta_v2+trades ≈ 261 MB combined, §6)
+        "trades":        0.021,    # derived
+        "book":          0.18,     # seed product — derived (Coinbase ref ~180 MB/day)
+    },
+}
+
+
+def estimate_gb(instrument_key: str, feeds, n_days: int) -> float:
+    """Conservative upper-bound Lake download estimate (GB) for `n_days` × `feeds`. Whenever
+    book_delta_v2 is requested the `book` SEED_PRODUCT is ALSO budgeted (it is pulled alongside it,
+    Requirement 1) — added once regardless of how many feeds are listed. Rejects an invalid
+    (instrument, feed) pair before any estimate. Reads the module's own LAKE_GB_PER_DAY constants,
+    so a Phase-1 re-measurement updates the estimate without touching callers."""
+    inst = INSTRUMENTS[instrument_key]
+    per = LAKE_GB_PER_DAY[(inst.exchange, inst.symbol)]
+    feeds = list(feeds)
+    for feed in feeds:
+        validate_feed(instrument_key, feed)
+    per_day = sum(per[feed] for feed in feeds)
+    if "book_delta_v2" in feeds:
+        per_day += per[SEED_PRODUCT]        # `book` seed pulled with book_delta_v2 (Coinbase-mirrored)
+    return float(n_days) * per_day
+
+
+def full_pull_gb_per_day() -> float:
+    """Per-day GB for a FULL pull of every in-scope instrument+feed (+ its `book` seed). The single
+    source of truth the batch planner pins its quota-gate rate to (kept aligned by a contract test)."""
+    return sum(estimate_gb(k, INSTRUMENTS[k].feeds, 1) for k in INSTRUMENTS)
+
+
+def check_broad_gate(*, est_gb: float, max_gb: float, allow_broad: bool, used_gb: float,
+                     quota_gb: float = QUOTA_GB, headroom_gb: float = DEFAULT_HEADROOM_GB) -> None:
+    """Refuse a Lake pull that would breach the monthly quota headroom OR the soft --max-gb cap.
+
+    Two gates (mirrors run_coinbase_quality_map.quota_decision, raised as SystemExit(4) to honor the
+    exit-code contract like _common.check_backfill_gate):
+      (1) HARD — the monthly quota is an external limit: refuse if the pull leaves less than
+          `headroom_gb` of the cap, REGARDLESS of `allow_broad` (used_data lags ~60 min, so keep
+          headroom). `--allow-broad` overrides ONLY the soft cap, never this.
+      (2) SOFT — a pull larger than `max_gb` is "broad" and refused unless `allow_broad`.
+    est_gb <= 0 (nothing to load) is always allowed."""
+    if est_gb <= 0:
+        return
+    remaining = float(quota_gb) - float(used_gb)
+    safe_remaining = remaining - float(headroom_gb)
+    if est_gb > safe_remaining:
+        print(f"REFUSING Lake pull: estimated {est_gb:.2f} GB would breach the monthly quota "
+              f"headroom (used {used_gb:.2f} of {quota_gb:.0f} GB, safe remaining "
+              f"{safe_remaining:.2f} GB) — this refusal holds regardless of --allow-broad "
+              "(used_data lags ~60 min). Re-check lakeapi.used_data or wait for the next quota "
+              "window.", file=sys.stderr)
+        raise SystemExit(BROAD_GATE_EXIT)
+    if est_gb > max_gb and not allow_broad:
+        print(f"REFUSING broad Lake pull: estimated {est_gb:.2f} GB exceeds --max-gb {max_gb:.2f} "
+              "GB. Pass --allow-broad for a deliberate broad pull (still capped by the "
+              f"{quota_gb:.0f} GB/month quota headroom).", file=sys.stderr)
+        raise SystemExit(BROAD_GATE_EXIT)
