@@ -339,9 +339,10 @@ def plan_day_stitch(sample_ts, valid, *, grid_ns: int, seed_accepted: bool, seed
 def full_day_plan(*, day_open_ts: int, day_end_ts: int, grid_ns: int, reason: str,
                   policy: SeamPolicy = DEFAULT_SEAM_POLICY, day: str | None = None) -> DayStitchPlan:
     """A full-day CoinAPI plan constructed WITHOUT per-sample data — for callers that must route a
-    day to full-day fill from day-level evidence alone: the Lake partition is absent, the engine is
-    metrics-only (no frame to mask), or a day-level quality bar failed with no mask-supported
-    narrower fill. Same segment/JSON contract as a `plan_day_stitch` full-day route; `reason`
+    day to full-day fill from day-level evidence alone: the Lake partition is absent, the engine
+    meta carries no per-sample coverage (a stale native build), or a day-level quality bar failed
+    with no mask-supported narrower fill. Same segment/JSON contract as a `plan_day_stitch`
+    full-day route; `reason`
     becomes both `full_day_reason` and the single segment's reason (the caller owns its stability —
     the quality map reuses its day-level codes). Coverage bounds are unknown here, so
     `trusted_lake_*`/`lake_present_*` are None."""

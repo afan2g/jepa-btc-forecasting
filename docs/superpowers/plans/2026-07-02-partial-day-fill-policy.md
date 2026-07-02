@@ -292,7 +292,9 @@ Live/integration (follow-up branches, before unlock):
 18. A trailing-partial and an internal-gap day located from the broad map (if none exist, synthetic
     coverage stands).
 19. Native-engine conformance for the new coverage metrics (present/trusted timestamps, invalid
-    runs) once wired — byte-equal Python vs native.
+    runs) once wired — byte-equal Python vs native. **Done 2026-07-02 (Task 3, synthetic):**
+    native meta == Python meta and identical assess-level plans/quality blocks pinned in
+    `tests/test_native_recon.py` / `tests/test_quality_map.py`.
 20. Report schema tests: extended `quality`/`coinapi_fill` blocks schema-consistent across
     assessed/excluded/load-failed days; `jq empty` passes.
 21. Fill-manifest budget check: every `needs_fill` day (full or partial) appears with a whole-day
@@ -363,9 +365,10 @@ artifact records the policy that produced it.
 - `scripts/run_coinbase_quality_map.py` (follow-up): compute the valid mask on the Python frame path
   (`valid_mask_from_frame`), emit the Q7 `quality` coverage keys and `coinapi_fill` plan block via
   `plan_day_stitch`; extend `_empty_quality_block`; add the `partial_fill` summary list.
-- `recon/reseed.py` + native engine (follow-up): the native path is metrics-only (no frame), so
-  `_replay_seeded`/Rust must emit invalid-run boundaries (the `crossed_sample_ts` precedent shows
-  how) — conformance-pinned before the broad map relies on native coverage metrics.
+- `recon/reseed.py` + native engine (**implemented 2026-07-02**, Task 3): the native path is
+  frame-free, so `_replay_seeded`/Rust emit invalid-run boundaries (the `crossed_sample_ts`
+  precedent) as the compact `meta["coverage"]` block — conformance-pinned before the broad map
+  relies on native coverage metrics.
 - Future stitcher/backfill manifest: consumes `coinapi_fill.fill_segments` + `coinapi.fillable`;
   downloads whole days (backfill gate unchanged); realizes CoinAPI segments by restricting
   `sample_ts` with `size_policy="decrement"`; realizes Lake segments through the existing seeded
@@ -396,9 +399,19 @@ Emit coverage keys + fill plan in the report (Python engine first); schema-consi
 (`coinapi_fill_block` + `_stitch_and_coverage`) with `full_day_plan`/`invalid_runs` helpers in
 `recon/stitch_policy.py`; synthetic tests in `tests/test_quality_map.py`.
 
-### Task 3 (follow-up branch): native coverage metrics
+### Task 3 (follow-up branch): native coverage metrics — **implemented 2026-07-02**
 
-Invalid-run boundaries from the Rust core; conformance tests vs the Python frame path.
+Invalid-run boundaries from the Rust core; conformance tests vs the Python frame path. Landed as a
+compact `meta["coverage"]` block — maximal half-open `[i0, i1)` invalid-run sample-index pairs (the
+shared `valid_mask_from_frame` predicate at `min_levels_per_side=1`) plus presence bound indices —
+emitted by BOTH `recon.reseed._replay_seeded` and the Rust core (`recon_native.META_ABI = 2` rejects
+stale builds at import). `scripts/run_coinbase_quality_map.py` reconstructs the masks
+(`_masks_from_native_coverage`) and feeds the shared `_stitch_and_coverage_masks`, so
+`--engine native` emits the same Q7 coverage keys and partial fill plans as the Python frame path,
+with the conservative full-day fallback kept for coverage-less meta. Conformance pinned in
+`tests/test_native_recon.py` (Python replay coverage == frame-derived mask; native meta == Python
+meta) and `tests/test_quality_map.py` (identical stitch plans/quality blocks at the assess level,
+plus the report-cap and fallback paths). See docs/native-recon.md "Coverage metrics".
 
 ### Task 4 (follow-up branch): seam-day live validation
 

@@ -447,12 +447,12 @@ def test_assess_missing_day_carries_no_stitch_plan():
     assert res["quality"]["invalid_runs"] is None
 
 
-def test_assess_native_engine_day_is_metrics_only_with_full_day_fallback(monkeypatch):
-    # The metrics-only native path materializes no frame: no mask plan, all-None coverage, and a
-    # degraded native fill day gets the conservative synthesized full-day plan at report build
-    # (per-sample native coverage metrics are the plan's Task-3 follow-up). Offline: the native
-    # reconstruction is stubbed with metrics-only meta, the exact shape `_lake_quality_from_meta`
-    # consumes.
+def test_assess_native_meta_without_coverage_falls_back_full_day(monkeypatch):
+    # A native meta WITHOUT the `coverage` block (a stale pre-coverage extension would be rejected
+    # at import, but the script-level fallback stays defensive): no mask plan, all-None coverage,
+    # and a degraded native fill day gets the conservative synthesized full-day plan at report
+    # build. Offline: the native reconstruction is stubbed with coverage-less metrics-only meta,
+    # the exact shape `_lake_quality_from_meta` consumes.
     meta = {"seed_accepted": True, "seed_reason": "ok", "seed_ts": DAY_OPEN + 1,
             "reseed_count": 0, "reseed_blocked_invalid_snapshot": 0,
             "snapshot_reason_codes": {"ok": 10}, "thin_depth_fraction": 0.0,
@@ -473,6 +473,90 @@ def test_assess_native_engine_day_is_metrics_only_with_full_day_fallback(monkeyp
     assert cf["full_day_reason"] == "quality_over_usable_bar"
     seg, = cf["fill_segments"]
     assert seg["start_iso"] == "2025-06-01T00:00:00Z" and seg["end_iso"] == "2025-06-02T00:00:00Z"
+
+
+# --------------------------------------------------- native coverage → partial plans (plan Task 3)
+def _native_cov_meta(*, n=86_400, invalid_runs_idx, present, seed_ts, crossed=0, missing=0):
+    """Metrics-only native-shaped meta WITH the compact `coverage` block (the recon/native.py
+    `_assemble` contract): half-open [i0, i1) sample-index invalid runs + presence bound indices."""
+    pfi, pli = present
+    return {"seed_accepted": True, "seed_reason": "ok", "seed_ts": seed_ts,
+            "reseed_count": 0, "reseed_blocked_invalid_snapshot": 0,
+            "snapshot_reason_codes": {"ok": 10}, "thin_depth_fraction": 0.0,
+            "crossed_duration_s": 0.0, "n_samples": n, "crossed_samples": crossed,
+            "crossed_rate": crossed / n, "missing_book_samples": missing,
+            "missing_book_fraction": missing / n,
+            "coverage": {"present_first_idx": pfi, "present_last_idx": pli,
+                         "n_invalid_runs": len(invalid_runs_idx),
+                         "invalid_runs_idx": [list(r) for r in invalid_runs_idx]}}
+
+
+def test_assess_native_coverage_meta_plans_leading_partial_fill(monkeypatch):
+    # The native compact coverage block must reconstruct the SAME mask-derived stitch plan + Q7
+    # coverage keys the Python frame path emits for the 2025-01-07 shape — a real partial plan,
+    # not the full-day fallback. Offline: native reconstruction stubbed with coverage meta.
+    meta = _native_cov_meta(invalid_runs_idx=[[0, 50_000]], present=(50_000, 86_399),
+                            seed_ts=DAY_OPEN + 50_000 * S, missing=50_000)
+    monkeypatch.setattr(qm, "_seeded_reconstruct", lambda *a, **k: (None, dict(meta)))
+    res = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), day=DAY, k=1, seed_min_levels=1,
+                             cold_ab=False, engine="native", price_scale=100)
+    assert res["classification"] == qm.LAKE_PRESENT_DEGRADED     # missing ~58% > 2%
+    plan = res["stitch_plan"]
+    boundary = DAY_OPEN + 50_002 * S                             # 3rd consecutive valid sample
+    assert plan["fill_profile"] == "leading_partial_fill"
+    assert [s["source"] for s in plan["fill_segments"]] == ["coinapi", "lake"]
+    assert plan["fill_segments"][0]["end_ts"] == boundary
+    assert plan["seams"] == [boundary]
+    q = res["quality"]
+    assert q["trusted_lake_start_ts"] == boundary
+    assert q["trusted_lake_end_ts"] == DAY_OPEN + 86_400 * S
+    assert q["lake_present_start_ts"] == DAY_OPEN + 50_000 * S
+    assert q["lake_present_end_ts"] == DAY_OPEN + 86_400 * S
+    assert q["n_invalid_runs"] == 1
+    assert q["invalid_runs"] == [[DAY_OPEN, DAY_OPEN + 50_000 * S]]
+    rep = qm.build_report([res], meta={})                        # the partial plan survives stamping
+    assert rep["days"][0]["coinapi_fill"]["fill_profile"] == "leading_partial_fill"
+
+
+def test_assess_native_coverage_invalid_runs_capped_with_full_count(monkeypatch):
+    # Q7 cap at the report boundary, native path: invalid_runs[:100], n_invalid_runs keeps 150.
+    runs = [[i, i + 1] for i in range(0, 1200, 8)]               # 150 isolated invalid samples
+    meta = _native_cov_meta(invalid_runs_idx=runs, present=(0, 86_399), seed_ts=DAY_OPEN,
+                            missing=150)
+    monkeypatch.setattr(qm, "_seeded_reconstruct", lambda *a, **k: (None, dict(meta)))
+    res = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), day=DAY, k=1, seed_min_levels=1,
+                             cold_ab=False, engine="native", price_scale=100)
+    q = res["quality"]
+    assert q["n_invalid_runs"] == 150
+    assert len(q["invalid_runs"]) == qm.INVALID_RUNS_CAP == 100
+    assert q["invalid_runs"][0] == [DAY_OPEN, DAY_OPEN + 1 * S]
+
+
+@native
+def test_assess_native_engine_matches_python_stitch_plan_and_coverage():
+    # End-to-end engine conformance at the assess level on a leading-partial day: the native
+    # coverage path must yield the IDENTICAL stitch plan and quality block (incl. the Q7 coverage
+    # keys) as the Python frame path — the load-bearing Task-3 guarantee for the broad map.
+    kw = dict(day=DAY, k=1, seed_min_levels=1, cold_ab=False)
+    py = qm.assess_lake_day(_leading_partial_lake_df(), _late_seed(), engine="python", **kw)
+    nat = qm.assess_lake_day(_leading_partial_lake_df(), _late_seed(), engine="native",
+                             price_scale=100, **kw)
+    assert nat["classification"] == py["classification"] == qm.LAKE_PRESENT_DEGRADED
+    assert nat["stitch_plan"] == py["stitch_plan"]
+    assert nat["stitch_plan"]["fill_profile"] == "leading_partial_fill"
+    assert nat["quality"] == py["quality"]
+
+
+@native
+def test_assess_native_engine_clean_day_matches_python_lake_only():
+    kw = dict(day=DAY, k=1, seed_min_levels=1, cold_ab=False)
+    py = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), engine="python", **kw)
+    nat = qm.assess_lake_day(_clean_lake_df(), _valid_seed(), engine="native", price_scale=100,
+                             **kw)
+    assert nat["classification"] == py["classification"] == qm.LAKE_USABLE
+    assert nat["stitch_plan"] == py["stitch_plan"]
+    assert nat["stitch_plan"]["fill_profile"] == "lake_only"
+    assert nat["quality"] == py["quality"]
 
 
 # ------------------------------------------------------------------- coinapi_fill_block (composer)
@@ -995,8 +1079,10 @@ def test_main_engine_native_runs_and_matches_python(monkeypatch, tmp_path):
     assert nat["meta"]["engine"] == "native"
     assert nat["meta"]["engine_price_scale"] == 100
     assert nat["days"][0]["classification"] == py["days"][0]["classification"]
-    assert nat["days"][0]["quality"]["crossed_rate_after"] == py["days"][0]["quality"]["crossed_rate_after"]
-    assert nat["days"][0]["quality"]["missing_book_fraction"] == py["days"][0]["quality"]["missing_book_fraction"]
+    # The whole quality block — incl. the Q7 coverage keys the native path now derives from its
+    # compact coverage meta — and the stamped fill block must match the Python frame path exactly.
+    assert nat["days"][0]["quality"] == py["days"][0]["quality"]
+    assert nat["days"][0]["coinapi_fill"] == py["days"][0]["coinapi_fill"]
 
 
 def test_main_engine_native_unavailable_fails_before_load(monkeypatch, tmp_path):

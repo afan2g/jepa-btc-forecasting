@@ -12,10 +12,13 @@ Division of labour (deliberate, plan §"Native API"):
     thin_depth → unsorted → crossed → wide_spread) and NaN handling live in ONE place. It hands Rust
     compact arrays with a precomputed `reason_code` + `is_valid` per snapshot.
   * **Rust owns** only the delta hot loop: stable `(ts,seq)` sort, delta/snapshot merge, the seed/reseed
-    state machine (gated on `is_valid`), the sample loop, and crossed/missing/thin metrics.
+    state machine (gated on `is_valid`), the sample loop, and crossed/missing/thin metrics — plus the
+    compact per-sample `coverage` runs (invalid-run index pairs + presence bounds, plan-doc Task 3)
+    that let the quality map plan partial-day CoinAPI fills without materializing the top-K frame.
 
 The returned `(frame, meta)` is schema-identical to
-`recon.reseed.reconstruct_lake_l2_at_samples_seeded`, so callers can swap engines transparently.
+`recon.reseed.reconstruct_lake_l2_at_samples_seeded` (including `meta["coverage"]`), so callers can
+swap engines transparently.
 """
 from __future__ import annotations
 
@@ -34,6 +37,10 @@ REASON_CODES: tuple[str, ...] = (
 _REASON_INDEX = {r: i for i, r in enumerate(REASON_CODES)}
 # Sentinel matching Rust `NO_SNAPSHOTS` — seed_reason before any snapshot is seen ("no_snapshots").
 _NO_SNAPSHOTS = 255
+# Result-dict ABI version; must equal Rust `META_ABI`. Bump in lockstep whenever the fields
+# `reconstruct_seeded` returns change. v2: per-sample coverage (`present_first_idx`/
+# `present_last_idx`/`invalid_runs_idx` — plan-doc 2026-07-02 Task 3); v1 builds lack the attribute.
+_META_ABI = 2
 
 
 def _validate_native(mod) -> None:
@@ -43,7 +50,8 @@ def _validate_native(mod) -> None:
     AFTER a Lake load or SILENTLY mis-reconstruct with misaligned seed/reseed reason codes. Verifying
     the ABI surface here makes such a module fall into the import `except` (→ treated as unavailable
     with a precise reason), preserving the "fail before any Lake load" contract."""
-    missing = [a for a in ("reconstruct_seeded", "N_REASONS", "NO_SNAPSHOTS") if not hasattr(mod, a)]
+    missing = [a for a in ("reconstruct_seeded", "N_REASONS", "NO_SNAPSHOTS", "META_ABI")
+               if not hasattr(mod, a)]
     if missing:
         raise ImportError(f"recon_native is missing required attributes {missing} "
                           "(stale/incompatible build — rebuild: maturin develop --release "
@@ -54,6 +62,9 @@ def _validate_native(mod) -> None:
     if mod.NO_SNAPSHOTS != _NO_SNAPSHOTS:
         raise ImportError(f"recon_native.NO_SNAPSHOTS={mod.NO_SNAPSHOTS} != {_NO_SNAPSHOTS} — "
                           "stale/incompatible build; rebuild the extension")
+    if mod.META_ABI != _META_ABI:
+        raise ImportError(f"recon_native.META_ABI={mod.META_ABI} != {_META_ABI} — result-dict "
+                          "contract mismatch (coverage metrics); rebuild the extension")
 
 
 try:  # the extension is optional — never fail import if it is not built (or is stale/incompatible)
@@ -218,6 +229,19 @@ def reconstruct_lake_l2_at_samples_seeded_native(
     return _assemble(res, sample_ts_arr, int(k), policy, bool(frame_out))
 
 
+def _coverage_from_result(res: dict) -> dict:
+    """The `meta["coverage"]` block from the native result — JSON-safe ints, identical shape to the
+    Python replay's block (`recon.reseed._replay_seeded`): maximal half-open `[i0, i1)` sample-INDEX
+    invalid runs (the shared `valid_mask_from_frame` predicate at min_levels_per_side=1) + the
+    first/last present-sample indices behind `lake_present_*`. Index pairs, not timestamps — the
+    replay does not know the grid step; the quality map converts against its own grid."""
+    pfi, pli = res["present_first_idx"], res["present_last_idx"]
+    runs = [[int(a), int(b)] for a, b in res["invalid_runs_idx"]]
+    return {"present_first_idx": (None if pfi is None else int(pfi)),
+            "present_last_idx": (None if pli is None else int(pli)),
+            "n_invalid_runs": len(runs), "invalid_runs_idx": runs}
+
+
 def _assemble(res: dict, sample_ts_arr: np.ndarray, k: int, policy: ReseedPolicy,
               frame_out: bool) -> tuple[pd.DataFrame | None, dict]:
     """Assemble the native result dict into the Python-compatible `(frame, meta)`."""
@@ -251,6 +275,7 @@ def _assemble(res: dict, sample_ts_arr: np.ndarray, k: int, policy: ReseedPolicy
         "missing_book_fraction": (float(missing / n) if n else 0.0),
         "thin_depth_samples": thin,
         "thin_depth_fraction": (float(thin / n) if n else 0.0),
+        "coverage": _coverage_from_result(res),
         "policy": policy.as_dict(),
     }
 

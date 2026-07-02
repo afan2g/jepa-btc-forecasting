@@ -30,6 +30,33 @@ The Rust core (`native/recon_native/src/lib.rs`) matches the Python replay exact
 * Crossed-duration is accounted only once seeded and the trailing open run closes at
   `max(last_event_ts, final_sample_ts)`.
 
+## Coverage metrics (partial-day fill planning)
+
+Both engines' `meta` carries a compact per-sample `coverage` block (partial-day fill plan
+`docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md`, Task 3 — implemented 2026-07-02), so
+`scripts/run_coinbase_quality_map.py --engine native` plans partial-day CoinAPI fills without
+materializing the 86,400-row top-K frame:
+
+* `invalid_runs_idx` — maximal half-open `[i0, i1)` sample-**index** runs where the sample fails the
+  shared stitch-policy validity predicate (both top-of-book prices present, non-NaN, `bid < ask` —
+  exactly `recon.stitch_policy.valid_mask_from_frame` at `min_levels_per_side=1`). Index pairs, not
+  timestamps: the replay does not know the grid step, so the quality map converts against its own
+  grid. The list is complete (`n_invalid_runs` = full count); the report caps its emitted
+  `invalid_runs` list, never the meta.
+* `present_first_idx` / `present_last_idx` — bound indices of the notna both-tops presence predicate
+  behind the report's `lake_present_*` fields (bounds only — that is all `plan_day_stitch` reads).
+
+Because the runs are maximal, their complement reconstructs the exact per-sample validity mask, so
+the native path feeds the same `plan_day_stitch` as the Python frame path and emits identical Q7
+coverage keys and fill plans. The Python frame remains the correctness oracle: replay coverage is
+pinned equal to the frame-derived mask by Python-only tests, native == Python by the meta-equality
+conformance tests (`tests/test_native_recon.py`), and the plans are pinned identical at the assess
+level (`tests/test_quality_map.py`).
+
+The result-dict contract is versioned: `recon_native.META_ABI` (currently **2**) must equal
+`recon.native._META_ABI`, so a stale pre-coverage build is rejected at import — it reports
+unavailable with the rebuild hint instead of silently degrading partial-day plans to full-day.
+
 ### Verified tick contract (required for native)
 
 Native mode needs a verified `(exchange, symbol) → price_scale` where every price is an exact multiple
@@ -60,6 +87,7 @@ Confirm:
 
 ```bash
 .venv/bin/python -c "import recon_native; print(recon_native.N_REASONS)"          # -> 7
+.venv/bin/python -c "import recon_native; print(recon_native.META_ABI)"           # -> 2
 .venv/bin/python -c "from recon import native; print(native.native_available())"  # -> True
 ```
 

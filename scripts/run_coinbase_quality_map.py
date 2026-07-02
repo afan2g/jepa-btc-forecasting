@@ -39,10 +39,12 @@ lives in each record's `coinapi_fill` block (`coinapi_fill_block`): the PR #13 `
 decision plus the partial-day stitch plan from `recon.stitch_policy`
 (`fill_profile`/`fill_segments`/`seams`/`seam_policy` — plan-doc Q7,
 docs/superpowers/plans/2026-07-02-partial-day-fill-policy.md). On the Python engine path the plan
-is derived from the per-sample validity mask (`plan_day_stitch`), and `quality` carries the
-coverage metrics (`lake_present_*`/`trusted_lake_*`/`invalid_runs`); the metrics-only native
-engine emits None coverage, and its fill days get a conservative full-day plan (native per-sample
-metrics are the plan's Task-3 follow-up).
+is derived from the frame's per-sample validity mask (`plan_day_stitch`), and `quality` carries the
+coverage metrics (`lake_present_*`/`trusted_lake_*`/`invalid_runs`). The native engine stays
+frame-free: its `meta["coverage"]` block (compact invalid-run index pairs + presence bounds,
+plan-doc Task 3, conformance-pinned to the frame-derived mask) reconstructs the SAME masks, so
+native fill days get the same partial-day plans; only a meta without `coverage` (a stale extension
+would be rejected at import — defensive) falls back to the conservative full-day plan.
 
 Usage:
   .venv/bin/python scripts/run_coinbase_quality_map.py                       # default 2-day set
@@ -283,11 +285,12 @@ def coinapi_fill_decision(classification: str, reasons) -> dict:
 _NO_PLAN_FIELDS = {"fill_profile": None, "full_day_reason": None, "fill_segments": None,
                    "seams": None, "seam_policy": None}
 # Fallback full-day reason per needs-fill `why` code, used when a fill day has NO mask-derived plan
-# (Lake partition absent; metrics-only native engine — per-sample coverage is the Task-3 native
-# follow-up) or a mask plan with no fillable window (`lake_only` — e.g. thin-depth degradation,
-# invisible to the top-of-book validity predicate): route the WHOLE day to CoinAPI, per the policy
-# "full-day unless the partial policy clearly supports a narrower fill". Script-level codes reuse
-# the day-level reason strings; the crossed-source code is the shared stitch-policy constant.
+# (Lake partition absent; a native meta lacking the `coverage` block — defensive, stale builds are
+# rejected at import) or a mask plan with no fillable window (`lake_only` — e.g. thin-depth
+# degradation, invisible to the top-of-book validity predicate): route the WHOLE day to CoinAPI,
+# per the policy "full-day unless the partial policy clearly supports a narrower fill". Script-level
+# codes reuse the day-level reason strings; the crossed-source code is the shared stitch-policy
+# constant.
 _FALLBACK_FULL_DAY_REASON = {
     "lake_book_delta_v2_absent": "lake_book_delta_v2_absent",
     "quality_over_usable_bar": "quality_over_usable_bar",
@@ -342,7 +345,8 @@ def _empty_seed_block(snapshots_present, candidates) -> dict:
 
 
 # Q7 coverage keys (plan doc): None whenever no validity mask exists — missing/excluded/load-failed
-# days, and the metrics-only native engine (per-sample runs are the Task-3 native follow-up).
+# days, and a native meta without the `coverage` block (defensive; a stale pre-coverage extension
+# is already rejected at import by recon.native._validate_native).
 _EMPTY_COVERAGE = {"lake_present_start_ts": None, "lake_present_end_ts": None,
                    "trusted_lake_start_ts": None, "trusted_lake_end_ts": None,
                    "n_invalid_runs": None, "invalid_runs": None}
@@ -376,18 +380,13 @@ def _seeded_reconstruct(engine, price_scale, *, df, grid, k, engine_col, snapsho
         frame_out=frame_out)
 
 
-def _stitch_and_coverage(frame, *, meta: dict, reasons, grid_ms: int,
-                         day: dt.date) -> tuple[dict, dict]:
-    """Mask-derived stitch plan + Q7 coverage metrics from the materialized top-K frame (Python
-    engine path only). The validity mask is the shared parity-gate predicate
-    (`valid_mask_from_frame`); presence is the `frame_quality` both-sides-of-book predicate.
-    `seed_source_trusted` comes from the classification's SEED_SOURCE_UNRELIABLE reason, so the
-    plan and the classification can never disagree on the PR #13 crossed-source rule."""
-    sf = frame.sort_values("sample_ts")
-    ts = sf["sample_ts"].to_numpy(dtype=np.int64)
-    grid_ns = grid_ms * NS_PER_MS
-    valid = valid_mask_from_frame(sf)
-    present = (sf["bid_0_price"].notna() & sf["ask_0_price"].notna()).to_numpy(dtype=bool)
+def _stitch_and_coverage_masks(ts, valid, present, *, meta: dict, reasons, grid_ns: int,
+                               day: dt.date) -> tuple[dict, dict]:
+    """Stitch plan + Q7 coverage metrics from per-sample (valid, present) masks — the shared core
+    behind both engines' paths. `seed_source_trusted` comes from the classification's
+    SEED_SOURCE_UNRELIABLE reason, so the plan and the classification can never disagree on the
+    PR #13 crossed-source rule. The report's `invalid_runs` list is capped at INVALID_RUNS_CAP;
+    `n_invalid_runs` keeps the full count."""
     plan = plan_day_stitch(ts, valid, grid_ns=grid_ns, seed_accepted=bool(meta["seed_accepted"]),
                            seed_ts=meta["seed_ts"],
                            seed_source_trusted=SEED_SOURCE_UNRELIABLE not in reasons,
@@ -398,6 +397,40 @@ def _stitch_and_coverage(frame, *, meta: dict, reasons, grid_ms: int,
     coverage.update(n_invalid_runs=len(runs),
                     invalid_runs=[[a, b] for a, b in runs[:INVALID_RUNS_CAP]])
     return plan, coverage
+
+
+def _stitch_and_coverage(frame, *, meta: dict, reasons, grid_ms: int,
+                         day: dt.date) -> tuple[dict, dict]:
+    """Mask-derived stitch plan + Q7 coverage from the materialized top-K frame (Python engine
+    path — the correctness oracle). The validity mask is the shared parity-gate predicate
+    (`valid_mask_from_frame`); presence is the `frame_quality` both-sides-of-book predicate."""
+    sf = frame.sort_values("sample_ts")
+    ts = sf["sample_ts"].to_numpy(dtype=np.int64)
+    valid = valid_mask_from_frame(sf)
+    present = (sf["bid_0_price"].notna() & sf["ask_0_price"].notna()).to_numpy(dtype=bool)
+    return _stitch_and_coverage_masks(ts, valid, present, meta=meta, reasons=reasons,
+                                      grid_ns=grid_ms * NS_PER_MS, day=day)
+
+
+def _masks_from_native_coverage(meta: dict, *, n_grid: int) -> tuple[np.ndarray, np.ndarray] | None:
+    """Reconstruct the per-sample `(valid, present)` masks on the sample grid from the engine's
+    compact `meta["coverage"]` block (native path — no frame materialized). The invalid runs are
+    MAXIMAL half-open [i0, i1) index spans, so their complement is exactly the validity mask
+    (conformance-pinned to `valid_mask_from_frame` in tests/test_native_recon.py). Presence comes
+    as bound indices only, so the presence mask marks just the two bounds — exact for the only
+    thing `plan_day_stitch` reads from it (the first/last present sample → `lake_present_*`).
+    Returns None when the meta carries no coverage block (→ conservative full-day fallback)."""
+    cov = meta.get("coverage")
+    if not cov:
+        return None
+    valid = np.ones(n_grid, dtype=bool)
+    for i0, i1 in cov["invalid_runs_idx"]:
+        valid[int(i0):int(i1)] = False
+    present = np.zeros(n_grid, dtype=bool)
+    if cov["present_first_idx"] is not None:
+        present[int(cov["present_first_idx"])] = True
+        present[int(cov["present_last_idx"])] = True
+    return valid, present
 
 
 def _lake_quality_from_meta(meta, *, source_rows) -> dict:
@@ -424,8 +457,9 @@ def assess_lake_day(lake_delta_df, lake_book_snapshots, *, day: dt.date, k: int 
     no vendor I/O — so the offline tests drive the exact production classification path.
 
     `engine` selects the replay engine: `"python"` (default; the correctness oracle, builds the top-K
-    frame + `frame_quality`) or `"native"` (metrics-only — classifies from native `meta` without the
-    frame, `price_scale` required). Classification is identical either way."""
+    frame + `frame_quality`) or `"native"` (frame-free — classifies from native `meta` and derives
+    the stitch plan/Q7 coverage from its compact `meta["coverage"]` runs, `price_scale` required).
+    Classification and stitch plans are identical either way (conformance-pinned)."""
     have_lake = lake_delta_df is not None and len(lake_delta_df) > 0
     n_rows = (0 if lake_delta_df is None else int(len(lake_delta_df)))
     snaps = list(lake_book_snapshots or [])
@@ -474,13 +508,21 @@ def assess_lake_day(lake_delta_df, lake_book_snapshots, *, day: dt.date, k: int 
         cold_rate = float(cold_meta["crossed_rate"])
 
     cls, reasons = classify_day(have_lake=True, meta=meta, lake_q=lake_q, thresholds=thresholds)
-    # Stitch plan + Q7 coverage need the per-sample validity mask, so they exist only where the
-    # top-K frame was materialized (Python engine); native stays metrics-only (Task-3 follow-up) —
-    # its fill days get the conservative full-day fallback when the report is built.
+    # Stitch plan + Q7 coverage from the per-sample masks: the Python engine derives them from the
+    # materialized top-K frame (the oracle); the native engine reconstructs them from its compact
+    # `meta["coverage"]` runs (plan-doc Task 3, conformance-pinned) — same plans, no frame. Only a
+    # native meta WITHOUT coverage (defensive; stale builds are rejected at import) stays plan-less,
+    # so its fill days get the conservative full-day fallback when the report is built.
     stitch, coverage = None, dict(_EMPTY_COVERAGE)
     if engine != "native":
         stitch, coverage = _stitch_and_coverage(frame, meta=meta, reasons=reasons,
                                                 grid_ms=grid_ms, day=day)
+    else:
+        masks = _masks_from_native_coverage(meta, n_grid=len(grid))
+        if masks is not None:
+            stitch, coverage = _stitch_and_coverage_masks(
+                np.asarray(grid, dtype=np.int64), masks[0], masks[1], meta=meta, reasons=reasons,
+                grid_ns=grid_ms * NS_PER_MS, day=day)
     result.update(
         classification=cls, reasons=reasons, stitch_plan=stitch,
         seed={
