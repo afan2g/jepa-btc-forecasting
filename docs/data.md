@@ -258,9 +258,11 @@ script; synthetic-unit-validated — see §5a-Recon "Implementation") and **live
 results). The CoinAPI **SUB/MATCH size
 convention** was an A/B assumption (absolute-size vs `--size-policy decrement`); the live run below
 **resolved the MATCH path: `decrement` is correct for Coinbase `limitbook_full` MATCH events**.
-⚠️ **SUB is NOT yet verified** — 2025-06-01 had **0 SUB events**, so the `decrement` default also
-applies to SUB by family analogy only; a future day with partial-fill `SUB` rows must confirm it
-(see "Measured results"). Run (after enabling CoinAPI Spend Management, §8):
+**SUB is now also VERIFIED = `decrement` (2026-07-01)** — 2025-06-01 had **0 SUB events** (analogy
+only at the time), but the crossed-seed-source cross-validation days carry real `SUB` rows
+(168,038 / 47,377) and a per-order conservation trace confirms the decrement convention
+(§5a-QualityMap "CoinAPI cross-validation", finding 4). Run (after enabling CoinAPI Spend
+Management, §8):
 
 ```bash
 .venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01            # one overlap day
@@ -286,6 +288,9 @@ true vendor disagreement**:
    SET 8,091), so only the MATCH size convention is *verified*. `decrement` decrements SUB under the
    same policy by analogy; that must be re-checked on a day that actually contains `SUB` rows before
    trusting partial-fill reconstruction there.
+   **➜ RE-CHECKED & VERIFIED (2026-07-01):** `SUB`=`decrement` confirmed by per-order conservation on
+   168,038 / 47,377 live `SUB` rows (2026-04-01 / 2024-12-04) — §5a-QualityMap "CoinAPI
+   cross-validation", finding 4.
 
 2. **Lake `book_delta_v2` crosses 67% — intraday level-stranding, NOT cold-start (the blocker).**
    The seed-established warm-up gate excluded only 2 pre-seed samples, yet the Lake book is crossed
@@ -328,8 +333,11 @@ $66.59), not assumed to wash out. Report artifacts (git-ignored):
 `decrement` fix and Lake seed/reseed, the day's recon-level parity is clean. Backfill stays **gated**
 pending multi-day validation — other days (gaps, vendor seams), a day where the Lake `book` product is
 itself crossed (e.g. 2026-04-01 — measured 2026-07-01: a seed IS accepted on such days, but the crossed
-source fails the §5a-QualityMap reliability bar, so the day routes `inconclusive` and needs CoinAPI
-cross-validation/fill), and a day with real `SUB` events. This is **enforced in code**:
+source fails the §5a-QualityMap reliability bar, so the day routes `inconclusive`; **cross-validated vs
+CoinAPI L3 2026-07-01** on 2026-04-01 + 2024-12-04 — parity fails even outside the excluded crossed
+windows, so crossed-seed-source days are CoinAPI-fill days, §5a-QualityMap "CoinAPI cross-validation"),
+and a day with real `SUB` events (**satisfied 2026-07-01** — both cross-validation days carry SUB rows;
+`decrement` verified by per-order conservation). This is **enforced in code**:
 `ingest/download_coinapi.py` refuses a backfill-scale pull (exit 4) — a single parity day, or a multi-day range with a small `--sample-mb` smoke (≤64 MB), is
 allowed; a multi-day full pull (or an oversized `--sample-mb`) is blocked, `--allow-backfill` overrides.
 
@@ -349,12 +357,15 @@ large vendor-filled holes. Required policy:
   first full state; do not assume continuity across the seam.
 
 **Why the seed must be validated:** Crypto Lake's derived `book` (20-level snapshot) product is
-**intermittently crossed on some days** (2026-04-01: 31.75% crossed, spreads to −$1188; 2025-06-01: 0%).
+**intermittently crossed on some days** (2026-04-01: 31.75% of raw rows crossed — 37.51% of the
+1 s-thinned seed candidates, the map's `seed_source_crossed_frac`; spreads to −$1188; 2025-06-01: 0%).
 We don't use that product for features, but if it's used as a reseed source it must be checked first.
 Whether the underlying `book_delta_v2` *reconstruction* is also degraded on such days was **measured
 2026-07-01** (§5a-QualityMap expanded validation): yes — on the 4 sampled crossed-source days the
 reconstruction stays crossed 1.8–9.4 h (most reseed attempts blocked by invalid snapshots), so those
-days are `inconclusive` pending CoinAPI cross-validation; degraded present-days get CoinAPI fill like gaps.
+days are `inconclusive` pending CoinAPI cross-validation (run 2026-07-01 on 2 of the 4 days: parity
+FAILS even outside the crossed windows → those days get CoinAPI fill, §5a-QualityMap "CoinAPI
+cross-validation"); degraded present-days get CoinAPI fill like gaps.
 
 **Implementation (`recon/reseed.py`, synthetic-unit-validated + live-validated 2025-06-01:
 67% → 0.015% crossed).** The policy is:
@@ -400,13 +411,23 @@ report JSON):
 | `inconclusive` | cannot validate the reconstruction | no/all-rejected seed, **or** an accepted seed whose `book` source is itself crossed > **5%**, **or** the Lake load failed |
 
 A confident `lake_usable`/`lake_present_degraded` verdict **requires both an accepted seed and a
-trustworthy seed source**: on 2026-04-01 the `book` product is **31.75% crossed**, so although ~68% of
-candidates are valid and a seed IS accepted, the source exceeds the **5%** crossed-candidate bar → the
+trustworthy seed source**: on 2026-04-01 the `book` product is **31.75% crossed at raw rows**
+(83,423/262,771, top-of-book scan, re-measured 2026-07-02) and **37.51% at the 1 s-thinned seed
+candidates the map validates** (22,965/61,218 — this is `seed_source_crossed_frac`, the classified
+metric; crossed episodes span proportionally more seconds than rows). So although 62.5% of candidates
+are valid and a seed IS accepted, the source exceeds the **5%** crossed-candidate bar → the
 day is `inconclusive`, not silently usable (a clean-looking reconstruction off a flaky seed source can't
 be trusted). The classifier keys off missing `book_delta_v2`, no/rejected seed snapshots, the crossed
 seed-source fraction, the crossed rate after reseed, the missing-book fraction, and thin top-K depth; the
 per-day record additionally **records** (it does not classify on) whether CoinAPI parity — a local
 parquet or a calendar-verified flat-files `book` — was available, for downstream fill planning.
+Each report record is also stamped with a **machine-readable `coinapi_fill` decision**
+(`{"needs_fill": true|false|null, "why": …}`, summary day-lists under `summary.coinapi_fill`) so fill
+manifests never re-parse reason strings: `missing_needs_coinapi`/`lake_present_degraded` → fill;
+`inconclusive` via the crossed-seed-source bar → fill (the provisional 2026-07-01 cross-validation
+policy, see below); other `inconclusive` → `null` (unresolved — surfaced in the summary's
+`no_verdict` list, never dropped); calendar-`excluded` days → `null` too but bucketed in a separate
+`not_in_scope` list, so out-of-scope (e.g. Binance-gap) days are never read as unresolved fills.
 
 **Quota-aware (docs §2.1/§6/§8).** It prints `lakeapi.used_data(sess)` before/after, estimates the
 request from measured per-day sizes (`book_delta_v2` ~0.30 GB/day from §6; the `book` 20-level snapshot
@@ -414,7 +435,8 @@ product ~0.18 GB/day ≈ 275k rows → ~0.48 GB/day, a conservative upper bound)
 pull** (> `--max-auto-gb`, default 5 GB) unless `--allow-broad` — and *always* refuses a pull that would
 breach the 300 GB/month quota headroom, override or not (and refuses the whole run, fail-safe, if
 `used_data` is unreadable). The default day set is small: **2025-06-01** (the validated clean day →
-`lake_usable`) and **2026-04-01** (31.75%-crossed `book` seed source → `inconclusive`); add more with
+`lake_usable`) and **2026-04-01** (crossed `book` seed source, `seed_source_crossed_frac=0.3751` →
+`inconclusive`); add more with
 `--days` / `--days-file` / `--include-gap-days N`. The full report is written to
 `data/reports/coinbase_quality_map.json` (git-ignored).
 
@@ -439,6 +461,7 @@ One per-day record shape:
  "quality": {"crossed_rate_after": 0.00015, "crossed_rate_cold": 0.6704,
              "missing_book_fraction": 0.0, "thin_depth_fraction": 0.0},
  "coinapi": {"parquet_local": false, "fillable": null},
+ "coinapi_fill": {"needs_fill": false, "why": "lake_usable"},
  "calendar": {"in_usable_days": true, "is_coinbase_fill_day": false, "excluded_reason": null}}
 ```
 
@@ -513,14 +536,93 @@ Findings:
 present days classify `lake_usable`; 4 are `inconclusive` (unreliable seed source, no verdict possible
 from Lake alone) and 1 is a degraded seam day needing a partial-day CoinAPI fill. Still missing before
 unlock: (a) CoinAPI cross-validation (or another trusted seed source) for the crossed-seed-source
-days — the §10 multi-day reseed validation; (b) partial-day fill handling for seam days; (c) the broad
-production map over all 652 present days — ~313 GB at the tool's conservative 0.48 GB/day gate
+days — the §10 multi-day reseed validation (**measured 2026-07-01 for 2 of the 4 days — both FAIL
+parity even outside the crossed windows → CoinAPI fill; see "CoinAPI cross-validation" below**);
+(b) partial-day fill handling for seam days; (c) the broad production map over all 652 present
+days — ~313 GB at the tool's conservative 0.48 GB/day gate
 estimate (refused as a one-shot, by design), ~170 GB at the measured wire rate of ~0.26 GB/day
 (vendor-counter confirmation pending) — either way a stage-across-quota-windows pull alongside the
 archive downloads (§6).
 
-**Backfill stays LOCKED.** This is a validation/quality-map tool: it does not download CoinAPI and does
-not unlock the §5a backfill gate (still enforced in `ingest/download_coinapi.py` / `ingest/_common.py`).
+**CoinAPI cross-validation of crossed-seed-source days — 2026-07-01 (2 of the 4 days; k=10,
+`size_policy=decrement`, `--engine native`).** Tests whether an `inconclusive` crossed-seed-source day
+can be rehabilitated by vendor parity — i.e. whether the Lake `book_delta_v2` reconstruction agrees
+with CoinAPI L3 on the samples that survive the uncrossed filter. **It cannot: both tested days fail
+parity well beyond the excluded crossed windows → crossed-seed-source days are CoinAPI-FILL days
+(policy provisional — 2 of 4 days tested).** The two days bracket the observed severity range:
+2026-04-01 (worst source, 37.51% crossed candidates) and 2024-12-04 (mildest, 8.36%). Bounded
+single-day pulls only — the §5a backfill gate was NOT overridden (no `--allow-backfill`); Spend
+Management state could not be re-confirmed from the CLI (portal-only setting, §8), but each pull is
+one bounded fixed-size object download (per day: 1 data GET + 2 discovery/list requests), so spend is
+capped by the object size:
+
+```bash
+.venv/bin/python ingest/download_coinapi.py --start 2026-04-01 --end 2026-04-01  # 2372MB gz→1301MB parquet, 56.0M rows, 3 S3 req
+.venv/bin/python ingest/download_coinapi.py --start 2024-12-04 --end 2024-12-04  # 1931MB gz→1448MB parquet, 63.2M rows, 3 S3 req
+.venv/bin/python scripts/run_coinbase_parity.py --day 2026-04-01 --k 10 --size-policy decrement --engine native
+.venv/bin/python scripts/run_coinbase_parity.py --day 2024-12-04 --k 10 --size-policy decrement --engine native
+```
+
+Flat-files wire total ~4.3 GB ≈ **$4.3** at $1/GB (6 S3 requests). Lake side loaded from the local
+lakeapi cache (~0 incremental quota). Reports (git-ignored):
+`data/reports/parity_coinbase_{2026-04-01,2024-12-04}_k10{.json,_spikes.csv}`. Lake delta rows
+34,657,476 / 29,583,498; CoinAPI event rows 55,974,027 / 63,155,968; native tick scale 100 on both.
+
+| metric (k=10) | 2025-06-01 (clean reference) | **2026-04-01** (src 37.51%) | **2024-12-04** (src 8.36%) |
+|---|---|---|---|
+| Lake crossed: cold → after reseed | 67.04% → 0.015% | 73.16% → **39.10%** | 90.50% → **7.43%** |
+| reseeds (blocked invalid) | 3 (0) | 6 (21,449) | 7 (4,154) |
+| parity grid pts (of 86,400) | 86,383 | **51,208** (= 86,400 − 33,784 crossed − 1,408 pre-seed) | **79,576** (= 86,400 − 6,422 − 402) |
+| `\|Δmid\|` median / p95 / p99 / max | $0.00 / $0.48 / $4.35 / $66.59 | $0.00 / $6.74 / **$157.00** / **$400.96** | $0.00 / $10.18 / $25.40 / $140.64 |
+| signed mean Δmid (Lake−CoinAPI) | — | **−$3.29** (systematic) | +$0.02 |
+| mid correlation | 0.99999778 | 0.995865 | 0.9999779 |
+| `\|Δmid\|` spikes >$1 / >$50 / >$100 | 3,127 / 2 / 0 | 6,109 / **1,430** / **799** | **21,707** / 177 / 18 |
+| label agreement 2 s / 10 s / 60 s | 0.951 / 0.983 / 0.995 | 0.917 / 0.951 / 0.970 | **0.832** / 0.936 / 0.978 |
+| CoinAPI crossed / missing | 0% / 0% | 0% / 0% | 0% / 0% |
+| CoinAPI `SUB` events | 0 | 168,038 | 47,377 |
+
+Findings:
+
+1. **Parity is conditioned on the favorable remainder and still fails.** Residual crossed Lake samples
+   (33,784 / 6,422) and pre-seed warm-up (1,408 / 402) are excluded from the comparison and counted
+   transparently (`n_grid` vs the true `n_grid_full=86,400`), so these numbers overstate day quality —
+   and both days still miss the 2025-06-01 bar by two to three orders of magnitude in the tail
+   (>$50 spikes: 1,430 and 177 vs 2 — ~715× and ~88× the reference) with materially lower label
+   agreement.
+2. **The contamination is NOT confined to the excluded crossed windows.** 2026-04-01 carries a
+   systematic signed bias (mean Δmid −$3.29, Lake below CoinAPI) and its top-25 spikes are a single
+   episode (15:25:02–15:25:37Z) with the Lake mid ~$400 below CoinAPI — a stale, lagging book on
+   samples the uncrossed filter passes. 2024-12-04 is unbiased on average (+$0.02) but its tail is
+   frozen-Lake-mid episodes (e.g. 17:17:24–48Z pinned at $94,950 while CoinAPI moves to $94,810;
+   18:12:41–46Z pinned at $95,860) — the same stale-book signature. High volatility (63.2M L3 events)
+   may depress the 2 s agreement somewhat, but 0.832 vs the 0.951 reference with 21.7k >$1 spikes is
+   not certifiable as a label venue.
+3. **Policy (provisional):** the §5a-QualityMap `seed_source_crossed_frac > 5%` bar stands as a FILL
+   trigger — treat `inconclusive` crossed-seed-source days like `lake_present_degraded` (CoinAPI fill);
+   do not attempt parity rehabilitation per day. Tested at both extremes of the observed range and
+   both fail the same way; untested: 2025-10-15 (28.33%) and 2024-08-05 (28.78% — also a partial/seam
+   day, deferred until the partial-fill policy is in scope). The mapping is **encoded in the report
+   contract** (`coinapi_fill_decision` in `scripts/run_coinbase_quality_map.py`): report records with
+   the `seed_accepted_but_source_unreliable` reason carry `coinapi_fill.needs_fill=true`, so fill
+   manifests inherit the policy without reinterpreting doc prose; the day's *classification* stays
+   `inconclusive` (no verdict from Lake alone) on purpose.
+4. **Bonus — CoinAPI `SUB` size convention VERIFIED = `decrement`** (previously analogy-only, §5a):
+   these are the first live days with real `SUB` rows, and the CoinAPI book is 0% crossed under
+   `decrement` on both. An ad-hoc per-order conservation trace on the local parquet (orders born by
+   `ADD`, no `SET`, single `ADD`, ≤1 `DELETE`; n=726 / n=1,222) gives
+   `ADD_sx − ΣSUB_sx − ΣMATCH_sx − DELETE_sx = 0` for **100%** of orders (max residual 2.6e-18), while
+   99.4% / 99.8% of ≥2-`SUB` orders have a **non-decreasing** `SUB` size sequence — impossible under an
+   absolute-remainder convention. Partial-fill (`SUB`) reconstruction is now trustworthy under
+   `decrement`.
+
+**This changes the fill PLAN, not the gate — backfill stays LOCKED.** The cross-validation converts
+2 of the 4 `inconclusive` days into confirmed CoinAPI-fill days (fill scope grows beyond the §8 ~$92
+calendar-gap estimate — crossed-seed and seam days add to it); it certifies no new Lake day. Unlock
+still requires at least the partial-day/seam fill policy (2025-01-07, 2024-08-05), the remaining §10
+reseed-validation items (vendor-seam day, prior-day seed carry), and the broad production map.
+
+**Backfill stays LOCKED.** The quality-map tool itself does not download CoinAPI and does not unlock
+the §5a backfill gate (still enforced in `ingest/download_coinapi.py` / `ingest/_common.py`).
 Bulk backfill remains gated until the multi-day quality map (and the §10 multi-day reseed validation)
 passes.
 
@@ -567,7 +669,9 @@ L3 csv.gz is ~8× Crypto Lake's L2 parquet — another reason the hybrid keeps C
 | 24 mo | 858 GB | ~3 monthly caps exactly; use **3-4** windows with headroom or upgrade | ~120 GB | **~0.98 TB** |
 
 (Backfilled L3 is transient — it aggregates to top-K L2 at ~10 GB after recon. Fill-day count scales
-with the chosen span; ~52 is the full 2-yr usable-calendar set, §5b.)
+with the chosen span; ~52 is the full 2-yr usable-calendar set, §5b — a **calendar-gap-only lower
+bound**: the 2026-07-01 cross-validation adds crossed-seed-source and seam present-days to the fill
+scope, with the full count pending the production quality map — §5a-QualityMap.)
 
 **Crypto Lake quota constraint:** the measured all-feed Lake footprint is ~1.17 GB/day, so the
 300 GB/month individual-plan cap covers at most ~256 all-feed days before any safety margin. Small
@@ -616,7 +720,7 @@ capture is in Tokyo), never a persistent cluster.
 | Item | Cost |
 |---|---|
 | Crypto Lake subscription | ~$64/mo individual plan, **300 GB/month download limit** |
-| CoinAPI Coinbase backfill (§5b, all verified), book 47 d / trades 52 d | **~$92** (book 84.6 GB≈$85 + trades 2.6 GB≈$8) at $1/$3 per GB; −$25 ≈ **$67 OOP** |
+| CoinAPI Coinbase backfill (§5b, all verified), book 47 d / trades 52 d — **calendar-gap-only lower bound** (crossed-seed + seam days add to it, §5a-QualityMap) | **~$92** (book 84.6 GB≈$85 + trades 2.6 GB≈$8) at $1/$3 per GB; −$25 ≈ **$67 OOP** |
 | ↳ if only the single 33-day hole is filled | ~$82 |
 | Compute | $0 (local); optional one-off same-region (**eu-west-1**) spot for recon |
 | Storage | $0 (existing 2 TB SSD) |
@@ -628,6 +732,10 @@ capture is in Tokyo), never a persistent cluster.
 - Backfill GB is **measured** (split by product, summed from `data/usable_calendar.json`): 47 book days
   = **84.6 GB** L3 (~$85), 52 trade days = **2.6 GB** (~$8 at $3/GB) → **~$92**, mostly the Dec'24 cluster.
   If the WebSocket "Tier-1" tiered GB discount applies to flat files (unconfirmed), it'd be **less**.
+  **This is a calendar-gap-only lower bound**: the 2026-07-01 cross-validation makes crossed-seed-source
+  present-days CoinAPI-fill days too (2 confirmed so far at ~2–2.4 GB L3/day, e.g. 2026-04-01 = 2.37 GB),
+  and seam days need partial-day fills — the full fill scope lands with the production quality map
+  (§5a-QualityMap "CoinAPI cross-validation").
 - **⚠️ Enable CoinAPI Spend Management (daily cap + hard-stop) before running the backfill or any full
   L3 pull** — it's OFF by default (§2.2). Set a daily budget, watch Billing → Overview and Usage
   Explorer. Credits never expire, so top up only what a bounded run needs.
@@ -689,9 +797,12 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       cold-start-equivalence) and **LIVE-VALIDATED 2025-06-01 (2026-06-30): 67.04% → 0.015% crossed,
       `|Δmid|` median $0.00, corr 0.99999778, 3 reseeds** (see §5a Measured results / seed-reseed A/B).
 - [ ] **Multi-day reseed validation before backfill unlock** — a day where the `book` product is itself
-      crossed (e.g. 2026-04-01 — the 2026-07-01 quality map measured that a seed IS accepted on such
-      days but the day routes `inconclusive` via the crossed-seed-source bar → needs CoinAPI
-      cross-validation), a vendor-seam day, and a day with real `SUB` events. Prior-day seed carry +
+      crossed (**cross-validated vs CoinAPI L3 2026-07-01**: 2026-04-01 + 2024-12-04, the extremes of
+      the observed 8.4–37.5% severity range — parity fails even outside the excluded crossed windows,
+      so crossed-seed-source days are CoinAPI-FILL days, not rehabilitable from Lake alone; policy
+      provisional at 2 of 4 days — §5a-QualityMap "CoinAPI cross-validation"), a vendor-seam day
+      (open), and a day with real `SUB` events (**done 2026-07-01** — `SUB`=`decrement` verified by
+      per-order conservation on 168k/47k live SUB rows). Prior-day seed carry +
       vendor-switch-seam reseed still deferred.
 - [ ] **Crypto Lake Coinbase quality map** — how many *present* days have a degraded `book_delta_v2`
       *reconstruction* (not just the `book` snapshot product)? Degraded present-days get CoinAPI fill.
@@ -701,7 +812,8 @@ Hard gates before the hybrid Coinbase plan is production-validated:
       (§5a-QualityMap "Expanded validation"): 2 `lake_usable`, 1 degraded seam day, 3 gaps,
       4 `inconclusive` — the crossed seed source recurs on 4 of 7 sampled present days
       (8.4–37.5% crossed candidates, Aug '24–Apr '26), and seam days lose the leading 61–67% of the
-      day. Remaining gate: CoinAPI cross-validation for crossed-seed-source days, partial-day fill
+      day. CoinAPI cross-validation 2026-07-01 (2 of 4 crossed-seed-source days): parity fails →
+      those days get CoinAPI fill. Remaining gate: partial-day fill
       handling for seam days, plus the full-window map (~313 GB conservative / ~170 GB measured
       wire-rate → staged across quota windows); backfill stays locked until it passes.)*
 

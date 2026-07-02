@@ -128,7 +128,8 @@ def load_lake_book_snapshots(sess, day: dt.date, exchange: str, symbol: str, *,
     table (verified), and the Coinbase `book` product is small (~275k rows/day ≈ 180 MB, 83 cols),
     so a single-day load is memory-safe — reseeds only need a sparse validated set, not every row.
     The `book` product is NOT used for features; it is a reseed source only, and only on days where
-    it is verified uncrossed (2025-06-01: 0% crossed; 2026-04-01: 31.75% crossed → rejected by
+    it is verified uncrossed (2025-06-01: 0% crossed; 2026-04-01: 37.51% of thinned candidates
+    crossed, 31.75% of raw rows → crossed candidates rejected by
     `classify_snapshot`). Projects the RAW level columns (`bid_i_price/size`, `ask_i_price/size`).
 
     Single-clock invariant: snapshots, deltas, and the grid share ONE engine clock (origin_time — the
@@ -436,8 +437,10 @@ def parse_args(argv=None):
                     help="CoinAPI SUB/MATCH size convention. Default 'decrement': the 2025-06-01 "
                          "live gate proved MATCH.entry_sx is the traded amount for Coinbase "
                          "limitbook_full, so 'absolute' leaves filled orders as stale residue and "
-                         "crosses the book ~100%% (docs/data.md §5a). 'absolute' kept as the A/B "
-                         "alternative for other venues (see recon/coinapi.py).")
+                         "crosses the book ~100%% (docs/data.md §5a); SUB=decrement verified "
+                         "2026-07-01 by per-order conservation on real SUB days (§5a-QualityMap). "
+                         "'absolute' kept as the A/B alternative for other venues "
+                         "(see recon/coinapi.py).")
     ap.add_argument("--on-unknown", choices=("count", "raise"), default="count",
                     help="policy for unknown CoinAPI update_type (default count+skip)")
     ap.add_argument("--band-bps", type=float, default=0.0, help="no-trade band for label agreement (bps)")

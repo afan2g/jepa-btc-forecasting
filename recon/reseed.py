@@ -11,7 +11,7 @@ seed does not fix intraday stranding; we need *reseed-on-crossing*.
 THE POLICY (this module):
   * **Seed** the book from Crypto Lake's `book` (20-level snapshot) product — but only from a
     snapshot we have VALIDATED (two-sided, uncrossed, finite/positive, enough depth). The `book`
-    product is itself intermittently crossed on some days (2026-04-01: 31.75% crossed), so a seed
+    product is itself intermittently crossed on some days (2026-04-01: 31.75% of raw rows), so a seed
     is never trusted blindly; an invalid candidate is skipped and we fall back to the next valid
     one (or cold-start if none).
   * **Reseed** whenever the reconstructed book stays crossed beyond a tolerance window — replace the

@@ -17,7 +17,8 @@ This is a VALIDATION / quality-map tool, NOT a backfill:
     sizes, and REFUSES a broad pull unless `--allow-broad` is passed — and always refuses a pull that
     would breach the monthly quota headroom, override or not.
   * Default day set is small (2025-06-01 = the validated clean day → expected `lake_usable`;
-    2026-04-01 = the crossed-`book`-product day, ~31.75% of `book` seed candidates crossed → its seed
+    2026-04-01 = the crossed-`book`-product day, `seed_source_crossed_frac`=0.3751 of the thinned
+    seed candidates (31.75% of raw product rows) → its seed
     SOURCE is too unreliable to trust → expected `inconclusive`). Add more with `--days`,
     `--days-file`, or `--include-gap-days N` (documented gap/seam days from the usable calendar). It
     writes the full report under `data/reports/` (git-ignored).
@@ -30,8 +31,8 @@ Classifications (explicit thresholds, emitted in the report JSON — see `Thresh
                             skipped before any Lake load (saves quota).
   * inconclusive          — cannot validate the reconstruction: no/all-rejected seed, OR an accepted
                             seed whose `book` SOURCE is itself substantially crossed (e.g. 2026-04-01
-                            ~31.75%), OR the Lake load failed. Needs a better seed source or CoinAPI
-                            fill before a verdict.
+                            `seed_source_crossed_frac`=0.3751), OR the Lake load failed. Needs a
+                            better seed source or CoinAPI fill before a verdict.
 
 Usage:
   .venv/bin/python scripts/run_coinbase_quality_map.py                       # default 2-day set
@@ -75,6 +76,9 @@ MISSING_NEEDS_COINAPI = "missing_needs_coinapi"
 EXCLUDED = "excluded"
 INCONCLUSIVE = "inconclusive"
 CLASSES = (LAKE_USABLE, LAKE_PRESENT_DEGRADED, MISSING_NEEDS_COINAPI, EXCLUDED, INCONCLUSIVE)
+# The reason code that routes a day inconclusive because its accepted seed's `book` SOURCE is itself
+# crossed above the bar — the case the 2026-07-01 CoinAPI cross-validation resolved to "fill".
+SEED_SOURCE_UNRELIABLE = "seed_accepted_but_source_unreliable"
 
 # ----------------------------------------------------------------------------- quota constants
 QUOTA_GB = 300.0           # Crypto Lake individual-plan monthly download cap (docs/data.md §2.1/§8)
@@ -91,7 +95,7 @@ LAKE_GB_PER_DAY = {"book_delta_v2": 0.30, "book": 0.18}
 LAKE_PRODUCTS = ("book_delta_v2", "book")
 
 # Small default validation set: 2025-06-01 = the validated clean day (→ lake_usable); 2026-04-01 =
-# the crossed-`book`-product day (~31.75% crossed seed source → inconclusive). docs §5a-QualityMap.
+# the crossed-`book`-product day (seed_source_crossed_frac=0.3751 → inconclusive). docs §5a-QualityMap.
 DEFAULT_DAYS = ("2025-06-01", "2026-04-01")
 
 
@@ -105,7 +109,7 @@ class Thresholds:
     missing_usable_max: float = 0.02    # ≤2% of grid samples with no top-of-book on a side
     thin_usable_max: float = 0.10       # ≤10% of grid samples present+uncrossed but thin (< k/side)
     seed_crossed_frac_max: float = 0.05  # ≤5% of `book` seed candidates may be crossed; above this the
-                                         # seed SOURCE is unreliable → inconclusive (2026-04-01: 31.75%)
+                                         # seed SOURCE is unreliable → inconclusive (2026-04-01: 0.3751)
 
     def as_dict(self) -> dict:
         return {"crossed_usable_max": self.crossed_usable_max,
@@ -179,7 +183,7 @@ def classify_day(*, have_lake: bool, meta: dict | None, lake_q: dict | None,
     A confident `lake_usable`/`lake_present_degraded` verdict requires a VALIDATED accepted seed AND
     a trustworthy seed SOURCE — without an accepted seed (none/all rejected), a cold-started book can
     look uncrossed for the wrong reason; and even with an accepted seed, if the `book` seed source is
-    itself substantially crossed (e.g. 2026-04-01: 31.75%), seeds during crossed episodes are
+    itself substantially crossed (e.g. 2026-04-01: 0.3751 of candidates), seeds during crossed episodes are
     unreliable and reseeds get blocked, so a clean-looking reconstruction can't be trusted. Both →
     `inconclusive` (the day needs a better seed source or CoinAPI fill), not silently usable."""
     if not have_lake:
@@ -192,12 +196,13 @@ def classify_day(*, have_lake: bool, meta: dict | None, lake_q: dict | None,
         code = "no_seed_snapshots" if sr in (None, "no_snapshots") else f"seed_rejected:{sr}"
         return INCONCLUSIVE, [code, f"crossed_rate_after={crossed:.4f}"]
     # Seed accepted, but is the seed SOURCE itself reliable? The `book` product is intermittently
-    # crossed (2026-04-01: 31.75%); above seed_crossed_frac_max the accepted seed cannot be trusted.
+    # crossed (2026-04-01: 0.3751 of candidates); above seed_crossed_frac_max the accepted seed
+    # cannot be trusted.
     codes = meta.get("snapshot_reason_codes") or {}
     n_snap = sum(codes.values())
     seed_crossed_frac = (codes.get("crossed", 0) / n_snap) if n_snap else 0.0
     if seed_crossed_frac > thresholds.seed_crossed_frac_max:
-        return INCONCLUSIVE, ["seed_accepted_but_source_unreliable",
+        return INCONCLUSIVE, [SEED_SOURCE_UNRELIABLE,
                               f"seed_source_crossed_frac={seed_crossed_frac:.4f}>"
                               f"{thresholds.seed_crossed_frac_max}"]
     over: list[str] = []
@@ -211,6 +216,37 @@ def classify_day(*, have_lake: bool, meta: dict | None, lake_q: dict | None,
         return LAKE_PRESENT_DEGRADED, ["seed_accepted", *over]
     return LAKE_USABLE, ["seed_accepted", f"crossed_rate_after={crossed:.4f}",
                          f"missing_book_fraction={missing:.4f}", f"thin_depth_fraction={thin:.4f}"]
+
+
+def coinapi_fill_decision(classification: str, reasons) -> dict:
+    """Machine-readable CoinAPI-fill mapping for a day's `(classification, reasons)` — the contract
+    fill manifests consume, so the doc-level fill policy never needs manual reinterpretation of
+    reason strings (docs/data.md §5a-QualityMap "CoinAPI cross-validation").
+
+    Returns `{"needs_fill": True|False|None, "why": <code>}`. `needs_fill=None` means the day has no
+    fill decision — either `why="no_verdict"` (an unresolved `inconclusive` day: a fill manifest must
+    surface it, never silently drop it) or `why="excluded_not_in_scope"` (out of the usable calendar
+    for a non-Coinbase reason — not a Coinbase fill candidate at all; `build_report` buckets the two
+    separately).
+
+    `inconclusive` days carrying `seed_accepted_but_source_unreliable` map to `needs_fill=True` per
+    the 2026-07-01 CoinAPI cross-validation: on 2 of the 4 such days (the extremes of the observed
+    8.4–37.5% severity range) parity fails even outside the excluded crossed windows, so
+    crossed-seed-source days are fill days, not rehabilitable from Lake alone. That policy is
+    PROVISIONAL (2 of 4 days measured) — deliberately encoded here rather than by reclassifying the
+    day, so `inconclusive` keeps meaning "no verdict from Lake alone"."""
+    rs = set(reasons or ())
+    if classification == MISSING_NEEDS_COINAPI:
+        return {"needs_fill": True, "why": "lake_book_delta_v2_absent"}
+    if classification == LAKE_PRESENT_DEGRADED:
+        return {"needs_fill": True, "why": "quality_over_usable_bar"}
+    if classification == INCONCLUSIVE and SEED_SOURCE_UNRELIABLE in rs:
+        return {"needs_fill": True, "why": "crossed_seed_source_cross_validated_2026-07-01"}
+    if classification == LAKE_USABLE:
+        return {"needs_fill": False, "why": "lake_usable"}
+    if classification == EXCLUDED:
+        return {"needs_fill": None, "why": "excluded_not_in_scope"}
+    return {"needs_fill": None, "why": "no_verdict"}
 
 
 def _empty_seed_block(snapshots_present, candidates) -> dict:
@@ -373,14 +409,32 @@ def inconclusive_load_failure(day: dt.date, err: str, *, k: int = 10, grid_ms: i
 
 
 def build_report(per_day_results, *, meta: dict) -> dict:
-    """Aggregate per-day results into the report: stable per-class counts + day lists + the rows."""
+    """Aggregate per-day results into the report: stable per-class counts + day lists + the rows.
+    Every per-day record is stamped with its machine-readable `coinapi_fill` decision
+    (`coinapi_fill_decision`), and the summary carries the fill day-lists — the contract a fill
+    manifest reads, so no consumer re-parses reason strings. `no_verdict` holds only genuinely
+    unresolved days; calendar-excluded days go to the separate `not_in_scope` list so out-of-scope
+    (e.g. Binance-gap) days are never mistaken for unresolved Coinbase fills."""
+    days = [{**r, "coinapi_fill": coinapi_fill_decision(r["classification"], r.get("reasons"))}
+            for r in per_day_results]
     by_class: dict[str, list] = {c: [] for c in CLASSES}
-    for r in per_day_results:
+    fill: dict[str, list] = {"needs_fill": [], "no_fill": [], "no_verdict": [], "not_in_scope": []}
+    for r in days:
         by_class.setdefault(r["classification"], []).append(r["day"])
+        nf = r["coinapi_fill"]["needs_fill"]
+        if nf:
+            key = "needs_fill"
+        elif nf is False:
+            key = "no_fill"
+        else:
+            key = ("not_in_scope" if r["coinapi_fill"]["why"] == "excluded_not_in_scope"
+                   else "no_verdict")
+        fill[key].append(r["day"])
     counts = {c: len(by_class[c]) for c in by_class}
     return {"meta": meta,
-            "summary": {"n_days": len(per_day_results), "counts": counts, "by_class": by_class},
-            "days": list(per_day_results)}
+            "summary": {"n_days": len(days), "counts": counts, "by_class": by_class,
+                        "coinapi_fill": fill},
+            "days": days}
 
 
 def write_report(report: dict, path: str) -> str:
