@@ -92,10 +92,26 @@ def test_evaluate_config_duplicate_guards():
         evaluate_config(df, feats + [feats[0]], "naive", n_groups=4, k=1, embargo_ns=0)
 
 
-def test_feature_matrix_follows_manifest_order_not_frame_order():
-    # Characterization pin (deliberately not failing-first): manifest order -> numpy
-    # column order, regardless of frame column order (LightGBM reproducibility). Guards
-    # against a future pandas behavior change or a rewrite of the selection idiom.
-    df, feats, _ = make_matrix(n=100, signal_strength=1.0, seed=3)
-    reordered = df[list(df.columns[::-1])]
-    assert (reordered[feats].to_numpy(float) == df[feats].to_numpy(float)).all()
+def test_feature_matrix_follows_manifest_order_not_frame_order(monkeypatch):
+    # Characterization pin (deliberately not failing-first): manifest order -> numpy column
+    # order THROUGH evaluate_config's production selection (matrix[feature_cols].to_numpy),
+    # regardless of frame column order. Spying on _fit_predict (like the uniqueness test)
+    # exercises the real path, so a rewrite that selected features by FRAME order or position
+    # -- breaking manifest -> LightGBM column order -- would fail here, not just a pandas change.
+    import eval.baseline as B
+    df, feats, _ = make_matrix(n=200, signal_strength=1.0, seed=3)
+    reordered = df[list(df.columns[::-1])]              # same data, reversed column order
+    real = B._fit_predict
+    captured = []
+    def spy(model, Xtr, ytr, ltr, Xte, wtr, scale):
+        captured.append(np.asarray(Xtr).copy())
+        return real(model, Xtr, ytr, ltr, Xte, wtr, scale)
+    monkeypatch.setattr(B, "_fit_predict", spy)
+    B.evaluate_config(df, feats, "naive", n_groups=4, k=1, embargo_ns=0)
+    base = list(captured); captured.clear()
+    B.evaluate_config(reordered, feats, "naive", n_groups=4, k=1, embargo_ns=0)
+    # CPCV folds are identical (timing columns are untouched by column reordering), so each
+    # fold's Xtr matches iff selection follows `feats` order rather than frame order.
+    assert base and len(base) == len(captured)
+    for a, b in zip(base, captured):
+        assert a.shape == b.shape and (a == b).all()
