@@ -154,8 +154,11 @@ BTC ranges 2×+; dollar bars are homoscedastic).
   Using day `d`'s own completed volume would leak future volume into `d`'s bar boundaries
   — a subtle sampling look-ahead. **Warm-up:** the first `warmup_days` (no full trailing
   window) use a fixed seed threshold and are flagged/excluded from the labeled matrix.
-  The build records the **full per-day threshold schedule + its content hash** in the
-  manifest (`bar_clock.threshold_schedule_hash`), not a single scalar — so the sampling is
+  The build records the **full per-day threshold schedule *and* its content hash** in the
+  manifest — `bar_clock.threshold_schedule` (the per-day values, or a named artifact
+  path/`sources` entry) **plus** `threshold_schedule_hash`, **not a single scalar and not the
+  hash alone** (Codex #A — a hash cannot recover the per-day thresholds for a rebuild/audit after
+  a completed-volume, coverage-normalization, or calendar change) — so the sampling is
   reproducible and auditably causal. **Coverage normalization (Codex #12):** the trailing
   average sums each prior day's **raw** completed notional, so a low-coverage (~93%/gappy) or
   CoinAPI-filled day skews `threshold_d` for every later day whose 7–30 d window includes it
@@ -322,9 +325,10 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
      the crossing trade**), **not** the received-gated superset `{received ≤ t_event}`. The
      superset also contains early-arriving **next-bar** trades (origin after the crossing trade);
      folding them here would make `cvd` non-additive across bars and double-count prints, with the
-     value depending on receive-time jitter. Members are automatically observable
-     (`t_event = max(received_time)` over members), so no separate gate is needed on them — only
-     the point-in-time **book snapshot** uses the received-gate.
+     value depending on receive-time jitter. Members are automatically observable because
+     **`t_event ≥` every member's `received_time`** (the monotone watermark is `≥
+     max(member received_time)`, §above), so no separate gate is needed on them — only the
+     point-in-time **book snapshot** uses the received-gate.
    - **Label base price `P0` — the TRUE book at `t_event` (Codex #1):** `P0` = mid (or
      microprice) of the **true reconstructed Coinbase book at `t_event`** — a plain **origin** cut,
      the offline **ground truth**, *not* observability-gated. The triple barrier + emitted span run
@@ -595,7 +599,7 @@ sorted keys.
   `created_by`/`pandas_version` metadata, so byte-identity is environment-coupled; §I/#10), with
   `generated_at` EXCLUDED, `time: {unit: "ns", timezone: "UTC"}`.
 - `bar_clock: {kind: "dollar", reference_stream, target_bars_per_day, time_cap_ns,
-  warmup_days, threshold_schedule_hash, feed_lag_tail_ns {binance_book, binance_trade, coinbase_book, coinbase_trade — p99/max live-watermark bound; offline reads use per-event received_time, §C.2}, seam_policy}` —
+  warmup_days, threshold_schedule (per-day values or named artifact path) + threshold_schedule_hash, feed_lag_tail_ns {binance_book, binance_trade, coinbase_book, coinbase_trade — p99/max live-watermark bound; offline reads use per-event received_time, §C.2}, seam_policy}` —
   the **per-day trailing threshold schedule is pinned by hash** (§A, not a scalar), and
   `seam_policy` is `recon/stitch_policy.py:SeamPolicy.as_dict()` (§C.3). `emitted_by_time_cap`
   is an opted-in diagnostic `extra_cols`, never a feature.
@@ -998,6 +1002,11 @@ schema change.
   `pyproject.toml` `[tool.setuptools.packages.find] include` (currently `recon*/eval*/data*`) and
   `tests/test_packaging.py` extended, or non-editable installs / CLI fail to import the producer
   (carried by T1; §Module layout).
+- Review round 17 (Codex on `bd202bb`) incorporated — 2 findings: **#A (P2):** the manifest persists
+  the **full per-day `threshold_schedule`** (values or a named artifact path) **plus** its hash, not
+  the hash alone — a hash can't recover the thresholds for a rebuild/audit (§A/§H); **#B (P3):** the
+  §C.2 member-observability parenthetical now says members are observable because **`t_event ≥` their
+  max `received_time`** (the watermark is `≥`, not `=`), consistent with the monotone rule.
 
 ## Risks & assumptions
 
