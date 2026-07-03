@@ -408,6 +408,36 @@ def test_day_record_issues_malformed_fill_segments():
     assert any("bad_source" in i for i in _issues([_seg(o, e, "binance")]))
 
 
+def test_day_record_issues_seam_mismatch():
+    day = "2025-01-02"
+    o, e = _day_bounds(day)
+    mid = o + rv.DAY_NS // 2
+    segs = [{"source": "lake", "start_ts": o, "start_iso": _seg_iso(o), "end_ts": mid,
+             "end_iso": _seg_iso(mid), "reason": "r"},
+            {"source": "coinapi", "start_ts": mid, "start_iso": _seg_iso(mid), "end_ts": e,
+             "end_iso": _seg_iso(e), "reason": "r"}]
+
+    def _mk(seams):
+        return _day(day, "lake_present_degraded",
+                    _fill_block(True, "quality_over_usable_bar", fill_profile="trailing_partial_fill",
+                                fill_segments=segs, seams=seams, seam_policy={"seam_guard_s": 60.0}))
+
+    assert any("seams_mismatch" in i for i in rv.day_record_issues(_mk([])))      # stale/empty seam
+    assert not any("seams_mismatch" in i for i in rv.day_record_issues(_mk([mid])))  # correct seam
+
+
+def test_summary_fill_counts_cross_checked():
+    rep = _clean_reports()[0]
+    rep["summary"]["coinapi_fill"] = {"fill_counts": {
+        "needs_fill": 99, "full_day_fill": 99, "leading_partial_fill": 0,
+        "trailing_partial_fill": 0, "internal_gap_fill": 0, "mixed_partial_fill": 0,
+        "crossed_source_full_day": 0, "no_verdict": 0, "no_fill": 0, "not_in_scope": 0}}
+    assert any("fill_counts_mismatch" in i for i in rv.summary_count_issues(rep))
+    rep2 = _clean_reports()[0]
+    rep2["summary"]["coinapi_fill"] = {"fill_counts": rv._recompute_fill_counts(rep2["days"])}
+    assert not any("fill_counts_mismatch" in i for i in rv.summary_count_issues(rep2))
+
+
 def test_day_record_issues_fill_decision_contradicts_classification():
     # stale report: a degraded/missing day mismarked as no-fill would silently DROP a required fill
     for cls in ("lake_present_degraded", "missing_needs_coinapi"):

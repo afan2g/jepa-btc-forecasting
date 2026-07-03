@@ -230,12 +230,13 @@ def _fill_contract_issue(cls, needs_fill, why):
     return None
 
 
-def _fill_segments_issues(day, segments) -> list:
+def _fill_segments_issues(day, segments, seams) -> list:
     """A fill day's segments must PARTITION [day_open, day_close) as ordered, contiguous half-open
     [start, end) spans with a known source (spec §9 #3) — a manifest is an executable stitch plan, so
     a segment that starts after day-open, ends before day-close, overlaps/gaps a neighbour, or uses an
-    unexpected source must fail review. Structural checks always run; the day-open/close coverage
-    check runs only when `day` is a parseable ISO date."""
+    unexpected source must fail review. `seams` must be EXACTLY the source-change boundaries between
+    adjacent segments. Structural checks always run; the day-open/close coverage check runs only when
+    `day` is a parseable ISO date."""
     issues = []
     try:
         day_open, day_end = _day_bounds_ns(day)
@@ -262,6 +263,14 @@ def _fill_segments_issues(day, segments) -> list:
         prev_end = en
     if day_end is not None and prev_end is not None and prev_end != day_end:
         issues.append("fill_segments_end_ne_day_close")
+    # seams must be exactly the source-change boundaries (stitch_policy: the RIGHT segment's start_ts
+    # wherever adjacent sources differ). An empty/stale seams list drops the guard bands a consumer
+    # needs at a real Lake<->CoinAPI switch.
+    expected_seams = [cur.get("start_ts") for prev, cur in zip(segments, segments[1:])
+                      if isinstance(prev, dict) and isinstance(cur, dict)
+                      and prev.get("source") != cur.get("source")]
+    if list(seams or []) != expected_seams:
+        issues.append(f"seams_mismatch:expected={expected_seams}:got={list(seams or [])}")
     return issues
 
 
@@ -314,7 +323,8 @@ def day_record_issues(rec: dict) -> list:
         if not isinstance(segs, list) or not segs:
             issues.append("fill_day_missing_fill_segments")
         else:
-            issues.extend(_fill_segments_issues(rec.get("day"), segs))  # segments must partition the day
+            # segments must partition the day AND seams must match their source-change boundaries
+            issues.extend(_fill_segments_issues(rec.get("day"), segs, cf.get("seams")))
         if not isinstance(cf.get("seams"), list):        # may be empty (full_day) but never null
             issues.append("fill_day_missing_seams")
         if not isinstance(cf.get("seam_policy"), dict):
@@ -335,14 +345,44 @@ def recompute_class_counts(days: list) -> dict:
     return counts
 
 
+def _recompute_fill_counts(days: list) -> dict:
+    """Recompute the runner's summary.coinapi_fill.fill_counts from days[] (build_report's logic)."""
+    profiles = (FULL_DAY_FILL, *PARTIAL_FILL_PROFILES)
+    counts = {"needs_fill": 0, **{p: 0 for p in profiles},
+              "crossed_source_full_day": 0, "no_verdict": 0, "no_fill": 0, "not_in_scope": 0}
+    for r in days:
+        cf = r.get("coinapi_fill") or {}
+        nf = cf.get("needs_fill")
+        if nf:
+            counts["needs_fill"] += 1
+            prof = cf.get("fill_profile")
+            if prof in counts:
+                counts[prof] += 1
+            if cf.get("full_day_reason") == "crossed_seed_source":   # stitch_policy.REASON_CROSSED_SOURCE
+                counts["crossed_source_full_day"] += 1
+        elif nf is False:
+            counts["no_fill"] += 1
+        else:
+            counts["not_in_scope" if cf.get("why") == "excluded_not_in_scope" else "no_verdict"] += 1
+    return counts
+
+
 def summary_count_issues(report: dict) -> list:
-    """The report's summary.counts must equal a recomputation over days[] (days[] is primary)."""
+    """The report's summary.counts AND summary.coinapi_fill.fill_counts must each equal a
+    recomputation over days[] (days[] is primary; both summary blocks are cross-checks)."""
+    days = report.get("days") or []
     got = (report.get("summary") or {}).get("counts") or {}
-    want = recompute_class_counts(report.get("days") or [])
+    want = recompute_class_counts(days)
     issues = []
     for c in CLASSES:
         if int(got.get(c, 0)) != want[c]:
             issues.append(f"summary_counts_mismatch:{c}:summary={got.get(c)}:recomputed={want[c]}")
+    fc_got = ((report.get("summary") or {}).get("coinapi_fill") or {}).get("fill_counts")
+    if isinstance(fc_got, dict):   # a stale fill_counts from a prior run must not pass review
+        fc_want = _recompute_fill_counts(days)
+        for k, v in fc_want.items():
+            if int(fc_got.get(k, 0)) != v:
+                issues.append(f"fill_counts_mismatch:{k}:summary={fc_got.get(k)}:recomputed={v}")
     return issues
 
 
