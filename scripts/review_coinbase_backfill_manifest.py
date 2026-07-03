@@ -250,8 +250,14 @@ def validate_calendar(cal: dict, path: str) -> None:
         if not isinstance(v, dict) or not all(isinstance(v.get(k), bool) for k in ("book", "trades")):
             raise ReviewInputError(f"usable calendar {path}: coinbase_fill_days entry {d} must be a "
                                    "{'book': bool, 'trades': bool} object")
-    if "fill_status" in cal and not isinstance(cal["fill_status"], dict):
-        raise ReviewInputError(f"usable calendar {path}: 'fill_status' must be an object")
+    # fill_status may be null/absent: verify_trades_and_calendar WITHOUT --verify-backfill (its
+    # default) writes "fill_status": null — a valid-but-unverified snapshot. Let it through so
+    # check_fill_availability records book_fill_unavailable / trade_fill_unavailable blockers
+    # (status=blocking, exit 3, an auditable manifest still written, --report-only can inspect it)
+    # rather than a structural exit-2. A present non-null, non-object value is still malformed.
+    fs = cal.get("fill_status")
+    if fs is not None and not isinstance(fs, dict):
+        raise ReviewInputError(f"usable calendar {path}: 'fill_status' must be an object or null")
 
 
 # ----------------------------------------------------------- cost model
@@ -682,11 +688,31 @@ def load_batch_reports(plan: dict) -> tuple:
                 # a non-string day (e.g. numeric 20250102 or null) would make _universe's sorted()
                 # raise TypeError over a mixed int/str set — fail closed here (exit 2) instead.
                 raise ReviewInputError(f"{rpath}: report day must be a string, got {type(d).__name__}")
+            # a day in more than one batch is a coverage_gaps blocking VERDICT
+            # (duplicate_across_batches), not a structural error: keep the first mapping and skip the
+            # rest so a manifest still assembles, and let duplicate_batch_days() surface the overlap
+            # for --report-only to inspect and to fail closed on.
             if d in day_index:
-                raise ReviewInputError(f"day {d} appears in more than one batch report "
-                                       "(duplicate_across_batches); batch day-sets must be disjoint")
+                continue
             day_index[d] = rec
     return reports, day_index
+
+
+def duplicate_batch_days(reports: list) -> list:
+    """Days appearing in more than one batch report (spec §4 coverage_gaps:
+    duplicate_across_batches). Batch day-sets must be disjoint; an overlap (an overlapping or stale
+    batch) is a blocking verdict, not a structural error, so load_batch_reports keeps the first
+    mapping and check_completeness records the overlap here — the manifest stays auditable."""
+    seen, dupes = set(), set()
+    for r in reports:
+        for rec in r["report"].get("days") or []:
+            d = rec.get("day") if isinstance(rec, dict) else None
+            if isinstance(d, str):
+                if d in seen:
+                    dupes.add(d)
+                else:
+                    seen.add(d)
+    return sorted(dupes)
 
 
 def missing_batch_reports(plan: dict) -> list:
@@ -787,6 +813,8 @@ def check_completeness(plan: dict, reports: list, day_index: dict, cal: dict,
     for b in missing or ():
         blockers["coverage_gaps"].append(f"planned_but_no_report:{b.get('report_dir')}")
         missing_days |= _batch_file_days(out_dir, b)
+    for d in duplicate_batch_days(reports):
+        blockers["coverage_gaps"].append(f"duplicate_across_batches:{d}")
 
     expected = set(calendar_batch_days(cal))
     mapped = set(day_index)
@@ -1122,7 +1150,13 @@ def build_manifest_inspection(report_paths, cal_path, *, generated_utc) -> dict:
             if not isinstance(rec, dict):
                 raise ReviewInputError(f"{r['path']}: report 'days' must contain objects, got "
                                        f"{type(rec).__name__}")
-            day_index.setdefault(rec.get("day"), rec)
+            d = rec.get("day")
+            if not isinstance(d, str):
+                # mirror load_batch_reports: a non-string day would crash _universe's sorted() over a
+                # mixed int/str set — fail closed (exit 2) with the same clean input error.
+                raise ReviewInputError(f"{r['path']}: report day must be a string, got "
+                                       f"{type(d).__name__}")
+            day_index.setdefault(d, rec)
     days = [build_day_record(d, day_index.get(d), cal) for d in _universe(reports, cal)]
     inputs = {"batch_reports": [{"path": r["path"], "sha256": sha256_file(r["path"])}
                                 for r in reports],

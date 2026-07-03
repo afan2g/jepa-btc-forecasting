@@ -395,6 +395,32 @@ def test_validate_calendar():
         rv.validate_calendar(bad_list, "cal")
 
 
+def test_validate_calendar_allows_null_fill_status():
+    # verify_trades_and_calendar WITHOUT --verify-backfill writes fill_status: null (unverified) — a
+    # valid snapshot that must pass validation. A present non-null, non-object value is still malformed.
+    rv.validate_calendar(_calendar(fill_status=None), "cal")   # no raise
+    with pytest.raises(rv.ReviewInputError, match="fill_status"):
+        rv.validate_calendar(_calendar(fill_status=["x"]), "cal")
+
+
+def test_readiness_null_fill_status_blocks_via_availability(tmp_path):
+    # an unverified calendar (fill_status null) is NOT a structural error: the CLI still writes an
+    # auditable manifest with the calendar book/trade gaps surfaced as availability blockers, and
+    # --report-only can downgrade it for inspection.
+    plan_path, cal_path = _write_tree(tmp_path, cal=_calendar(fill_status=None))
+    out = tmp_path / "m.json"
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(out),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.BLOCKING_EXIT
+    m = json.loads(out.read_text())
+    assert m["meta"]["status"] == "blocking"
+    assert "2025-01-10" in m["blockers"]["book_fill_unavailable"]
+    assert set(m["blockers"]["trade_fill_unavailable"]) == {"2025-01-10", "2025-01-11"}
+    rc2 = rv.main(["--plan-manifest", plan_path, "--out", str(out), "--report-only",
+                   "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc2 == 0
+
+
 def test_readiness_rejects_malformed_calendar_fill_flag(tmp_path):
     cal = _calendar()
     cal["coinbase_fill_days"]["2025-01-11"]["trades"] = "true"   # stringly-typed flag
@@ -1048,12 +1074,19 @@ def test_load_batch_reports_rejects_non_string_day(tmp_path):
 
 
 def test_completeness_duplicate_day_across_batches_blocks(tmp_path):
+    # a day in two batches is a coverage_gaps blocking VERDICT (duplicate_across_batches), not a
+    # structural exit-2: load_batch_reports keeps the first mapping (no raise) and check_completeness
+    # records the overlap so a manifest still assembles and --report-only can inspect it.
     reports = [_report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))]),
                _report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])]
     plan_path, cal_path = _write_tree(tmp_path, reports=reports)
     plan = rv.load_json_object(plan_path, what="plan manifest")
-    with pytest.raises(rv.ReviewInputError, match="duplicate"):
-        rv.load_batch_reports(plan)
+    cal = rv.load_json_object(cal_path, what="usable calendar")
+    reports_loaded, day_index = rv.load_batch_reports(plan)   # no raise
+    assert rv.duplicate_batch_days(reports_loaded) == ["2025-01-01"]
+    blockers = rv.new_blockers()
+    rv.check_completeness(plan, reports_loaded, day_index, cal, blockers)
+    assert any("duplicate_across_batches:2025-01-01" in x for x in blockers["coverage_gaps"])
 
 
 # =========================================================================== Task 9: consistency
@@ -1467,6 +1500,20 @@ def test_cli_inspection_mode_rejects_malformed_days(tmp_path):
                          "coinbase_quality_map.json")
     rep = json.loads(_pl.Path(rpath).read_text())
     rep["days"] = ["2025-01-01"]   # list of non-objects
+    _pl.Path(rpath).write_text(json.dumps(rep))
+    rc = rv.main(["--report", rpath, "--usable-calendar", cal_path, "--out", str(tmp_path / "m.json"),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.INPUT_ERROR_EXIT
+
+
+def test_cli_inspection_mode_rejects_non_string_day(tmp_path):
+    # P3: a numeric report `day` in inspection mode must fail closed (exit 2) like readiness, not
+    # crash _universe's sorted() over a mixed int/str set
+    plan_path, cal_path = _write_tree(tmp_path)
+    rpath = os.path.join(rv.load_json_object(plan_path, what="p")["batches"][0]["report_dir"],
+                         "coinbase_quality_map.json")
+    rep = json.loads(_pl.Path(rpath).read_text())
+    rep["days"][0]["day"] = 20250101
     _pl.Path(rpath).write_text(json.dumps(rep))
     rc = rv.main(["--report", rpath, "--usable-calendar", cal_path, "--out", str(tmp_path / "m.json"),
                   "--generated-utc", "2026-07-03T00:00:00Z"])
