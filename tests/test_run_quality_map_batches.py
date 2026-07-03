@@ -252,6 +252,15 @@ def test_build_command_rejects_a_command_that_is_not_the_known_runner():
         qmb.build_command(batch)
 
 
+def test_runner_pin_rejects_same_basename_at_a_different_path():
+    # Codex P2: basename-only pinning would accept a same-named script ELSEWHERE (e.g. /tmp), which
+    # --execute would then run instead of the repo's quota-gated runner. Pin the full relative path.
+    batch = {"file": "b", "report_dir": "r",
+             "command": "python /tmp/run_coinbase_quality_map.py --out-dir r"}
+    with pytest.raises(ValueError, match="does not invoke"):
+        qmb.build_command(batch)
+
+
 def test_stale_report_not_matching_the_plan_row_is_not_complete(tmp_path):
     # a report left under batch_001's report_dir by a PRIOR plan covering a DIFFERENT day set
     # (n_days differs) must NOT count as complete — silently skipping it is a coverage gap in the

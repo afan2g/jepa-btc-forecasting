@@ -121,12 +121,14 @@ def _runner_argv(batch: dict) -> list[str]:
     """Tokenize a batch command and confirm it invokes the KNOWN quota-gated runner. Raises
     RunnerError on a malformed command or an unexpected program. The manifest is a trusted, locally
     generated artifact, but a stale/hand-edited one must not launch some other tool that skips the
-    Lake quota gate — so the program name is pinned to RUNNER_SCRIPT (defense-in-depth)."""
+    Lake quota gate — so the program path is pinned to the exact planner-emitted RUNNER_SCRIPT
+    (the normalized relative path, NOT just its basename: a same-named script at another path, e.g.
+    `/tmp/run_coinbase_quality_map.py`, is refused). Defense-in-depth."""
     argv = shlex.split(batch["command"])
     if len(argv) < 2:
         raise RunnerError(f"batch {batch.get('file')!r} has an unparseable command: "
                           f"{batch['command']!r}")
-    if pathlib.Path(argv[1]).name != pathlib.Path(RUNNER_SCRIPT).name:
+    if os.path.normpath(argv[1]) != os.path.normpath(RUNNER_SCRIPT):
         raise RunnerError(f"batch {batch.get('file')!r} command does not invoke {RUNNER_SCRIPT} "
                           f"(got program {argv[1]!r}); refusing to run an unexpected tool")
     return argv
