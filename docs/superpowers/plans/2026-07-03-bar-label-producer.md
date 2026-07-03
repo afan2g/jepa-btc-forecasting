@@ -259,8 +259,12 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
      and closes on the threshold-crossing trade, but since origin ≠ received order an
      earlier-origin trade in the bar can arrive *later* — so **`t_event = max(received_time)` over
      all trades included in the bar** (the moment the box has observed every constituent trade and
-     can confirm the crossing), never just the crossing trade's `received_time`. Live: a bounded
-     watermark waits for stragglers; offline this is exact.
+     can confirm the crossing), never just the crossing trade's `received_time`.
+   - **Time-cap closes (`emitted_by_time_cap`, Codex P1):** a cap-closed bar fires at the cap
+     boundary `t_cap` (§A), which may hold few or **zero** trades — so `t_event = max(t_cap,
+     max(received_time) over the bar's events)`; `t_event` is **never earlier than the cap fire
+     time**, or `t_available`/labels would start before the bar was decidable. Live: a bounded
+     watermark waits for stragglers up to `t_cap`; offline this is exact.
    - **Book snapshots** (both venues — incl. the Coinbase target mid/microprice **and**
      `half_spread_bps`): include book events with `received_time ≤ t_event`; the Coinbase
      target **`coinbase_read_ts`** is the **origin time of the last such book event**
@@ -346,7 +350,7 @@ contract, restated as production rules:
 
 | Column | Definition (producer) | Enforced invariant |
 | --- | --- | --- |
-| `t_event` | **decision** time on the **received-time** axis = `max(received_time)` over the bar's trades (origin≠received order; §C.2); every input gated by `received_time ≤ t_event`; **not** the raw bar close | int64 ns, non-null |
+| `t_event` | **decision** time on the **received-time** axis = `max(received_time)` over the bar's trades, and **≥ the time-cap fire time** for `emitted_by_time_cap` rows (§C.2); every input gated by `received_time ≤ t_event`; **not** the raw bar close | int64 ns, non-null |
 | `t_feature_start` | origin time of the **oldest** look-back event observed by `t_event` (`received_time ≤ t_event`) | `t_feature_start ≤ t_event`; observed look-back ≤ `max_lookback_ns` |
 | `t_available` | when features become usable = **`t_event`** (synchronous) | `t_available == t_event` (every input has `received_time ≤ t_event` per §C.2, `availability_lag_ns = 0`) |
 | `t_barrier` | first-barrier-hit time (TP/SL/time), forward from `t_event` | `t_event ≤ t_barrier ≤ t_event + horizons[tag]` |
@@ -558,8 +562,9 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   t_event` but `origin_time ≤ t_event`) must **not** enter the snapshot/features (regression
   guard: a median-lag read would wrongly include it). Asserts `t_event == max(received_time)`
   over the bar's trades (plant a delayed non-crossing trade whose `received_time` exceeds the
-  crossing trade's — `t_event` must track it), the Coinbase target book resolves to
-  `coinbase_read_ts` (last observed, not `t_event`), and `t_available == t_event` holds *without*
+  crossing trade's — `t_event` must track it) and, for an `emitted_by_time_cap` bar (incl. a
+  **zero-trade** quiet interval), `t_event ≥` the cap fire time; the Coinbase target book resolves
+  to `coinbase_read_ts` (last observed, not `t_event`), and `t_available == t_event` holds *without*
   look-ahead.
 - **Seam masking (P2a):** a synthetic day with a planted seam (two vendor segments +
   `SeamPolicy` guard) drops every bar whose feature/label window crosses the seam **or sits
@@ -631,7 +636,7 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 
 | Task | Scope | Builds on (file:line) | Deliverable | Pre/Post backfill |
 | --- | --- | --- | --- | --- |
-| **T1** `feat/bars-clock` | Dollar-notional clock (accumulate in `origin_time` order, **close at `max(received_time)` of the bar's trades** — P1) + hybrid time cap + **trailing/as-of-only per-day threshold schedule + warm-up** (P2b) + `emitted_by_time_cap`; Coinbase-order sort; **prerequisites: received-time-bearing event record (§C.2) + CoinAPI Coinbase-trades normalizer (§C.1) — neither exists** | `recon/events.py:Trade` (needs both timestamps); streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle only, §C.1) | `bars/clock.py` + threshold-causality test | Pre (calibration Post) |
+| **T1** `feat/bars-clock` | Dollar-notional clock (accumulate in `origin_time` order, **close at `max(received_time)` of the bar's trades, or ≥ the cap fire time for `emitted_by_time_cap` bars** — P1) + hybrid time cap + **trailing/as-of-only per-day threshold schedule + warm-up** (P2b) + `emitted_by_time_cap`; Coinbase-order sort; **prerequisites: received-time-bearing event record (§C.2) + CoinAPI Coinbase-trades normalizer (§C.1) — neither exists** | `recon/events.py:Trade` (needs both timestamps); streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle only, §C.1) | `bars/clock.py` + threshold-causality test | Pre (calibration Post) |
 | **T2** `feat/bars-snapshot` | Dual-book snapshot over events with **`received_time ≤ t_event`** (Coinbase target → `coinbase_read_ts` = last observed, P1); mid + microprice (both emitted) | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py` + received-time test | Pre |
 | **T3** `feat/bars-features` | Per-bar §6/E1.2 vector (OFI/CVD/microprice_dev/queue_imb/spread_tick/depth/slope/VWAP/intra-bar path); stationarization; **value-level no-lookahead test** | T2, `recon/orderbook.py:snapshot` | `bars/features.py` + no-lookahead test | Pre |
 | **T4** `feat/bars-xvenue` | **`t_event` = `max(received_time)` over the bar's trades (origin≠received order); every input gated by per-event `received_time ≤ t_event` (exact); p99/max tail only for the live watermark, never medians** (P1); needs the received-time-bearing event record (§C.2); basis; perp-state conditioners; **sample-timing test (delayed-event guard)** | T3, data.md §5/§5b | `bars/align.py` + sample-timing test | Pre (Binance tail from E2.5 Post) |
@@ -649,9 +654,10 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 Forks resolved from the docs. Each is a **manifest parameter**, so an ablation needs no
 schema change.
 
-1. **Clock trigger venue** = **Coinbase/target-venue-triggered pre-E2.5** — the close is a
-   **local** Coinbase trade whose `received_time` is known today (`t_event =` its receipt),
-   with no dependence on an unpinned Binance live-watermark tail; the spec §5.1 **Binance-perp
+1. **Clock trigger venue** = **Coinbase/target-venue-triggered pre-E2.5** — a **local** Coinbase
+   bar whose `t_event = max(received_time)` over its trades (≥ the time-cap fire time for cap
+   closes; §C.2) is fully known today, with no dependence on an unpinned Binance live-watermark
+   tail; the spec §5.1 **Binance-perp
    notional clock is the post-E2.5 target**, enabled once E2.5 pins the Binance trade-lag tail
    for the live loop. Combined B+C is an ablation knob (E2.2 decides).
    Trigger venue is a manifest parameter, so the switch is config, not a rewrite.
@@ -759,6 +765,10 @@ schema change.
   and because origin≠received order within a bar, **`t_event = max(received_time)` over the bar's
   trades**, not the crossing trade's (P1, §C.2/§E/§J); and decision #8's stale "manifest edit" for
   the τ-rung now matches §D (P2) — traced to `recon/events.py`, `recon/ingest.py`.
+- Review round 10 (Codex on `faa1e3b`) incorporated: **time-cap closes** — for
+  `emitted_by_time_cap` bars (few or **zero** trades) `t_event = max(t_cap, max(received_time))`
+  and is **never earlier than the cap fire time** (P1, §C.2/§E/§J/T1) — and decision #1 now
+  restates `max(received_time)` over the bar's trades rather than the single trigger receipt (P1).
 
 ## Risks & assumptions
 
