@@ -594,6 +594,31 @@ def test_day_record_issues_fill_plan_needs_coinapi_segment():
     assert not any("coinapi_segment" in i for i in rv.day_record_issues(ok))
 
 
+def test_missing_needs_coinapi_partial_profile_fails_closed():
+    # P1: a missing_needs_coinapi day has NO Lake book for the WHOLE day, so a partial profile that
+    # preserves a Lake segment references nonexistent data. It must be flagged (require full-day) —
+    # the existing full_day_fill_non_coinapi_segment check only covers the full_day profile.
+    day = "2025-01-05"
+    o, e = _day_bounds(day)
+    mid = o + rv.DAY_NS // 2
+    segs = [{"source": "coinapi", "start_ts": o, "start_iso": _seg_iso(o), "end_ts": mid,
+             "end_iso": _seg_iso(mid), "reason": "gap"},
+            {"source": "lake", "start_ts": mid, "start_iso": _seg_iso(mid), "end_ts": e,
+             "end_iso": _seg_iso(e), "reason": "trusted"}]
+    bad = _day(day, "missing_needs_coinapi",
+               _fill_block(True, "lake_book_delta_v2_absent", fill_profile="leading_partial_fill",
+                           fill_segments=segs, seams=[mid], seam_policy={"seam_guard_s": 60.0}))
+    assert "missing_needs_coinapi_requires_full_day_fill" in rv.day_record_issues(bad)
+    # a legit all-CoinAPI full-day replacement for the whole-day gap stays clean
+    ok = _day(day, "missing_needs_coinapi",
+              _fill_block(True, "lake_book_delta_v2_absent", fill_profile="full_day_fill",
+                          full_day_reason="lake_book_delta_v2_absent",
+                          fill_segments=[_full_day_seg(day, reason="lake_book_delta_v2_absent")],
+                          seams=[], seam_policy={"seam_guard_s": 60.0}))
+    assert not any("missing_needs_coinapi_requires_full_day_fill" in i
+                   for i in rv.day_record_issues(ok))
+
+
 def test_day_record_issues_scalar_seams_no_crash():
     # a corrupt non-list `seams` (e.g. a scalar) must fail closed, not crash on list(seams)
     day = "2025-01-02"
@@ -1131,38 +1156,40 @@ def test_calendar_drift_missing_context_blocks():
     assert any("missing_in_lake_all_days" in x for x in blockers2["calendar_drift"])
 
 
-def test_check_report_fill_availability_blocks_unverified_report_fill():
-    # Only POSITIVE evidence of unavailability blocks: an EXPLICIT coinapi.fillable==False (d1). A
-    # None fillable with no measured fill_status (d3) is the normal quality-map-added present fill
-    # priced by the nominal estimate and does NOT block; d2 (fillable True) is available; d4 needs no
-    # fill. Requiring pre-downloaded proof for present-degraded days would defeat pre-spend approval.
+def test_report_fill_availability_ignores_report_fillable_without_measured_status():
+    # The report's coinapi.fillable is NOT an independent block signal: the runner derives it as
+    # bool(fill_status.book and book.present), so it is None for never-probed present-degraded fills
+    # AND spuriously False for trade-only days (book=null). With no non-null MEASURED book status,
+    # none of these block — blocking on absence of evidence would defeat pre-spend approval.
     day_index = {
-        "d1": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": False}},
-        "d2": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": True}},
-        "d3": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": None}},
-        "d4": {"coinapi_fill": {"needs_fill": False}, "coinapi": {"fillable": None}},
+        "d_false": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": False}},
+        "d_true": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": True}},
+        "d_none": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": None}},
+        "d_nofill": {"coinapi_fill": {"needs_fill": False}, "coinapi": {"fillable": False}},
     }
     blockers = rv.new_blockers()
     rv.check_report_fill_availability(day_index, {}, blockers)
-    assert blockers["book_fill_unavailable"] == ["d1:report_coinapi_fillable_false"]
+    assert blockers["book_fill_unavailable"] == []
 
 
 def test_report_fill_available_via_local_parquet(tmp_path):
-    # a local CoinAPI parquet re-stat'd on disk makes a fill available even against an EXPLICIT
-    # coinapi.fillable==False (the data is already in hand) — the flag is re-verified, not trusted
+    # a local CoinAPI parquet re-stat'd on disk makes a fill available even when the calendar's
+    # MEASURED book status is present-but-not-ok (the data is already in hand) — flag re-verified
+    cal = _calendar(fill_status={"2025-01-02": {"book": {"present": True, "mb": 100.0, "ok": False},
+                                                "trades": None, "error": False, "reason": "", "ok": True}})
     pq = tmp_path / "data.parquet"
     pq.write_text("x")
-    day_index = {"d1": {"coinapi_fill": {"needs_fill": True},
-                        "coinapi": {"fillable": False, "parquet_local": True,
-                                    "parquet_path": str(pq)}}}
+    day_index = {"2025-01-02": {"coinapi_fill": {"needs_fill": True},
+                                "coinapi": {"fillable": True, "parquet_local": True,
+                                            "parquet_path": str(pq)}}}
     blockers = rv.new_blockers()
-    rv.check_report_fill_availability(day_index, {}, blockers)
+    rv.check_report_fill_availability(day_index, cal, blockers)
     assert blockers["book_fill_unavailable"] == []
-    # once the parquet is gone the stale flag is not trusted, and the explicit fillable=False blocks
+    # once the parquet is gone the stale flag is not trusted, and the measured not-ok book blocks
     pq.unlink()
     blockers2 = rv.new_blockers()
-    rv.check_report_fill_availability(day_index, {}, blockers2)
-    assert blockers2["book_fill_unavailable"] == ["d1:report_coinapi_fillable_false"]
+    rv.check_report_fill_availability(day_index, cal, blockers2)
+    assert blockers2["book_fill_unavailable"] == ["2025-01-02:calendar_book_not_ok"]
 
 
 def test_fill_status_container_non_dict():
@@ -1175,22 +1202,20 @@ def test_fill_status_container_non_dict():
         rv.validate_calendar(cal, "cal")
 
 
-def test_report_book_fill_on_trade_only_day_uses_report_evidence():
-    # a report-driven book fill on a trade-only day: fill_status[d].book is null (no book gap check),
-    # so fall back to the report's coinapi.fillable rather than blocking on the missing book status
+def test_report_book_fill_on_trade_only_day_not_blocked():
+    # P2: a trade-only day has fill_status[d].book == null (no book probe), and the runner derives
+    # coinapi.fillable = bool(None and ...) == False SPURIOUSLY. If that day is later classified
+    # lake_present_degraded and needs a quality-map book fill, the spurious False is NOT positive
+    # evidence CoinAPI lacks the book, so it must NOT block — for any report fillable value.
     cal = _calendar(fill_status={"2025-01-11": {"book": None,
                                                 "trades": {"present": True, "mb": 20.0, "ok": True},
                                                 "error": False, "reason": "", "ok": True}})
-    ok = {"2025-01-11": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": True}}}
-    blockers = rv.new_blockers()
-    rv.check_report_fill_availability(ok, cal, blockers)
-    assert blockers["book_fill_unavailable"] == []
-    # a report that is EXPLICITLY not fillable still blocks (None would be the normal present-fill
-    # case and would not block)
-    bad = {"2025-01-11": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": False}}}
-    blockers2 = rv.new_blockers()
-    rv.check_report_fill_availability(bad, cal, blockers2)
-    assert blockers2["book_fill_unavailable"] == ["2025-01-11:report_coinapi_fillable_false"]
+    for fillable in (True, False, None):
+        day_index = {"2025-01-11": {"coinapi_fill": {"needs_fill": True},
+                                    "coinapi": {"fillable": fillable}}}
+        blockers = rv.new_blockers()
+        rv.check_report_fill_availability(day_index, cal, blockers)
+        assert blockers["book_fill_unavailable"] == [], f"fillable={fillable} must not block"
 
 
 def test_report_book_fill_malformed_book_status_fails_closed():
@@ -1217,15 +1242,23 @@ def test_check_report_fill_availability_rechecks_calendar_ok():
     assert blockers["book_fill_unavailable"] == ["2025-01-02:calendar_book_not_ok"]
 
 
-def test_readiness_blocks_report_fill_explicitly_unfillable(tmp_path):
-    # an EXPLICIT coinapi.fillable=False on a report-driven fill still blocks readiness
-    reports = _clean_reports()
-    reports[0]["days"][1]["coinapi"]["fillable"] = False   # 2025-01-02 degraded fill, not fillable
-    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+def test_readiness_blocks_report_fill_measured_book_not_ok(tmp_path):
+    # a report-driven fill on a day whose calendar MEASURED book status is present-but-not-ok
+    # (unverifiable flat file) blocks readiness — the fill must not be priced `ready` from bad MB
+    reports = _clean_reports()   # 2025-01-02 is a degraded full_day_fill (needs_fill True)
+    cal = _calendar(fill_status={
+        "2025-01-02": {"book": {"present": True, "mb": 100.0, "ok": False},
+                       "trades": None, "error": False, "reason": "", "ok": True},
+        "2025-01-10": {"book": {"present": True, "mb": 1000.0, "ok": True},
+                       "trades": {"present": True, "mb": 30.0, "ok": True},
+                       "error": False, "reason": "", "ok": True},
+        "2025-01-11": {"book": None, "trades": {"present": True, "mb": 20.0, "ok": True},
+                       "error": False, "reason": "", "ok": True}})
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal, reports=reports)
     m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
                                     report_only=False)
     assert m["meta"]["status"] == "blocking"
-    assert any("report_coinapi_fillable_false" in x
+    assert any("2025-01-02:calendar_book_not_ok" in x
                for x in m["blockers"]["book_fill_unavailable"])
 
 
