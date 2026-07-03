@@ -4,6 +4,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from eval.manifest import MANIFEST_VERSION
+from eval.matrix import RESERVED
+
 FEATURES = ["ofi_integrated", "microprice_dev", "queue_imb", "spread_tick", "cvd"]
 
 
@@ -42,3 +45,31 @@ def make_matrix(n: int = 8000, *, signal_strength: float, seed: int,
     df["regime"] = regime
     df["horizon"] = "10s"
     return df, list(FEATURES), int(lookback)
+
+
+def make_manifest(feature_cols, max_lookback_ns, *, gate=None, **over):
+    """A schema-valid v1 feature manifest mirroring make_matrix ("10s" horizon tag with
+    duration = max_lookback_ns — the generator sets lookback == horizon_ns, so this holds
+    for any horizon_ns override too; embargo = look-back). Test/exploration helper — real
+    builds write their own manifest. Override horizons via **over for multi-horizon or
+    custom-tag manifests."""
+    man = {
+        "manifest_version": MANIFEST_VERSION,
+        "dataset_id": "synthetic",
+        "build_id": "seeded",
+        "bar_clock": {"kind": "synthetic"},
+        "time": {"unit": "ns", "timezone": "UTC"},
+        "feature_cols": list(feature_cols),
+        "target_cols": ["y_fwd_bps", "label"],
+        "reserved_cols": list(RESERVED),
+        "venues": [{"exchange": "SYNTHETIC", "symbol": "BTC-TEST"}],
+        "horizons": {"10s": int(max_lookback_ns)},
+        "sources": ["eval/synthetic.py"],
+        "generated_at": "2026-07-02T00:00:00+00:00",
+        "max_lookback_ns": int(max_lookback_ns),
+        "embargo_ns": int(max_lookback_ns),
+    }
+    if gate is not None:
+        man["gate"] = gate
+    man.update(over)
+    return man

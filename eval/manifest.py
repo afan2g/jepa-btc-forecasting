@@ -55,6 +55,13 @@ def _leaky_names(cols) -> list[str]:
     return out
 
 
+def leaky_feature_names(cols) -> list[str]:
+    """Public leak screen: the subset of cols with label-derived names (LEAKY_NAME_PATTERNS
+    substrings, or a bare y/y_* name). Used by eval.runner's legacy branch and available to
+    manifest-authoring tools."""
+    return _leaky_names(cols)
+
+
 def _str_list(name: str, val, *, allow_empty: bool = False) -> list[str]:
     if (not isinstance(val, list) or (not val and not allow_empty)
             or any(not isinstance(c, str) or not c for c in val)):

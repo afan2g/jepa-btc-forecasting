@@ -1,22 +1,27 @@
 """Run the G1 study on a real ModelMatrix parquet (bars E0.3 + labels E0.4 output).
 
 Usage: .venv/bin/python scripts/run_baseline.py model_matrix.parquet feature_manifest.json
-Manifest JSON: {"feature_cols": [...], "max_lookback_ns": <int>, "embargo_ns": <int>,
- "gate": {"n_groups": 6, "k": 2, "min_trades": 30, "min_eff_trades": 10,
-          "min_sample_sharpe": 0.0, "dsr_thresh": 0.95, "pbo_thresh": 0.5}}   # gate REQUIRED
+The manifest must be a v1 feature manifest (docs/feature-manifest.md) and must include
+the pre-registered "gate" block. Legacy {feature_cols, embargo_ns, max_lookback_ns, gate}
+dicts are NOT accepted here: write a v1 manifest and pre-register it.
 """
-import sys, json, pathlib
+import sys, pathlib
 # Run as a bare script (`python scripts/run_baseline.py ...`): Python puts this file's
 # own dir (scripts/) on sys.path, not the repo root, so put the repo root first to make
 # the `eval` package importable. Harmless when already importable.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import pandas as pd
-from eval.runner import run_from_manifest
+from eval.manifest import load_manifest
+from eval.runner import resolve_gate, run_from_manifest
 
 def main(matrix_path, manifest_path):
+    man = load_manifest(manifest_path)   # v1 schema-validated; fails before the parquet read
+    resolve_gate(man)                    # gate errors also surface before the parquet read
     m = pd.read_parquet(matrix_path)
-    man = json.load(open(manifest_path))
     res = run_from_manifest(m, man)
+    ident = res["manifest"]
+    print(f"manifest: {ident['dataset_id']} / {ident['build_id']} "
+          f"({len(ident['feature_cols'])} features)")
     print(f"resolved gate: {res['gate']}")                # echo the EFFECTIVE (resolved) config
     for h, out in res["horizons"].items():
         status = "PASS" if out["g1_pass"] else ("INCONCLUSIVE" if out["g1_inconclusive"] else "FAIL")
