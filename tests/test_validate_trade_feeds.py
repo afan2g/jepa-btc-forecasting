@@ -125,6 +125,10 @@ def test_explicit_but_empty_selector_is_not_silently_defaulted(tmp_path):
     # same for an explicitly-empty --days-file
     days2, mode2 = vf.resolve_days(vf.parse_args(["--days-file", ""]), cal=None)
     assert days2 == [] and mode2 == "days_file"
+    # ...and an explicitly-empty --start (unset `$START`) rejects rather than defaulting
+    with pytest.raises(ValueError):
+        vf.resolve_days(vf.parse_args(["--start", "", "--end", "2026-06-22"]), cal=None)
+    assert vf.main(["--start", "", "--calendar", str(tmp_path / "none.json")]) == 2
 
 
 def test_day_tokens_are_canonicalized_to_iso_yyyy_mm_dd():
@@ -223,6 +227,16 @@ def test_venue_selection_default_and_canonical_order():
 def test_unknown_venue_is_rejected():
     with pytest.raises(ValueError, match="venue"):
         vf.resolve_venues("binance_perp,dogecoin")
+
+
+def test_explicit_but_empty_venues_is_rejected_not_expanded_to_all(tmp_path):
+    # --venues "" (unset `$VENUES`) must resolve to [] and hit the empty-selection guard, NOT
+    # silently expand to all three venues (which would inflate a live quota estimate). Only an
+    # OMITTED --venues (None) defaults to all three.
+    assert vf.resolve_venues("") == []
+    assert vf.resolve_venues(None) == list(tc.VENUES)
+    assert vf.main(["--days", "2025-06-01", "--venues", "",
+                    "--calendar", str(tmp_path / "none.json")]) == 2
 
 
 # --------------------------------------------------------------------------- 4. dry-run

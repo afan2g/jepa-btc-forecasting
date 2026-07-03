@@ -143,7 +143,9 @@ def resolve_days(args, cal: dict | None) -> tuple[list[str], str]:
         text = pathlib.Path(args.days_file).read_text() if args.days_file else ""
         toks = (t.strip() for line in text.splitlines() for t in line.split(",") if t.strip())
         return _validate_days(toks), "days_file"
-    if args.start:
+    if args.start is not None:
+        # `is not None`, not truthiness: an explicit-but-empty `--start ""` (unset `$START`) must be
+        # rejected by _canonical_day, NOT fall through to the default sample as a live pull.
         start = _canonical_day(args.start)                        # canonicalize the range endpoints
         end = _canonical_day(args.end)                            # so YYYY-MM-DD string compares hold
         cohort = [d for d in REGIME_COHORT if start <= d <= end]
@@ -155,9 +157,11 @@ def resolve_days(args, cal: dict | None) -> tuple[list[str], str]:
 
 
 def resolve_venues(venues_arg: str | None) -> list[str]:
-    """Resolve `--venues` (CSV) to a subset of `trade_checks.VENUES` in canonical order (default: all
-    three). An unknown venue key raises `ValueError` rather than silently dropping a requested feed."""
-    if not venues_arg:
+    """Resolve `--venues` (CSV) to a subset of `trade_checks.VENUES` in canonical order. Only an
+    OMITTED `--venues` (None) defaults to all three; an explicit-but-empty `--venues ""` (unset
+    `$VENUES`) resolves to `[]` and hits the empty-selection guard, rather than silently expanding a
+    live pull to every venue. An unknown venue key raises `ValueError`."""
+    if venues_arg is None:
         return list(CANONICAL_VENUES)
     requested = {t.strip() for t in venues_arg.split(",") if t.strip()}
     unknown = requested - set(tc.VENUES)
