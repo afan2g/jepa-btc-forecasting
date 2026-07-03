@@ -1095,6 +1095,18 @@ def test_report_book_fill_on_trade_only_day_uses_report_evidence():
     assert blockers2["book_fill_unavailable"] == ["2025-01-11:report_coinapi_fillable_not_true"]
 
 
+def test_report_book_fill_malformed_book_status_fails_closed():
+    # a MALFORMED non-null book status (string/list) is NOT the trade-only None case → fail closed,
+    # do not fall back to a stale report's fillable=True
+    cal = _calendar(fill_status={"2025-01-11": {"book": "bad",
+                                                "trades": {"present": True, "mb": 20.0, "ok": True},
+                                                "error": False, "reason": "", "ok": True}})
+    day_index = {"2025-01-11": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": True}}}
+    blockers = rv.new_blockers()
+    rv.check_report_fill_availability(day_index, cal, blockers)
+    assert blockers["book_fill_unavailable"] == ["2025-01-11:calendar_book_not_ok"]
+
+
 def test_check_report_fill_availability_rechecks_calendar_ok():
     # report `coinapi.fillable` only reflects book.present; if the calendar says present=true but
     # ok=false (unverifiable flat file), the stricter is_fillable cross-check must block.

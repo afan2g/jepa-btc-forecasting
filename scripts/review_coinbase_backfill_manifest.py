@@ -856,10 +856,11 @@ def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -
         if coinapi.get("parquet_local") is True and isinstance(pq, str) and os.path.exists(pq):
             continue   # local CoinAPI parquet re-verified on disk → the fill is available
         fs = _fill_status(cal, d)
-        # prefer the stricter is_fillable ONLY when the calendar carries a real BOOK status. On a
-        # trade-only day fill_status[d] exists (trades verified) but book is legitimately null, so
-        # fall back to the report's coinapi.fillable rather than blocking on the missing book status.
-        if isinstance(fs, dict) and isinstance(fs.get("book"), dict):
+        # The trade-only fallback applies ONLY to the legitimate `book is None` case (trades verified,
+        # no book gap check). Any non-null book status — a real dict OR a MALFORMED value (string/
+        # list) — goes through the strict is_fillable, which fails closed on a non-dict; only a null
+        # book falls back to the report's coinapi.fillable evidence.
+        if isinstance(fs, dict) and fs.get("book") is not None:
             if not is_fillable(cal, d, "book"):
                 blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
         elif coinapi.get("fillable") is not True:
