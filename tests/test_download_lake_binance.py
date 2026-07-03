@@ -16,8 +16,8 @@ import sys
 
 import pytest
 
-# pyarrow is a downloader-only dep (pyproject `baseline` extra), NOT a base dependency — skip this
-# whole module (rather than error at collection) when the default suite runs without it. The pure
+# pyarrow is a downloader-only dep (pyproject `lake`/`baseline` extras), NOT a base dependency — skip
+# this whole module (rather than error at collection) when the default suite runs without it. The pure
 # helpers in ingest.lake_binance / download_lake_binance need only pandas, imported after this gate.
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
@@ -682,6 +682,28 @@ def test_dry_run_uses_lister_and_writes_no_parquet(tmp_path):
     assert not any(raw.rglob("*.parquet"))                # dry-run transfers zero parquet
     rep = json.loads(next((tmp_path / "rep").glob("*.json")).read_text())
     assert rep["dry_run"] is True and rep["transferred_gb"] == 0
+
+
+def test_dry_run_auth_error_exits_2(tmp_path):
+    # --dry-run's list_data is a LIVE Lake call; an auth wall must return the documented exit 2,
+    # not escape as a traceback / exit 1.
+    def bad_lister(feed, exchange, symbol):
+        raise RuntimeError("AccessDenied: not authorized for this bucket")
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades", "--dry-run",
+                    "--start", "2026-04-01", "--end", "2026-04-01", "--out", str(tmp_path / "raw"),
+                    "--report-dir", str(tmp_path / "rep")],
+                   lister=bad_lister, used_data_fn=lambda: 0.0)
+    assert code == 2
+
+
+def test_pyproject_declares_lake_downloader_extra():
+    # the downloader imports pyarrow/lakeapi/boto3 in its live path — they must be declared as an
+    # installable extra so a base install running the CLI does not ModuleNotFoundError.
+    import tomllib
+    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    lake = data["project"]["optional-dependencies"]["lake"]
+    for dep in ("pyarrow", "lakeapi", "boto3"):
+        assert any(dep in d for d in lake), f"{dep} missing from the `lake` extra"
 
 
 # --------------------------------------------------------------------------- live-path helpers (offline)

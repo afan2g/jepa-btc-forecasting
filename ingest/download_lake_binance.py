@@ -21,6 +21,10 @@ Design / safety (plan docs/superpowers/plans/2026-07-02-binance-downloader-plan.
 Exit codes (Requirement 8): 0 all ok/skip/missing · 2 setup error or vendor quota/credit hard stop ·
 3 completed with ≥1 errored unit (rerun with --resume) · 4 broad-pull / quota-headroom gate.
 
+Runtime deps (pyarrow, lakeapi, boto3) are the `lake` extra — `pip install -e .[lake]` — kept out of
+the base install so the pure `recon`/`ingest.lake_binance` helpers stay light. This module imports
+them lazily inside the live functions, so it (and its tests) import fine without the extra.
+
 Live Lake pulls are approval-gated (AGENTS.md). Even `--dry-run` issues a live `lakeapi.list_data`
 metadata call (no parquet transfer). The only fully offline planner is `scripts/plan_lake_binance_batches.py`.
 """
@@ -666,13 +670,21 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
     if args.dry_run:
         if lister is None:
             lister = _live_lister(session)
-        presence = {}
-        for key in instrument_keys:
-            inst = lb.INSTRUMENTS[key]
-            for feed in plan_feeds_for_presence(key, args.feeds):
-                present = list(lister(feed, inst.exchange, inst.symbol))
-                presence[f"{key}:{feed}"] = {"n_present": len(present),
-                                             "missing": sorted(set(days) - set(present))}
+        # list_data is itself a LIVE Lake call, so an auth/permission wall (wrong keys/account) or any
+        # vendor failure here must return the documented setup exit 2 (fail-safe) — never a bare
+        # traceback / exit 1 — the same hard-stop contract as the download path.
+        try:
+            presence = {}
+            for key in instrument_keys:
+                inst = lb.INSTRUMENTS[key]
+                for feed in plan_feeds_for_presence(key, args.feeds):
+                    present = list(lister(feed, inst.exchange, inst.symbol))
+                    presence[f"{key}:{feed}"] = {"n_present": len(present),
+                                                 "missing": sorted(set(days) - set(present))}
+        except Exception as e:                                      # noqa: BLE001 — fail safe on a live probe
+            print(f"ERROR: --dry-run list_data failed ({classify_error(e)}, fail-safe exit 2): {e}",
+                  file=sys.stderr)
+            return SETUP_ERROR_EXIT
         report.update(dry_run=True, transferred_gb=0, presence=presence,
                       used_data_after=round(used_gb, 4))
         path = _write_report(args.report_dir, report)
