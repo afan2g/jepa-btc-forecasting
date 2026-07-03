@@ -750,10 +750,11 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   that row's normalized (z-score/EWMA/PCA) feature values — proves the stationarizer is fit
   as-of, not full-window (§H).
 - **As-of barrier volatility (deep-review #4):** the triple-barrier **width** at `t_event` is a
-  function of returns `≤ t_event` only — mutating returns **in/after** `[t_event, t_barrier]`
-  cannot change the **barrier width**. (The `label` **does** correctly depend on that future path —
-  a TP/SL hit or the vertical-barrier return may flip; only the *width* is as-of-invariant, so the
-  test asserts on width, **not** `label`.) (§D/T5).
+  function of returns `≤ t_event` only — mutating returns **strictly after `t_event`**
+  (`(t_event, t_barrier]`, **excluding** the as-of return ending *at* `t_event`, which legitimately
+  feeds the trailing EWMA) cannot change the **barrier width**. (The `label` **does** correctly
+  depend on that future path — a TP/SL hit or the vertical-barrier return may flip; only the *width*
+  is as-of-invariant, so the test asserts on width, **not** `label`.) (§D/T5).
 - **Coalesce backlog (deep-review #2):** feeding a delayed backlog that clamps several bars to one
   `t_event` yields **exactly one row per `(t_event, horizon)`** (the last-closing bar); no
   duplicate `(t_event, horizon)` reaches the matrix (§C.2/§E).
@@ -1057,6 +1058,9 @@ schema change.
   only the **barrier width** is invariant to post-`t_event` returns — the `label` **does** correctly
   depend on the future path (`[t_event, t_barrier]`), so a TP/SL hit or vertical-barrier return may
   flip; the test must **not** assert `label` invariance (§J).
+- Review round 20 (Codex on `ca8adbb`) incorporated — 1 finding (P2): the as-of-vol mutation window
+  is **strictly after `t_event`** (`(t_event, t_barrier]`), excluding the as-of return *ending at*
+  `t_event` which legitimately feeds the trailing EWMA — else a correct as-of width could change (§J).
 
 ## Risks & assumptions
 
