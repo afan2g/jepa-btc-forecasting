@@ -114,7 +114,8 @@ vector → `data.labels` + `data.uniqueness` attach `y_fwd_bps`/`label`/`t_barri
 `uniqueness` (**per horizon**, off Coinbase mid) → `bars.cost` attaches `cost_bps`/
 `half_spread_bps` → **guard-aware `stitch_policy` masks + `window_vendor_sources` drop
 cross-seam/guard/uncovered rows** (§C.3) → per-day parquet → consolidate the labeled window
-→ `validate_frame` → write `model_matrix.parquet` + `feature_manifest.json`.
+→ **`validate_frame` + `validate_matrix`** (fail closed — the NaN/inf/finite screens live in
+`validate_matrix`, §H/T8) → write `model_matrix.parquet` + `feature_manifest.json`.
 
 ---
 
@@ -626,7 +627,7 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker+slippage, fee-tier param) + `half_spread_bps` from the Coinbase book at `coinbase_read_ts` (lagged, P1) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection test | Pre |
-| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; byte-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
+| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; NaN/inf row rejected pre-write; byte-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
 | **T10** `feat/producer-calibration` (Post) | Consume the **final reviewed seam list**; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; first real G1. **Acceptance: seam masking holds on the real stitch plan** | T9, backfilled data + reviewed stitch plan | E0.3/E0.5 artifacts + G1 result | **Post** (backfill unlock) |
 
 ---
@@ -731,6 +732,9 @@ schema change.
   **`validate_matrix` as well as `validate_frame` before writing** (the NaN/inf/finite screens
   live in `validate_matrix`, not `validate_frame`), so bad rows never reach `data/processed/`
   (P2, §H/T8) — traced to data.md §4.3, `eval/matrix.py:validate_matrix`.
+- Review round 7 (Codex on `756c817`) incorporated: the **top-level Architecture data-flow**
+  and **T9** now show `validate_frame` **+** `validate_matrix` gating the write (the §H/T8 rule
+  is now consistent in the summary a T9 implementer reads first; P2).
 
 ## Risks & assumptions
 
