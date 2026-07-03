@@ -855,7 +855,11 @@ def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -
         # time, so a stale/removed file must not count as evidence (local stat, not vendor I/O).
         if coinapi.get("parquet_local") is True and isinstance(pq, str) and os.path.exists(pq):
             continue   # local CoinAPI parquet re-verified on disk → the fill is available
-        if _fill_status(cal, d) is not None:
+        fs = _fill_status(cal, d)
+        # prefer the stricter is_fillable ONLY when the calendar carries a real BOOK status. On a
+        # trade-only day fill_status[d] exists (trades verified) but book is legitimately null, so
+        # fall back to the report's coinapi.fillable rather than blocking on the missing book status.
+        if isinstance(fs, dict) and isinstance(fs.get("book"), dict):
             if not is_fillable(cal, d, "book"):
                 blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
         elif coinapi.get("fillable") is not True:

@@ -1078,6 +1078,23 @@ def test_fill_status_container_non_dict():
         rv.validate_calendar(cal, "cal")
 
 
+def test_report_book_fill_on_trade_only_day_uses_report_evidence():
+    # a report-driven book fill on a trade-only day: fill_status[d].book is null (no book gap check),
+    # so fall back to the report's coinapi.fillable rather than blocking on the missing book status
+    cal = _calendar(fill_status={"2025-01-11": {"book": None,
+                                                "trades": {"present": True, "mb": 20.0, "ok": True},
+                                                "error": False, "reason": "", "ok": True}})
+    ok = {"2025-01-11": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": True}}}
+    blockers = rv.new_blockers()
+    rv.check_report_fill_availability(ok, cal, blockers)
+    assert blockers["book_fill_unavailable"] == []
+    # but a report that isn't itself fillable still blocks
+    bad = {"2025-01-11": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": None}}}
+    blockers2 = rv.new_blockers()
+    rv.check_report_fill_availability(bad, cal, blockers2)
+    assert blockers2["book_fill_unavailable"] == ["2025-01-11:report_coinapi_fillable_not_true"]
+
+
 def test_check_report_fill_availability_rechecks_calendar_ok():
     # report `coinapi.fillable` only reflects book.present; if the calendar says present=true but
     # ok=false (unverifiable flat file), the stricter is_fillable cross-check must block.
