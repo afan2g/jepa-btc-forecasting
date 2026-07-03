@@ -59,6 +59,7 @@ EMPTY_PARTITION = "empty_partition"
 MISSING_PARTITION = "missing_partition"
 LOAD_ERROR = "load_error"
 ORIGIN_TIME_COLUMN_MISSING = "origin_time_column_missing"
+REQUIRED_COLUMN_MISSING = "required_column_missing"
 ORIGIN_TIME_NULL_FRACTION_HIGH = "origin_time_null_fraction_high"
 RECEIVED_TIME_FALLBACK_USED = "received_time_fallback_used"
 RECEIVED_TIME_FALLBACK_UNAVAILABLE = "received_time_fallback_unavailable"
@@ -575,15 +576,27 @@ def _record(*, day, venue, status, reason_codes, metrics, calendar_state, vendor
             "metrics": metrics, "calendar_state": calendar_state}
 
 
-def _route_structural(code: str, route: str) -> tuple[str, list[str]]:
-    """Resolve a structural problem (`missing_partition`/`empty_partition`/...) against the calendar
-    route: excluded → excluded; a trades-fill day → coinapi_fill (the missing Lake side is expected);
-    a required day → the single blocking `fail` (§1/§8)."""
+# The bar-clock value columns a present frame must carry to be validated (§2); `price`×`quantity`
+# feed the notional clock. `origin_time`/`timestamp` is checked separately (it is the clock); `side`
+# is optional-with-warn, `received_time`/`trade_id` are optional.
+REQUIRED_VALUE_COLS = ("price", "quantity")
+
+
+def _route_schema_fail(fail_reasons, route: str) -> tuple[str, list[str]]:
+    """Resolve a structural/schema problem (missing partition, missing required column, …) against the
+    calendar route: excluded → excluded; a trades-fill day → coinapi_fill (the missing Lake side is
+    expected); a required day → the single blocking `fail` with `fail_reasons` (§1/§8)."""
     if route == ROUTE_EXCLUDED:
         return EXCLUDED, [CALENDAR_EXCLUDED_DAY]
     if route == ROUTE_COINAPI_FILL:
         return COINAPI_FILL, [COINAPI_FILL_DAY]
-    return FAIL, [code]
+    return FAIL, list(fail_reasons)
+
+
+def _route_structural(code: str, route: str) -> tuple[str, list[str]]:
+    """A single-code structural resolution (`missing_partition`/`empty_partition`) — see
+    `_route_schema_fail`."""
+    return _route_schema_fail([code], route)
 
 
 def validate_trade_frame(df, venue: str, day: str, thresholds: TradeThresholds = THRESHOLDS,
@@ -611,13 +624,18 @@ def validate_trade_frame(df, venue: str, day: str, thresholds: TradeThresholds =
         return _record(day=day, venue=venue, status=status, reason_codes=reasons,
                        metrics=_empty_metrics(), calendar_state=cs, vendor_source=vendor_source)
 
-    if _origin_col(df) is None:                              # present frame, no exchange-time column
-        if route == ROUTE_EXCLUDED:
-            status, reasons = EXCLUDED, [CALENDAR_EXCLUDED_DAY]
-        elif route == ROUTE_COINAPI_FILL:
-            status, reasons = COINAPI_FILL, [COINAPI_FILL_DAY]
-        else:
-            status, reasons = FAIL, [ORIGIN_TIME_COLUMN_MISSING]
+    # Schema guards on a PRESENT frame — surface a malformed/incomplete normalized frame as a per-day
+    # record instead of raising deep in metric computation (§2 required columns). A missing
+    # exchange-time column, or missing bar-clock columns (price/quantity feed the notional clock), is a
+    # schema failure; on a fill/excluded day it still routes there (the calendar is authoritative).
+    if _origin_col(df) is None:
+        status, reasons = _route_schema_fail([ORIGIN_TIME_COLUMN_MISSING], route)
+        return _record(day=day, venue=venue, status=status, reason_codes=reasons,
+                       metrics=_empty_metrics(), calendar_state=cs, vendor_source=vendor_source)
+    missing = [c for c in REQUIRED_VALUE_COLS if c not in df.columns]
+    if missing:
+        status, reasons = _route_schema_fail(
+            [REQUIRED_COLUMN_MISSING, *(f"{REQUIRED_COLUMN_MISSING}:{c}" for c in missing)], route)
         return _record(day=day, venue=venue, status=status, reason_codes=reasons,
                        metrics=_empty_metrics(), calendar_state=cs, vendor_source=vendor_source)
 

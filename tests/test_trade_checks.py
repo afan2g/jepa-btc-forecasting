@@ -85,6 +85,16 @@ def test_wrong_day_partition_is_rejected():
     assert on["status"] == tc.PASS and on["metrics"]["off_day_frac"] == 0.0
 
 
+def test_missing_required_trade_columns_fail_cleanly():
+    # §2 required columns: a present frame that omits price/quantity must return a per-day FAIL record
+    # (schema drift surfaced in the JSON report), NOT raise KeyError and abort the validation run.
+    for col in ("price", "quantity"):
+        res = tc.validate_trade_frame(_clean_full_day().drop(columns=[col]), "coinbase", "2025-06-01")
+        assert res["status"] == tc.FAIL
+        assert tc.REQUIRED_COLUMN_MISSING in res["reason_codes"]
+        assert f"{tc.REQUIRED_COLUMN_MISSING}:{col}" in res["reason_codes"]
+
+
 # --------------------------------------------------------------------------- 2. origin_time fallback
 def test_subthreshold_null_origin_falls_back_to_received_and_warns():
     # 0.5% ≤ origin_time_null_max: every null-origin row takes received_time into the engine clock;
