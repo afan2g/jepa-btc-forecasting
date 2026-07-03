@@ -115,8 +115,9 @@ def _report(days, **meta_overrides) -> dict:
     counts = {c: 0 for c in rv.CLASSES}
     for d in days:
         counts[d["classification"]] = counts.get(d["classification"], 0) + 1
-    return {"meta": meta, "summary": {"n_days": len(days), "counts": counts,
-                                      "by_class": {}, "coinapi_fill": {}}, "days": days}
+    return {"meta": meta, "summary": {"n_days": len(days), "counts": counts, "by_class": {},
+                                      "coinapi_fill": {"fill_counts": rv._recompute_fill_counts(days)}},
+            "days": days}
 
 
 # trade-only day 2025-01-11 (book present, trades gapped) IS a batch day — the clean report must
@@ -436,6 +437,22 @@ def test_summary_fill_counts_cross_checked():
     rep2 = _clean_reports()[0]
     rep2["summary"]["coinapi_fill"] = {"fill_counts": rv._recompute_fill_counts(rep2["days"])}
     assert not any("fill_counts_mismatch" in i for i in rv.summary_count_issues(rep2))
+
+
+def test_summary_fill_counts_required():
+    rep = _clean_reports()[0]
+    rep["summary"]["coinapi_fill"] = {}   # a report missing fill_counts must fail closed, not skip
+    assert "summary_fill_counts_missing" in rv.summary_count_issues(rep)
+
+
+def test_readiness_blocks_missing_fill_counts(tmp_path):
+    reports = _clean_reports()
+    reports[0]["summary"]["coinapi_fill"] = {}   # drop fill_counts entirely
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    assert m["meta"]["status"] == "blocking"
+    assert any("fill_counts_missing" in x for x in m["blockers"]["inconsistencies"])
 
 
 def test_day_record_issues_fill_decision_contradicts_classification():

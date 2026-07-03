@@ -378,9 +378,11 @@ def summary_count_issues(report: dict) -> list:
         if int(got.get(c, 0)) != want[c]:
             issues.append(f"summary_counts_mismatch:{c}:summary={got.get(c)}:recomputed={want[c]}")
     fc_got = ((report.get("summary") or {}).get("coinapi_fill") or {}).get("fill_counts")
-    if isinstance(fc_got, dict):   # a stale fill_counts from a prior run must not pass review
-        fc_want = _recompute_fill_counts(days)
-        for k, v in fc_want.items():
+    if not isinstance(fc_got, dict):
+        # a report without fill_counts (pre-extension/stale) can't be cross-checked → fail closed
+        issues.append("summary_fill_counts_missing")
+    else:   # a stale fill_counts from a prior run must not pass review
+        for k, v in _recompute_fill_counts(days).items():
             if int(fc_got.get(k, 0)) != v:
                 issues.append(f"fill_counts_mismatch:{k}:summary={fc_got.get(k)}:recomputed={v}")
     return issues
