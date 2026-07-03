@@ -59,9 +59,10 @@ def _trades_df(n=1000, start="2025-06-01T00:00:00", step_ms=80, *, presorted=Tru
     return df.reset_index(drop=True)
 
 
-def _clean_full_day(n=2400):
-    """A full-day frame with ~n/24 rows in every UTC hour → classifies `pass` (no coverage fail)."""
-    return _trades_df(n=n, full_day=True)
+def _clean_full_day(n=2400, start="2025-06-01T00:00:00"):
+    """A full-day frame with ~n/24 rows in every UTC hour → classifies `pass` (no coverage fail).
+    `start` sets the frame's UTC date so it can be matched to the requested `day` (§1 existence)."""
+    return _trades_df(n=n, full_day=True, start=start)
 
 
 # --------------------------------------------------------------------------- 1. required ts field
@@ -70,6 +71,18 @@ def test_missing_timestamp_field_fails_clearly():
     res = tc.validate_trade_frame(df, "coinbase", "2025-06-01")
     assert res["status"] == tc.FAIL
     assert tc.ORIGIN_TIME_COLUMN_MISSING in res["reason_codes"]
+
+
+def test_wrong_day_partition_is_rejected():
+    # §1 existence: a frame whose engine clock is for a DIFFERENT UTC day (a mislabeled partition /
+    # wrong file) must not pass — even a complete 24 h stream — so a loader/normalizer supplying the
+    # wrong partition can't silently clear the gate with zero trades from the requested date.
+    df = _clean_full_day(start="2025-06-01T00:00:00")
+    off = tc.validate_trade_frame(df, "coinbase", "2025-06-02")   # frame is 06-01, requested 06-02
+    assert off["status"] == tc.FAIL and tc.WRONG_DAY_PARTITION in off["reason_codes"]
+    assert off["metrics"]["off_day_frac"] == 1.0
+    on = tc.validate_trade_frame(df, "coinbase", "2025-06-01")    # matching day passes
+    assert on["status"] == tc.PASS and on["metrics"]["off_day_frac"] == 0.0
 
 
 # --------------------------------------------------------------------------- 2. origin_time fallback
@@ -318,12 +331,13 @@ def test_coinapi_source_fill_day_is_validated_not_re_deferred():
     # CoinAPI fill must classify on its own metrics, NOT route straight back to coinapi_fill (which
     # would leave bars_ready permanently false for every fill-day span).
     fill = {"route": tc.ROUTE_COINAPI_FILL}
-    clean = tc.validate_trade_frame(_clean_full_day(), "coinbase", "2024-08-06",
-                                    calendar_state=fill, vendor_source="coinapi")
+    clean = tc.validate_trade_frame(_clean_full_day(start="2024-08-06T00:00:00"), "coinbase",
+                                    "2024-08-06", calendar_state=fill, vendor_source="coinapi")
     assert clean["status"] == tc.PASS and clean["vendor_source"] == "coinapi"
     # a bad CoinAPI fill still fails on its merits (surfaced, not silently deferred)
-    bad = tc.validate_trade_frame(_trades_df(n=2400, full_day=True, bad_size=True), "coinbase",
-                                  "2024-08-06", calendar_state=fill, vendor_source="coinapi")
+    bad = tc.validate_trade_frame(
+        _trades_df(n=2400, full_day=True, start="2024-08-06T00:00:00", bad_size=True),
+        "coinbase", "2024-08-06", calendar_state=fill, vendor_source="coinapi")
     assert bad["status"] == tc.FAIL
     # the Lake-side path on the same fill day still defers (unchanged: the missing Lake side)
     assert tc.validate_trade_frame(None, "coinbase", "2024-08-06",
@@ -361,6 +375,16 @@ def test_report_is_strict_json_and_byte_deterministic(tmp_path):
 def test_malformed_calendar_entry_raises(tmp_path):
     bad = _calendar_dict()
     bad["coinbase_fill_days"] = {"2024-08-06": True}       # not a {book, trades} dict
+    cal = tc.load_usable_calendar(_write_calendar(tmp_path, bad))
+    with pytest.raises(ValueError, match="coinbase_fill_days"):
+        tc.calendar_state(cal, "2024-08-06", "coinbase")
+
+
+def test_non_boolean_fill_flag_raises(tmp_path):
+    # The contract is {'book': bool, 'trades': bool}. A non-bool value (e.g. the string "false", or
+    # an int) is truthy/falsey by accident and would silently mis-route a required day — it must raise.
+    bad = _calendar_dict()
+    bad["coinbase_fill_days"] = {"2024-08-06": {"book": True, "trades": "false"}}
     cal = tc.load_usable_calendar(_write_calendar(tmp_path, bad))
     with pytest.raises(ValueError, match="coinbase_fill_days"):
         tc.calendar_state(cal, "2024-08-06", "coinbase")

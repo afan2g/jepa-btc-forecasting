@@ -67,6 +67,7 @@ PRICE_OUT_OF_RANGE = "price_out_of_range"
 SIZE_NONPOSITIVE = "size_nonpositive"
 NOTIONAL_NONPOSITIVE = "notional_nonpositive"
 ROW_COUNT_IMPLAUSIBLY_LOW = "row_count_implausibly_low"
+WRONG_DAY_PARTITION = "wrong_day_partition"
 DUPLICATE_TIMESTAMP_CLUSTER = "duplicate_timestamp_cluster"
 DUPLICATE_TRADE_ID = "duplicate_trade_id"
 PRICE_JUMP_EXCESS = "price_jump_excess"
@@ -121,6 +122,7 @@ class TradeThresholds:
     sparse_hour_min_rows: int = 60         # < 1 trade/min for a whole UTC hour is sparse
     max_missing_hours: int = 1             # ≥2 fully-empty UTC hours is a data gap, not quiet
     lag_neg_frac_max: float = 0.001        # `received ≥ origin` should hold; nonzero negative is a fault
+    off_day_frac_max: float = 0.5          # >½ of rows off the requested UTC day ⇒ a mislabeled partition
     min_rows_soft: int | None = None       # optional regime soft floor → `row_count_low` warn (off by default)
 
     def as_dict(self) -> dict:
@@ -137,6 +139,7 @@ class TradeThresholds:
             "sparse_hour_min_rows": self.sparse_hour_min_rows,
             "max_missing_hours": self.max_missing_hours,
             "lag_neg_frac_max": self.lag_neg_frac_max,
+            "off_day_frac_max": self.off_day_frac_max,
             "min_rows_soft": self.min_rows_soft,
         }
 
@@ -373,6 +376,20 @@ def lag_metrics(df: pd.DataFrame) -> dict:
             "recv_origin_lag_neg_frac": _f(np.mean(lag_ms < 0))}
 
 
+def off_day_frac(df: pd.DataFrame, day: str | None) -> float | None:
+    """Fraction of resolved engine-clock rows that fall OUTSIDE the requested UTC `day`
+    `[00:00, next-00:00)` (§1 existence). A correct day partition is ≈0; a wholly mislabeled
+    partition is ≈1. `None` when no `day` is supplied (metric N/A)."""
+    if day is None:
+        return None
+    clock = sorted_engine_clock(df)
+    if clock.empty:
+        return 0.0
+    start = pd.Timestamp(day)
+    end = start + pd.Timedelta(days=1)
+    return _f(((clock < start) | (clock >= end)).mean())
+
+
 def side_values(df: pd.DataFrame) -> dict:
     """`side` value counts (§4 row 15). A value ∉ {buy, sell} is surfaced (warn)."""
     if "side" not in df.columns:
@@ -382,9 +399,11 @@ def side_values(df: pd.DataFrame) -> dict:
 
 
 # --------------------------------------------------------------------------- metric assembly
-def compute_metrics(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS) -> dict:
+def compute_metrics(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS,
+                    day: str | None = None) -> dict:
     """All §4 per-frame metrics on the loaded frame (after the §5 sort). Every float is plain-python;
-    report-time `_json_safe` nulls any non-finite value."""
+    report-time `_json_safe` nulls any non-finite value. `day` (when supplied) enables the §1
+    existence `off_day_frac` check that the frame is actually the requested UTC date."""
     clock = sorted_engine_clock(df)
     _, origin_null, unresolved = build_engine_clock(df)
     rcol = _received_col(df)
@@ -400,6 +419,7 @@ def compute_metrics(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS) 
         "was_presorted": was_presorted(df),
         "used_received_time_fallback": bool(origin_null.any()),
         "engine_clock_unresolved_count": int(unresolved.sum()),
+        "off_day_frac": off_day_frac(df, day),
     }
     m.update(dup_timestamp_clusters(df))
     m.update(dup_trade_ids(df))
@@ -446,6 +466,11 @@ def classify(metrics: dict, thresholds: TradeThresholds = THRESHOLDS,
         fails.append(ROW_COUNT_IMPLAUSIBLY_LOW)
     elif thresholds.min_rows_soft is not None and metrics["row_count"] < thresholds.min_rows_soft:
         warns.append(ROW_COUNT_LOW)
+
+    # --- requested-day existence (§1) ---------------------------------------------------------
+    off_day = metrics.get("off_day_frac")
+    if off_day is not None and off_day > thresholds.off_day_frac_max:
+        fails.append(WRONG_DAY_PARTITION)
 
     # --- price (§4 row 9) ---------------------------------------------------------------------
     pmin = metrics["price_min"]
@@ -521,6 +546,7 @@ def _empty_metrics() -> dict:
         "received_time_available": None, "received_time_null_frac": None,
         "monotonic_after_sort": None, "was_presorted": None,
         "used_received_time_fallback": None, "engine_clock_unresolved_count": None,
+        "off_day_frac": None,
         "dup_ts_cluster_count": None, "dup_ts_max_cluster": None,
         "dup_trade_id_count": None, "dup_trade_id_frac": None, "trade_id_available": None,
         "price_min": None, "price_max": None, "price_median": None,
@@ -590,7 +616,7 @@ def validate_trade_frame(df, venue: str, day: str, thresholds: TradeThresholds =
         return _record(day=day, venue=venue, status=status, reason_codes=reasons,
                        metrics=_empty_metrics(), calendar_state=cs, vendor_source=vendor_source)
 
-    metrics = compute_metrics(df, thresholds)
+    metrics = compute_metrics(df, thresholds, day=day)
     status, reasons = classify(metrics, thresholds, route)
     return _record(day=day, venue=venue, status=status, reason_codes=reasons,
                    metrics=metrics, calendar_state=cs, vendor_source=vendor_source)
@@ -605,10 +631,14 @@ def load_usable_calendar(path: str) -> dict | None:
 
 
 def _validate_fill_days(fill_days: dict) -> None:
-    """Every `coinbase_fill_days` value must be a `{book, trades}` dict (the calendar contract) — a
-    malformed entry is a hard error, never a silent mis-route (§9 case 11)."""
+    """Every `coinbase_fill_days` value must be a `{'book': bool, 'trades': bool}` dict (the calendar
+    contract from verify_trades_and_calendar.py) — a malformed entry is a hard error, never a silent
+    mis-route (§9 case 11). The flag values must be genuine bools: a stray `"false"`/`1` is truthy by
+    accident and would route a required Coinbase Lake day to `coinapi_fill`, suppressing its Lake-side
+    verdict, so non-bool flags raise rather than route."""
     for d, v in fill_days.items():
-        if not (isinstance(v, dict) and "book" in v and "trades" in v):
+        if not (isinstance(v, dict) and isinstance(v.get("book"), bool)
+                and isinstance(v.get("trades"), bool)):
             raise ValueError(
                 f"coinbase_fill_days[{d!r}] must be a {{'book':bool,'trades':bool}} dict, got {v!r}")
 
