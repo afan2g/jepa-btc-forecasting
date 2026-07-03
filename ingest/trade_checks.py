@@ -354,11 +354,16 @@ def interarrival(df: pd.DataFrame, clock: pd.Series | None = None) -> dict:
 
 
 def hour_coverage(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS,
-                  clock: pd.Series | None = None) -> dict:
+                  clock: pd.Series | None = None, day: str | None = None) -> dict:
     """UTC-hour coverage of the engine clock (§4 row 13): fully-empty hours (missing) and non-empty
     hours below `sparse_hour_min_rows` (sparse). Computed on the post-fallback clock so substituted
-    rows land in their real hour, not 1970 (the P2 clock fix)."""
+    rows land in their real hour, not 1970 (the P2 clock fix). When `day` is supplied, coverage is
+    scoped to `[day, day+1)` so rows spilling into a neighbouring UTC day can't mask a genuine
+    intraday hole in the requested day (the neighbour's hour-00 rows filling the requested hour 00)."""
     clock = _clock_or_sort(df, clock)
+    if day is not None and not clock.empty:
+        start = pd.Timestamp(day)
+        clock = clock[(clock >= start) & (clock < start + pd.Timedelta(days=1))]
     if clock.empty:
         return {"missing_hour_count": 24, "sparse_hour_count": 0,
                 "missing_hours": list(range(24)), "sparse_hours": []}
@@ -444,7 +449,7 @@ def compute_metrics(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS,
     m.update(size_checks(df))
     m.update(notional_checks(df))
     m.update(interarrival(df, clock=clock))
-    m.update(hour_coverage(df, thresholds, clock=clock))
+    m.update(hour_coverage(df, thresholds, clock=clock, day=day))
     m.update(lag_metrics(df))
     m.update(side_values(df))
     return m

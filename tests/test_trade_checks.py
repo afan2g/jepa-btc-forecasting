@@ -242,6 +242,18 @@ def test_one_missing_hour_warns_but_two_escalate_to_blocking():
     assert excl["status"] == tc.EXCLUDED
 
 
+def test_hour_coverage_is_scoped_to_the_requested_day():
+    # §4 row 13: coverage must count hours WITHIN [day, day+1), not hour-of-day across the whole
+    # frame. A frame spilling into the next UTC day must not let the neighbor's hour-00 rows mask a
+    # real missing first hour of the requested day (off_day_frac ~1/24 stays under threshold).
+    df = _clean_full_day(start="2025-06-01T00:00:00")
+    df["origin_time"] = df["origin_time"] + pd.Timedelta(hours=1)   # 01:00 Jun-1 .. 00:59 Jun-2
+    df["received_time"] = df["received_time"] + pd.Timedelta(hours=1)
+    res = tc.validate_trade_frame(df, "coinbase", "2025-06-01")
+    assert res["metrics"]["missing_hour_count"] == 1               # hour 00 of Jun-1 is genuinely empty
+    assert res["status"] == tc.WARN and tc.MISSING_HOUR in res["reason_codes"]
+
+
 def test_sparse_hour_warns_at_any_count():
     df = _trades_df(n=2400, full_day=True)
     # Thin hour 5 below sparse_hour_min_rows: keep only 30 of its rows (a non-empty hour is plausibly
