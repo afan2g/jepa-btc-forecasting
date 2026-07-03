@@ -53,6 +53,18 @@ def test_classify_error_s3_500_is_transient():
     assert dl.classify_error(RuntimeError("An error occurred (503) when calling ...")) == "transient"
 
 
+def test_classify_error_pyarrow_s3_forms():
+    # PyArrow's S3FileSystem reports underscore codes / `HTTP status NNN`, unlike botocore.
+    assert dl.classify_error(OSError("AWS Error ACCESS_DENIED during HeadObject: ...")) == "auth"
+    assert dl.classify_error(OSError("AWS Error INVALID_ACCESS_KEY_ID ...")) == "auth"
+    assert dl.classify_error(OSError("AWS Error SIGNATURE_DOES_NOT_MATCH ...")) == "auth"
+    assert dl.classify_error(OSError("AWS Error UNKNOWN (HTTP status 503) during ListObjects")) \
+        == "transient"
+    assert dl.classify_error(OSError("AWS Error UNKNOWN (HTTP status 500) ...")) == "transient"
+    assert dl.classify_error(OSError("AWS Error SLOW_DOWN during GetObject: ...")) == "transient"
+    assert dl.classify_error(OSError("AWS Error SERVICE_UNAVAILABLE ...")) == "transient"
+
+
 def test_classify_error_markers_are_not_over_broad():
     assert dl.classify_error(ValueError("expected 500 columns, got 12")) == "fatal"
     assert dl.classify_error(ValueError("malformed row 5040")) == "fatal"

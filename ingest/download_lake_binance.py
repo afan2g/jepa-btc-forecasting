@@ -97,27 +97,34 @@ _QUOTA_MARKERS = ("quotaexceeded", "quota exceeded", "insufficient usage credits
                   "download quota", "no usable credit", "exceeded your quota",
                   "exceeded your download")
 _AUTH_MARKERS = ("accessdenied", "access denied", "invalidaccesskeyid", "invalid access key",
-                 "signaturedoesnotmatch", "unrecognizedclient", "authfailure", "auth failure",
-                 "not authorized", "unauthorized", "expiredtoken", "token has expired",
-                 "invalidclienttokenid", "invalidtoken", "permission denied", "forbidden")
+                 "signaturedoesnotmatch", "signature does not match", "unrecognizedclient",
+                 "unrecognized client", "authfailure", "auth failure", "not authorized",
+                 "unauthorized", "expiredtoken", "expired token", "token has expired",
+                 "invalidclienttokenid", "invalid client token id", "invalidtoken", "invalid token",
+                 "permission denied", "forbidden")
 _TRANSIENT_MARKERS = ("slowdown", "slow down", "throttl", "reduce your request rate",
                       "requesttimeout", "request timeout", "timed out", "timeout",
                       "connection reset", "connectionreset", "connection aborted",
-                      "serviceunavailable", "service unavailable", "bad gateway",
-                      "gateway timeout", "internalerror", "internal error",
-                      "internal server error", "(500)", "(502)", "(503)", "(504)", "temporarily")
+                      "network connection", "serviceunavailable", "service unavailable",
+                      "bad gateway", "gateway timeout", "internalerror", "internal error",
+                      "internal failure", "internal server error",
+                      "(500)", "(502)", "(503)", "(504)",
+                      "http status 500", "http status 502", "http status 503", "http status 504",
+                      "temporarily")
 
 
 def classify_error(exc: BaseException) -> str:
     """Map an exception to 'quota' | 'auth' (both HARD stops → exit 2) | 'transient' (retry) |
-    'fatal' (record + continue → exit 3)."""
+    'fatal' (record + continue → exit 3). Underscores are normalized to spaces first so PyArrow's
+    `AWS Error ACCESS_DENIED` / `SLOW_DOWN` / `SERVICE_UNAVAILABLE` codes match the same
+    space-separated markers as botocore's `AccessDenied`/`SlowDown` strings."""
     if isinstance(exc, QuotaError):
         return "quota"
     if isinstance(exc, AuthError):
         return "auth"
     if isinstance(exc, TransientError):
         return "transient"
-    msg = str(exc).lower()
+    msg = str(exc).lower().replace("_", " ")
     if any(m in msg for m in _QUOTA_MARKERS):
         return "quota"
     if any(m in msg for m in _AUTH_MARKERS):
