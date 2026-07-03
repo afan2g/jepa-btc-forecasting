@@ -166,7 +166,7 @@ def test_calendar_batch_command_uses_exact_days_not_enclosing_range(tmp_path):
     # first..last range spans. Two days 29 apart in one batch -> command points at the days-file and
     # est_gb reflects 2 days, not 30.
     cal = tmp_path / "cal.json"
-    cal.write_text(json.dumps({"binance_present_days": ["2026-04-01", "2026-04-30"]}))
+    cal.write_text(json.dumps({"usable_days": ["2026-04-01", "2026-04-30"]}))
     out_dir = str(tmp_path / "b")
     rc = pm.main(["--calendar", str(cal), "--out-dir", out_dir,
                   "--max-gb-per-batch", "2.5", "--gb-per-day", str(RATE)])
@@ -181,14 +181,32 @@ def test_calendar_batch_command_uses_exact_days_not_enclosing_range(tmp_path):
 
 
 # --------------------------------------------------------------------------- calendar day source
-def test_calendar_day_source_is_sorted(tmp_path):
+def test_calendar_day_source_is_sorted_via_default_field(tmp_path):
+    # relies on the DEFAULT --calendar-field (usable_days), the field the published calendar carries
     cal = tmp_path / "cal.json"
-    cal.write_text(json.dumps({"binance_present_days": ["2026-04-03", "2026-04-01", "2026-04-02"]}))
+    cal.write_text(json.dumps({"usable_days": ["2026-04-03", "2026-04-01", "2026-04-02"]}))
     out_dir = str(tmp_path / "b")
     rc = pm.main(["--calendar", str(cal), "--out-dir", out_dir,
                   "--max-gb-per-batch", "2.5", "--gb-per-day", str(RATE)])
     assert rc == 0
     assert (pathlib.Path(out_dir) / "batch_001_days.txt").read_text() == "2026-04-01\n2026-04-02\n"
+
+
+def test_default_calendar_field_is_the_published_usable_days():
+    assert pm.DEFAULT_CALENDAR_FIELD == "usable_days"
+
+
+def test_default_field_matches_the_published_usable_calendar_if_present():
+    # Guards the exact drift Codex found: the default --calendar-field must be a field the repo's
+    # published artifact actually contains. Skips when the (git-ignored) calendar is absent (e.g. CI).
+    cal_path = pathlib.Path(__file__).resolve().parents[1] / "data" / "usable_calendar.json"
+    if not cal_path.exists():
+        pytest.skip("data/usable_calendar.json not present")
+    cal = json.loads(cal_path.read_text())
+    assert pm.DEFAULT_CALENDAR_FIELD in cal, \
+        f"default field {pm.DEFAULT_CALENDAR_FIELD!r} absent from published calendar {list(cal)}"
+    days = pm.load_calendar_days(str(cal_path), pm.DEFAULT_CALENDAR_FIELD)
+    assert days and days == sorted(days)
 
 
 def test_missing_calendar_file_exit_2(tmp_path, capsys):
@@ -200,8 +218,8 @@ def test_missing_calendar_file_exit_2(tmp_path, capsys):
 def test_missing_calendar_field_fails(tmp_path):
     cal = tmp_path / "cal.json"
     cal.write_text(json.dumps({"other": []}))
-    with pytest.raises(pm.PlanError, match="binance_present_days"):
-        pm.load_calendar_days(str(cal), "binance_present_days")
+    with pytest.raises(pm.PlanError, match="usable_days"):
+        pm.load_calendar_days(str(cal), "usable_days")
 
 
 def test_neither_range_nor_calendar_exit_2(tmp_path, capsys):

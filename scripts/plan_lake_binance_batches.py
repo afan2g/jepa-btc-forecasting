@@ -50,7 +50,11 @@ INSTRUMENT_KEYS = ("binance-perp", "binance-spot")
 COMMAND_TEMPLATE = (".venv/bin/python ingest/download_lake_binance.py "
                     "--instrument {instruments} --days-file {days_file} --allow-broad")
 
-DEFAULT_CALENDAR_FIELD = "binance_present_days"
+# The Binance-present day list published by ingest/verify_trades_and_calendar.py: `usable_days` is the
+# `binance` intersection (binF_book & binF_trade & binS_book & binS_trade [& funding & oi]) minus any
+# genuinely-unfillable Coinbase days — exactly the set of Binance-present, pipeline-usable days to
+# stage. (The artifact stores it under `usable_days`; there is no `binance_present_days` field.)
+DEFAULT_CALENDAR_FIELD = "usable_days"
 MANIFEST_NAME = "manifest.json"
 BATCH_GLOB = "batch_*_days.txt"
 CALENDAR_ERROR_EXIT = 2
@@ -254,10 +258,11 @@ def parse_args(argv=None):
                     "(planning only — no vendor I/O, no downloads).")
     ap.add_argument("--start", help="YYYY-MM-DD inclusive (with --end; a plain day range)")
     ap.add_argument("--end", help="YYYY-MM-DD inclusive (with --start)")
-    ap.add_argument("--calendar", help="calendar JSON with a Binance-present day-list field "
-                                       "(overrides --start/--end)")
+    ap.add_argument("--calendar", help="calendar JSON from ingest/verify_trades_and_calendar.py "
+                                       "(e.g. data/usable_calendar.json); overrides --start/--end")
     ap.add_argument("--calendar-field", default=DEFAULT_CALENDAR_FIELD,
-                    help=f"calendar field holding the day list (default {DEFAULT_CALENDAR_FIELD})")
+                    help=f"calendar field holding the Binance-present day list (default "
+                         f"{DEFAULT_CALENDAR_FIELD} — the verify_trades_and_calendar.py intersection)")
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR,
                     help=f"output dir for batch files + manifest (git-ignored; default "
                          f"{DEFAULT_OUT_DIR})")
