@@ -78,6 +78,9 @@ DEFAULT_OUT = "data/reports/backfill/coinbase_backfill_manifest.json"
 BLOCKER_KEYS = ("structural", "missing_keys", "coverage_gaps", "inconsistencies",
                 "unresolved_days", "batch_incomplete", "book_fill_unavailable",
                 "trade_fill_unavailable", "calendar_drift")
+# Run parameters pinned across batch reports: differing sampling (grid_ms/k) or reconstruction
+# (engine/policy) produce incompatible quality verdicts, so a ready manifest must not combine them.
+_META_PIN_FIELDS = ("exchange", "symbol", "thresholds", "grid_ms", "k", "engine", "policy")
 
 
 class ReviewInputError(ValueError):
@@ -175,7 +178,25 @@ def is_fillable(cal: dict, day: str, product: str) -> bool:
     if day in set(cal.get("fill_days_probe_error") or []):
         return False
     p = fs.get(product)
-    return bool(isinstance(p, dict) and p.get("present") and p.get("ok"))
+    # strict True, not truthiness: a fail-closed spend gate must not accept {"present":"yes",
+    # "ok":"false"} (the string "false" is truthy) as a positively-verified fill.
+    return isinstance(p, dict) and p.get("present") is True and p.get("ok") is True
+
+
+def validate_calendar_fill_flags(cal: dict, path: str) -> None:
+    """coinbase_fill_days flags drive the book-gap vs trade-only split; a malformed non-bool flag
+    (e.g. "trades": "true") reads as False in book_gap_days/trade_fill_days yet the day stays a batch
+    day, so a matching report could pass ready while silently omitting the fill. Fail closed at load
+    like the planner (plan_coinbase_quality_map_batches.load_calendar) does."""
+    fill = cal.get("coinbase_fill_days")
+    if fill is None:
+        return
+    if not isinstance(fill, dict):
+        raise ReviewInputError(f"usable calendar {path}: 'coinbase_fill_days' must be an object")
+    for d, v in fill.items():
+        if not isinstance(v, dict) or not all(isinstance(v.get(k), bool) for k in ("book", "trades")):
+            raise ReviewInputError(f"usable calendar {path}: coinbase_fill_days entry {d} must be a "
+                                   "{'book': bool, 'trades': bool} object")
 
 
 # ----------------------------------------------------------- cost model
@@ -698,12 +719,11 @@ def check_report_consistency(reports: list, blockers: dict) -> None:
         for issue in summary_count_issues(report):
             blockers["inconsistencies"].append(f"{r['report_dir']}: {issue}")
         meta = _as_dict(report.get("meta"))
-        pin = {"exchange": meta.get("exchange"), "symbol": meta.get("symbol"),
-               "thresholds": meta.get("thresholds")}
+        pin = {f: meta.get(f) for f in _META_PIN_FIELDS}
         if ref_meta is None:
             ref_meta = pin
         elif pin != ref_meta:
-            for key in ("exchange", "symbol", "thresholds"):
+            for key in _META_PIN_FIELDS:
                 if pin[key] != ref_meta[key]:
                     blockers["inconsistencies"].append(
                         f"meta_drift:{key}:{ref_meta[key]!r}!={pin[key]!r}")
@@ -884,6 +904,7 @@ def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only)
         raise ReviewInputError("no usable calendar: pass --usable-calendar or set "
                                "plan meta.input_calendar")
     cal = load_json_object(resolved_cal, what="usable calendar")
+    validate_calendar_fill_flags(cal, resolved_cal)
     reports, day_index = load_batch_reports(plan)
 
     blockers = new_blockers()
@@ -922,6 +943,8 @@ def build_manifest_inspection(report_paths, cal_path, *, generated_utc) -> dict:
         reports.append({"path": p, "report_dir": os.path.dirname(p), "batch": None,
                         "report": load_json_object(p, what="quality-map report")})
     cal = load_json_object(cal_path, what="usable calendar") if cal_path else {}
+    if cal_path:
+        validate_calendar_fill_flags(cal, cal_path)
     day_index = {}
     for r in reports:
         for rec in r["report"].get("days") or []:

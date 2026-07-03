@@ -299,6 +299,31 @@ def test_is_fillable():
     assert rv.is_fillable(err, "2025-01-10", "book") is False
 
 
+def test_is_fillable_requires_strict_true():
+    # truthy non-bool present/ok (e.g. "ok":"false", a truthy string) must NOT count as fillable
+    cal = _calendar(fill_status={"2025-01-10": {"book": {"present": "yes", "ok": "false"},
+                                                "trades": {"present": True, "mb": 1.0, "ok": True},
+                                                "error": False, "reason": "", "ok": True}})
+    assert rv.is_fillable(cal, "2025-01-10", "book") is False
+    assert rv.is_fillable(cal, "2025-01-10", "trades") is True
+
+
+def test_validate_calendar_fill_flags():
+    rv.validate_calendar_fill_flags(_calendar(), "cal")   # clean: no raise
+    bad = _calendar(coinbase_fill_days={"2025-01-10": {"book": "true", "trades": True}})
+    with pytest.raises(rv.ReviewInputError, match="coinbase_fill_days"):
+        rv.validate_calendar_fill_flags(bad, "cal")
+
+
+def test_readiness_rejects_malformed_calendar_fill_flag(tmp_path):
+    cal = _calendar()
+    cal["coinbase_fill_days"]["2025-01-11"]["trades"] = "true"   # stringly-typed flag
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal)
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(tmp_path / "m.json"),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.INPUT_ERROR_EXIT
+
+
 # =========================================================================== Task 4: cost
 def test_gb_from_mb():
     assert rv.gb_from_mb(1000.0) == 1.0
@@ -810,6 +835,19 @@ def test_check_reports_validation_and_meta_drift(tmp_path):
     blockers = rv.new_blockers()
     rv.check_report_consistency(reps, blockers)
     assert any("symbol" in x for x in blockers["inconsistencies"])
+
+
+def test_meta_drift_pins_run_parameters(tmp_path):
+    # two batches with different grid_ms (or k/engine/policy) must not combine into a ready manifest
+    reports = [_report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))]),
+               _report([_day("2025-01-02", "lake_usable", _fill_block(False, "lake_usable"))],
+                       grid_ms=500)]
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    reps, _ = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_report_consistency(reps, blockers)
+    assert any("meta_drift:grid_ms" in x for x in blockers["inconsistencies"])
 
 
 def test_non_dict_coinapi_fill_fails_closed_no_crash(tmp_path):
