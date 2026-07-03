@@ -749,9 +749,11 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   normalizers (deep-review #3):** mutating data **after** a row's `t_event` must **not** change
   that row's normalized (z-score/EWMA/PCA) feature values — proves the stationarizer is fit
   as-of, not full-window (§H).
-- **As-of barrier volatility (deep-review #4):** the triple-barrier width at `t_event` is a
+- **As-of barrier volatility (deep-review #4):** the triple-barrier **width** at `t_event` is a
   function of returns `≤ t_event` only — mutating returns **in/after** `[t_event, t_barrier]`
-  cannot change the barrier width (nor `label`) at `t_event` (§D/T5).
+  cannot change the **barrier width**. (The `label` **does** correctly depend on that future path —
+  a TP/SL hit or the vertical-barrier return may flip; only the *width* is as-of-invariant, so the
+  test asserts on width, **not** `label`.) (§D/T5).
 - **Coalesce backlog (deep-review #2):** feeding a delayed backlog that clamps several bars to one
   `t_event` yields **exactly one row per `(t_event, horizon)`** (the last-closing bar); no
   duplicate `(t_event, horizon)` reaches the matrix (§C.2/§E).
@@ -1051,6 +1053,10 @@ schema change.
   as-of `≤ t_event`** (never full-window), look-back counted in `max_lookback_ns` (§H/§J); **#4** the
   **triple-barrier vol is trailing/as-of** (returns `≤ t_event`), params persisted, with a test that
   post-`t_event` mutations can't change the barrier width (§D/T5/§J).
+- Review round 19 (Codex on `48f8a16`) incorporated — 1 finding (P2): the §J as-of-vol test asserts
+  only the **barrier width** is invariant to post-`t_event` returns — the `label` **does** correctly
+  depend on the future path (`[t_event, t_barrier]`), so a TP/SL hit or vertical-barrier return may
+  flip; the test must **not** assert `label` invariance (§J).
 
 ## Risks & assumptions
 
