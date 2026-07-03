@@ -232,9 +232,12 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
      `download_coinapi.py` emits `limitbook_full` only). It is a **T1/T9 prerequisite** —
      without it the producer cannot emit bar closes or CVD on fill days and would silently
      build the claimed 704/730 usable matrix from Lake-only trades, dropping/corrupting exactly
-     the backfilled calendar the plan depends on. On fill days the Coinbase **received time is
-     `time_coinapi_ns`** (§4.3) — gate the read by it directly; any tail-lag bound is
-     CoinAPI-specific (`time_coinapi_ns − time_exchange_ns`), not the Lake figure.
+     the backfilled calendar the plan depends on. **CoinAPI timestamps are ns-since-midnight,
+     not absolute (Codex P1):** convert first — `received_time = day_open_ns + time_coinapi_ns`,
+     origin `= day_open_ns + time_exchange_ns` (snapshot block clamped to day open, per
+     `recon.coinapi`) — **before** the `received_time ≤ t_event` gate, or a raw time-of-day
+     compare passes for every after-midnight event. Any tail-lag bound is CoinAPI-specific
+     (`time_coinapi_ns − time_exchange_ns`), not the Lake figure.
    - **Dispatch:** T9 routes per fill segment by `vendor_source` (Lake → `ts_engine` streaming
      merge over Lake book+trades; CoinAPI → `seq`-order book replay **plus** the CoinAPI trades
      normalizer) before sampling.
@@ -482,10 +485,13 @@ interoperate: `ofi_integrated` (multi-level Cont-style OFI — E1.2 #1), `microp
 (`funding`,`oi_change`,`liq_intensity`) enters as low-priority features or `extra_cols`
 conditioners (E2.4). Final list is pinned per build in the manifest.
 
-**Validation before write:** the producer runs `validate_frame(matrix, manifest)` and
-fails closed on any contract violation, so a bad build never reaches
-`data/processed/`. A round-trip test (§J) then runs the artifact through
-`run_from_manifest` — the same path the CLI uses.
+**Validation before write (fail closed):** the producer runs **both** `validate_frame(matrix,
+manifest)` (columns/timing/leakage/horizons/dtypes) **and** `eval.matrix.validate_matrix(matrix,
+feature_list(manifest))` — the NaN/inf/finite/duplicate screens that otherwise only run later
+inside `run_study` (`eval/matrix.py`) — before writing. `validate_frame` **alone** would let a
+matrix with NaN/inf features or costs persist and fail only at eval (Codex P2); running both (or
+the full `run_from_manifest`) means a bad build **never** reaches `data/processed/`. A round-trip
+test (§J) then runs the artifact through `run_from_manifest` — the same path the CLI uses.
 
 **`regime`** column: default `spread_tick`-bucketed `{tight, wide}` (matches the built
 per-regime slicing `eval/study.py:78` and `eval/synthetic.py`); volatility-regime
@@ -619,7 +625,7 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T5** `feat/labels-triple-barrier` | Triple-barrier (vol-scaled EWMA barriers, vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, base price `P0` = last-observable `coinbase_read_ts` mid (P2)** | T2 target anchor | `data/labels.py` + span-anchor test | Pre |
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker+slippage, fee-tier param) + `half_spread_bps` from the Coinbase book at `coinbase_read_ts` (lagged, P1) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
-| **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; `validate_frame` before write | `eval/manifest.py` schema | manifest writer + round-trip test | Pre |
+| **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection test | Pre |
 | **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; byte-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
 | **T10** `feat/producer-calibration` (Post) | Consume the **final reviewed seam list**; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; first real G1. **Acceptance: seam masking holds on the real stitch plan** | T9, backfilled data + reviewed stitch plan | E0.3/E0.5 artifacts + G1 result | **Post** (backfill unlock) |
 
@@ -719,6 +725,12 @@ schema change.
   watermark only (P1, §C.2/§E/§J/§H) — and **promoting microprice requires a label rebuild**,
   not a manifest flip (the triple-barrier labels are computed off the anchor path; P2, §B) —
   traced to data.md §5/§5b median/p95 pairs, `eval/runner.py` single-target-pair.
+- Review round 6 (Codex on `dfcbda7`) incorporated: **CoinAPI timestamps are ns-since-midnight**
+  — convert to absolute (`day_open_ns + time_coinapi_ns`) **before** the `received_time ≤
+  t_event` gate, else every after-midnight event passes (P1, §C.1) — and the producer runs
+  **`validate_matrix` as well as `validate_frame` before writing** (the NaN/inf/finite screens
+  live in `validate_matrix`, not `validate_frame`), so bad rows never reach `data/processed/`
+  (P2, §H/T8) — traced to data.md §4.3, `eval/matrix.py:validate_matrix`.
 
 ## Risks & assumptions
 
