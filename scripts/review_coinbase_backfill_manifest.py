@@ -28,6 +28,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import sys
 
@@ -108,9 +109,18 @@ def load_json_object(path: str, *, what: str) -> dict:
     def _reject_nonfinite(token):
         raise ReviewInputError(f"{what} {path} contains a non-finite JSON constant ({token}); "
                                "NaN/Infinity are not allowed")
+
+    def _finite_float(s):
+        # a syntactically valid but overflowing literal (e.g. 1e999) parses to inf and would not hit
+        # parse_constant — reject it here so it can't reach write_manifest after --out is truncated.
+        v = float(s)
+        if not math.isfinite(v):
+            raise ReviewInputError(f"{what} {path} contains a non-finite number ({s}); "
+                                   "NaN/Infinity are not allowed")
+        return v
     try:
         with open(path) as f:
-            obj = json.load(f, parse_constant=_reject_nonfinite)
+            obj = json.load(f, parse_constant=_reject_nonfinite, parse_float=_finite_float)
     except json.JSONDecodeError as e:
         raise ReviewInputError(f"{what} {path} is not valid JSON: {e}") from None
     if not isinstance(obj, dict):
@@ -158,7 +168,7 @@ def _fill_status(cal: dict, day: str):
 def measured_mb(cal: dict, day: str, product: str):
     """Measured per-day size (MB) for `product` in ("book","trades") from fill_status, or None."""
     fs = _fill_status(cal, day)
-    if not fs:
+    if not isinstance(fs, dict):   # a malformed (scalar/list) status record has no measured size
         return None
     p = fs.get(product)
     if isinstance(p, dict) and p.get("present"):
@@ -171,7 +181,7 @@ def is_fillable(cal: dict, day: str, product: str) -> bool:
     """True iff CoinAPI `product` for `day` is verifiably available (present+ok, no error, not in
     the unfillable/probe-error lists) per the calendar verifier's fill_status."""
     fs = _fill_status(cal, day)
-    if not fs or fs.get("error") is True:
+    if not isinstance(fs, dict) or fs.get("error") is True:   # non-dict status record → unavailable
         return False
     if day in set(cal.get("fill_days_unfillable") or []):
         return False

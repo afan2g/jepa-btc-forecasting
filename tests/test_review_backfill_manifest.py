@@ -259,6 +259,21 @@ def test_load_json_object_rejects_nonfinite_constant(tmp_path):
         rv.load_json_object(str(p), what="thing")
 
 
+def test_load_json_object_rejects_overflowed_number(tmp_path):
+    # a syntactically valid but overflowing literal (1e999 -> inf) must also fail closed at load
+    p = tmp_path / "x.json"
+    p.write_text('{"mb": 1e999}')
+    with pytest.raises(rv.ReviewInputError, match="non-finite"):
+        rv.load_json_object(str(p), what="thing")
+
+
+def test_fill_status_helpers_tolerate_malformed_record():
+    # a scalar/list fill_status[day] must not crash is_fillable/measured_mb (.get on a non-dict)
+    cal = _calendar(fill_status={"2025-01-10": 5, "2025-01-11": ["bad"]})
+    assert rv.is_fillable(cal, "2025-01-10", "book") is False   # non-dict → unavailable, no crash
+    assert rv.measured_mb(cal, "2025-01-11", "trades") is None
+
+
 # =========================================================================== Task 3: calendar
 def test_book_gap_and_trade_fill_days():
     cal = _calendar()
