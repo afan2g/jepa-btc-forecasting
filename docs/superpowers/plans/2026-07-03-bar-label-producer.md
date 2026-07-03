@@ -301,7 +301,10 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    60 s guard band survive (Codex P2). For the **vendor-coverage** test use
    **`window_vendor_sources(start, end, segments)` (`recon/stitch_policy.py:430`)** — the row
    is kept only when *both* its feature window
-   `[t_feature_start, t_event]` and label window `[t_event, t_barrier]` return a singleton
+   `[t_feature_start, t_event]` and label window **`[coinbase_read_ts, t_barrier]`** (extended
+   back to the base-price read `coinbase_read_ts ≤ t_event`, Codex P2 — else `y_fwd_bps` could
+   measure one vendor's `P0` to another vendor's future book across a seam; the CPCV *span* stays
+   `[t_event, t_barrier]`) return a singleton
    `{lake}` or `{coinapi}`; any mixed-vendor, `excluded`, or `UNCOVERED` (day-edge overhang)
    window is masked. **Do not use `vendor_source_at(...)` for this** — it is per-*sample*
    and only sees the endpoint, so it would miss an excluded/uncovered span *inside* the
@@ -356,8 +359,8 @@ contract, restated as production rules:
 | `t_barrier` | first-barrier-hit time (TP/SL/time), forward from `t_event` | `t_event ≤ t_barrier ≤ t_event + horizons[tag]` |
 
 **Seam integrity (§C.3):** additionally, every emitted row's `[t_feature_start, t_event]`
-and `[t_event, t_barrier]` windows must be seam-/guard-clean and single-vendor-backed
-(`recon/stitch_policy.py`); rows failing the masks are dropped, never NaN-carried into the
+feature window and **`[coinbase_read_ts, t_barrier]`** label window (extended back to the
+base-price read) must be seam-/guard-clean and single-vendor-backed (`recon/stitch_policy.py`); rows failing the masks are dropped, never NaN-carried into the
 matrix (**`validate_matrix` rejects NaN/inf features** — §H; `validate_frame` covers only
 columns/timing/dtypes, Codex P2). This is the value-level complement to the timing invariants
 below.
@@ -554,9 +557,12 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   notional, a lull triggers on the time cap (`emitted_by_time_cap`); Coinbase-order
   scramble still yields identical bars (mirrors `tests/test_sample_reconstruct.py` scramble
   test). **PASS/FAIL:** median-bar-time on a planted active regime ≤ 2 s.
-- **Threshold causality (P2b):** injecting a large volume spike on day `d` must **not**
-  change any bar boundary on day `d` or earlier (the trailing threshold sees only days
-  `< d`); warm-up days use the seed threshold and are flagged/excluded.
+- **Threshold causality (P2b):** `threshold_d` is computed from **prior-day** completed volume
+  only, so injecting volume into day `d`'s **schedule input** must not change `threshold_d` (nor
+  any threshold `≤ d`) — assert on the *threshold value*, **not** the bar boundaries, since the
+  clock legitimately re-bins day `d` when its raw trades change (Codex P2: keep raw trades fixed
+  and mutate only the completed-volume schedule feed, or inject the spike into a future day).
+  Warm-up days use the seed threshold and are flagged/excluded.
 - **Decision-time / sample-timing (P1):** the label runs forward from `t_event`; **every read
   event has `received_time ≤ t_event`** — planting a **delayed** event (`received_time >
   t_event` but `origin_time ≤ t_event`) must **not** enter the snapshot/features (regression
@@ -769,6 +775,12 @@ schema change.
   `emitted_by_time_cap` bars (few or **zero** trades) `t_event = max(t_cap, max(received_time))`
   and is **never earlier than the cap fire time** (P1, §C.2/§E/§J/T1) — and decision #1 now
   restates `max(received_time)` over the bar's trades rather than the single trigger receipt (P1).
+- Review round 11 (Codex on `aefcb03`) incorporated: the **label vendor/seam mask extends back
+  to the base-price read** — label window `[coinbase_read_ts, t_barrier]` (not `[t_event,
+  t_barrier]`), so a seam between `P0` and the forward path can't splice two vendors into
+  `y_fwd_bps` (the CPCV *span* stays `[t_event, t_barrier]`; P2, §C.3/§E) — and the
+  **threshold-causality test asserts on `threshold_d`, not bar boundaries** (a real trade spike
+  legitimately re-bins day `d`; mutate only the schedule feed or a future day; P2, §J).
 
 ## Risks & assumptions
 
