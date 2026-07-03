@@ -178,6 +178,45 @@ def test_process_unit_missing_file_records_missing(tmp_path):
     assert r["status"] == "missing" and r["feed"] == "liquidations"
 
 
+def test_process_unit_overwrite_miss_removes_stale_final(tmp_path):
+    # --overwrite that finds the partition now ABSENT must drop the previously-downloaded parquet, so
+    # is_done doesn't keep serving obsolete raw data while the manifest says missing.
+    root = str(tmp_path)
+    final = pathlib.Path(lb.raw_parquet_path(root, "liquidations", *PERP, "2026-04-01"))
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(b"OLD DATA")                       # a previously-downloaded partition
+    res = dl.process_unit(FakeReader({"liquidations": None}), root, "liquidations", *PERP,
+                          "2026-04-01", overwrite=True, sparse_ok=True, sleep=lambda *_: None)
+    assert res.status == "missing"
+    assert not final.exists() and not lb.is_done(root, "liquidations", *PERP, "2026-04-01")
+
+
+def test_process_unit_overwrite_empty_removes_stale_final(tmp_path):
+    root = str(tmp_path)
+    final = pathlib.Path(lb.raw_parquet_path(root, "liquidations", *PERP, "2026-04-01"))
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(b"OLD DATA")
+    empty = pa.record_batch({"origin_time": pa.array([], pa.int64())})   # now empty
+    res = dl.process_unit(FakeReader({"liquidations": [empty]}), root, "liquidations", *PERP,
+                          "2026-04-01", overwrite=True, sparse_ok=True, sleep=lambda *_: None)
+    assert res.status == "missing" and res.record.get("empty") is True
+    assert not final.exists()
+
+
+def test_process_unit_overwrite_error_keeps_stale_final(tmp_path):
+    # on an --overwrite whose new read ERRORS (state undetermined), the old file is PRESERVED — a
+    # transient failure must not destroy good data.
+    root = str(tmp_path)
+    final = pathlib.Path(lb.raw_parquet_path(root, "trades", *PERP, "2026-04-01"))
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(b"OLD DATA")
+    reader = FakeReader({"trades": dl.TransientError("RequestTimeout")})
+    res = dl.process_unit(reader, root, "trades", *PERP, "2026-04-01", overwrite=True,
+                          retries=2, sleep=lambda *_: None)
+    assert res.status == "error"
+    assert final.read_bytes() == b"OLD DATA"             # preserved on failure
+
+
 def test_process_unit_missing_stamps_sparse_ok(tmp_path):
     root = str(tmp_path)
     r1 = dl.process_unit(FakeReader({"liquidations": None}), root, "liquidations", *PERP,

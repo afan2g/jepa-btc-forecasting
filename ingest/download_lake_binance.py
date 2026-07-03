@@ -317,6 +317,9 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
             if stream is None:                       # no vendor file (sparse liquidations, gap, …)
                 # `sparse_ok` (liquidations) → an expected quiet-day gap; otherwise a REQUIRED feed's
                 # miss is a real hole the run must surface (main exits 3), never a silent success.
+                # On --overwrite, drop any STALE published parquet so is_done doesn't keep obsolete
+                # raw data for a partition the vendor now reports as absent (manifest says missing).
+                _rm(final)
                 rec = {**base, "status": "missing", "sparse_ok": bool(sparse_ok), "ts": now_iso()}
                 _append(rec)
                 return UnitResult("missing", 0, None, rec)
@@ -328,8 +331,9 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
                 # batches (a schema-only empty parquet may sit in tmp; discard it, never publish a
                 # 0-row data.parquet). Treated like a missing one under the SAME sparse/required
                 # policy: a quiet-day liquidations file is non-fatal; a required feed's emptiness is
-                # a real gap (main → exit 3).
+                # a real gap (main → exit 3). Drop any stale published parquet too (see above).
                 _rm(tmp)
+                _rm(final)
                 rec = {**base, "status": "missing", "sparse_ok": bool(sparse_ok),
                        "empty": True, "ts": now_iso()}
                 _append(rec)
