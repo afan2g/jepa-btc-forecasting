@@ -245,16 +245,22 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
 
 2. **Decision time and per-event observability — the sample-timing rule (§13 pitfall, load-bearing).**
    Reconstruction runs on **exchange (origin) time** (the canonical book order), but an event
-   is only *observable* at the trading box at its own **`received_time`** — captured per event
-   alongside `origin_time` on both Lake venues (data.md §5/§5b; `recon/ingest.py` already
-   carries both) and as `time_coinapi_ns` for CoinAPI fill days (§4.3). So the read rule is
-   **exact and per-event, not a lag constant:**
+   is only *observable* at the trading box at its own **`received_time`** — present per event in
+   the **raw parquet** (`origin_time` + `received_time` on both Lake venues, data.md §5/§5b;
+   `time_coinapi_ns` for CoinAPI, §4.3). **Prerequisite (Codex P1):** the normalized
+   `recon.events.Trade`/`Delta` keep only one `ts_engine` (`trades_from_df`/`deltas_from_df` drop
+   the other timestamp), so T1/T2 must build a **received-time-bearing event record/table** that
+   carries *both* origin (for ordering) and received (for gating). Then the read rule is **exact
+   and per-event, not a lag constant:**
    - **Decision time `t_event`** is on the box's received-time axis; every input is included
      **iff its `received_time ≤ t_event`** (ordered by `origin_time`, *gated* by
      `received_time`) — no median/constant approximation, so no delayed event leaks in.
-   - **Trigger / bar close:** a bar closes on a **trade**; `t_event =` the trigger trade's
-     **`received_time`** (not `origin + a lag constant`), so the decision is never placed
-     before the trade is actually received.
+   - **Trigger / bar close (Codex P1):** the bar accumulates notional in **`origin_time`** order
+     and closes on the threshold-crossing trade, but since origin ≠ received order an
+     earlier-origin trade in the bar can arrive *later* — so **`t_event = max(received_time)` over
+     all trades included in the bar** (the moment the box has observed every constituent trade and
+     can confirm the crossing), never just the crossing trade's `received_time`. Live: a bounded
+     watermark waits for stragglers; offline this is exact.
    - **Book snapshots** (both venues — incl. the Coinbase target mid/microprice **and**
      `half_spread_bps`): include book events with `received_time ≤ t_event`; the Coinbase
      target **`coinbase_read_ts`** is the **origin time of the last such book event**
@@ -340,7 +346,7 @@ contract, restated as production rules:
 
 | Column | Definition (producer) | Enforced invariant |
 | --- | --- | --- |
-| `t_event` | **decision** time on the **received-time** axis = the trigger trade's `received_time` (the close is a trade; §C.2); every input gated by `received_time ≤ t_event`; **not** the raw bar close | int64 ns, non-null |
+| `t_event` | **decision** time on the **received-time** axis = `max(received_time)` over the bar's trades (origin≠received order; §C.2); every input gated by `received_time ≤ t_event`; **not** the raw bar close | int64 ns, non-null |
 | `t_feature_start` | origin time of the **oldest** look-back event observed by `t_event` (`received_time ≤ t_event`) | `t_feature_start ≤ t_event`; observed look-back ≤ `max_lookback_ns` |
 | `t_available` | when features become usable = **`t_event`** (synchronous) | `t_available == t_event` (every input has `received_time ≤ t_event` per §C.2, `availability_lag_ns = 0`) |
 | `t_barrier` | first-barrier-hit time (TP/SL/time), forward from `t_event` | `t_event ≤ t_barrier ≤ t_event + horizons[tag]` |
@@ -550,9 +556,11 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
 - **Decision-time / sample-timing (P1):** the label runs forward from `t_event`; **every read
   event has `received_time ≤ t_event`** — planting a **delayed** event (`received_time >
   t_event` but `origin_time ≤ t_event`) must **not** enter the snapshot/features (regression
-  guard: a median-lag read would wrongly include it). Asserts `t_event ==` the trigger trade's
-  `received_time`, the Coinbase target book resolves to `coinbase_read_ts` (last observed, not
-  `t_event`), and `t_available == t_event` holds *without* look-ahead.
+  guard: a median-lag read would wrongly include it). Asserts `t_event == max(received_time)`
+  over the bar's trades (plant a delayed non-crossing trade whose `received_time` exceeds the
+  crossing trade's — `t_event` must track it), the Coinbase target book resolves to
+  `coinbase_read_ts` (last observed, not `t_event`), and `t_available == t_event` holds *without*
+  look-ahead.
 - **Seam masking (P2a):** a synthetic day with a planted seam (two vendor segments +
   `SeamPolicy` guard) drops every bar whose feature/label window crosses the seam **or sits
   inside the guard band** (guard-aware `feature_valid_mask`/`label_valid_mask`, **not**
@@ -623,10 +631,10 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 
 | Task | Scope | Builds on (file:line) | Deliverable | Pre/Post backfill |
 | --- | --- | --- | --- | --- |
-| **T1** `feat/bars-clock` | Dollar-notional clock + hybrid time cap + **trailing/as-of-only per-day threshold schedule + warm-up** (P2b) + `emitted_by_time_cap`; Coinbase-order sort; **CoinAPI Coinbase-trades normalizer is a fill-day prerequisite (does not exist — §C.1)** | `recon/events.py:Trade`; streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle only, §C.1) | `bars/clock.py` + threshold-causality test | Pre (calibration Post) |
+| **T1** `feat/bars-clock` | Dollar-notional clock (accumulate in `origin_time` order, **close at `max(received_time)` of the bar's trades** — P1) + hybrid time cap + **trailing/as-of-only per-day threshold schedule + warm-up** (P2b) + `emitted_by_time_cap`; Coinbase-order sort; **prerequisites: received-time-bearing event record (§C.2) + CoinAPI Coinbase-trades normalizer (§C.1) — neither exists** | `recon/events.py:Trade` (needs both timestamps); streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle only, §C.1) | `bars/clock.py` + threshold-causality test | Pre (calibration Post) |
 | **T2** `feat/bars-snapshot` | Dual-book snapshot over events with **`received_time ≤ t_event`** (Coinbase target → `coinbase_read_ts` = last observed, P1); mid + microprice (both emitted) | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py` + received-time test | Pre |
 | **T3** `feat/bars-features` | Per-bar §6/E1.2 vector (OFI/CVD/microprice_dev/queue_imb/spread_tick/depth/slope/VWAP/intra-bar path); stationarization; **value-level no-lookahead test** | T2, `recon/orderbook.py:snapshot` | `bars/features.py` + no-lookahead test | Pre |
-| **T4** `feat/bars-xvenue` | **`t_event` = trigger trade's `received_time`; every input gated by per-event `received_time ≤ t_event` (exact); p99/max tail only for the live watermark, never medians** (P1); basis; perp-state conditioners; **sample-timing test (delayed-event guard)** | T3, data.md §5/§5b | `bars/align.py` + sample-timing test | Pre (Binance tail from E2.5 Post) |
+| **T4** `feat/bars-xvenue` | **`t_event` = `max(received_time)` over the bar's trades (origin≠received order); every input gated by per-event `received_time ≤ t_event` (exact); p99/max tail only for the live watermark, never medians** (P1); needs the received-time-bearing event record (§C.2); basis; perp-state conditioners; **sample-timing test (delayed-event guard)** | T3, data.md §5/§5b | `bars/align.py` + sample-timing test | Pre (Binance tail from E2.5 Post) |
 | **T5** `feat/labels-triple-barrier` | Triple-barrier (vol-scaled EWMA barriers, vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, base price `P0` = last-observable `coinbase_read_ts` mid (P2)** | T2 target anchor | `data/labels.py` + span-anchor test | Pre |
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker+slippage, fee-tier param) + `half_spread_bps` from the Coinbase book at `coinbase_read_ts` (lagged, P1) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
@@ -665,8 +673,9 @@ schema change.
    expected paths and AGENTS.md streaming rule.
 7. **Determinism (P3)** = matrix bytes + `build_id`, with `generated_at` **injectable and
    excluded from the hash** (§I).
-8. **Horizon ladder** = `{2s,10s,60s}` default; τ-rung (~20–30 s) added post-backfill as a
-   manifest edit.
+8. **Horizon ladder** = `{2s,10s,60s}` default; the ~20–30 s τ-rung is added post-backfill by
+   **rerunning label/matrix production** (T10) to emit its bar×horizon rows — the runner rejects
+   a declared-but-missing horizon, so it is **not** a manifest-only edit (§D, Codex P2).
 9. **CV / cost / DSR / PBO** = **reuse built code** (`data/cv.py`, `eval/`); the producer
    only emits their input columns.
 10. **This PR is docs-only** — no `bars/` code yet (the contract is already pinned by
@@ -744,6 +753,12 @@ schema change.
   P2), and §D notes the τ-rung **requires rerunning label/matrix production** to emit the new
   bar×horizon rows — the runner rejects a declared-but-missing horizon, so it is not a
   manifest-only edit (P2, T10) — traced to `eval/matrix.py:validate_matrix`, `eval/runner.py:60`.
+- Review round 9 (Codex on `f98fd4b`) incorporated: a **received-time-bearing event record is
+  an explicit T1/T2 prerequisite** — the normalized `Trade`/`Delta` keep only one `ts_engine`, so
+  the `received_time ≤ t_event` gate is unimplementable on the stated contract (P1, §C.2/T1/T4);
+  and because origin≠received order within a bar, **`t_event = max(received_time)` over the bar's
+  trades**, not the crossing trade's (P1, §C.2/§E/§J); and decision #8's stale "manifest edit" for
+  the τ-rung now matches §D (P2) — traced to `recon/events.py`, `recon/ingest.py`.
 
 ## Risks & assumptions
 
