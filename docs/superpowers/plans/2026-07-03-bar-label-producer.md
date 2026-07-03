@@ -705,10 +705,12 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   `guard_ns`** (`window_crosses_seam(t_event − guard_ns, t_barrier + guard_ns, …)`, §C.3), and
   every window whose `window_vendor_sources` is not a singleton `{lake}`/`{coinapi}` —
   including the endpoint-clean-but-**`excluded`/`UNCOVERED` span *inside* the window** case (the
-  per-sample `vendor_source_at` would miss it). **Actual-span vs full-horizon (Codex #A):** plant
-  a 60 s row whose barrier resolves early (`t_barrier < t_event + 60 s`) with a seam in
-  `(t_barrier, t_event + 60 s]` — it must **survive** (its actual span clears the seam), which the
-  full-horizon `label_valid_mask` would wrongly drop. **Horizon survival (Codex #5):** the
+  per-sample `vendor_source_at` would miss it). **Actual-span vs full-horizon (Codex #A/#15):**
+  plant a 60 s row whose barrier resolves early (`t_barrier < t_event + 60 s`) with a seam in
+  **`(t_barrier + guard_ns, t_event + 60 s]`** — past the actual span **and its guard band** — it
+  must **survive** (the full-horizon `label_valid_mask` would wrongly drop it); a complementary row
+  with a seam in **`(t_barrier, t_barrier + guard_ns]`** (inside the actual span's guard band) must
+  still be **dropped**, since §C.3 extends the span by `guard_ns` before `window_crosses_seam`. **Horizon survival (Codex #5):** the
   multi-horizon fixture is sized so masking leaves **≥ `n_groups` rows per declared horizon** —
   else the 60 s rung is masked out and `run_from_manifest`/`cpcv_splits` crash instead of
   returning the per-horizon schema.
@@ -979,6 +981,10 @@ schema change.
   through `label_valid_mask` (§C.3); **#B (P2):** beyond-cap look-back stragglers must be **dropped**
   from the labeled matrix, not flagged (the consumer recomputes `max(t_event − t_feature_start)`
   and rejects/inflates) nor clipped (understates the window → under-embargo) — §F/#13.
+- Review round 15 (Codex on `f180df8`) incorporated — 1 finding (P2): the §J actual-span seam
+  fixture must plant the "survives" seam **past the guard band** (`(t_barrier + guard_ns, t_event +
+  60 s]`), not merely past `t_barrier` — since §C.3 extends the actual span by `guard_ns`, a seam in
+  `(t_barrier, t_barrier + guard_ns]` must still be **dropped**; the test now asserts both (§J).
 
 ## Risks & assumptions
 
