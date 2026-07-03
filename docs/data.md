@@ -816,6 +816,31 @@ if less than ~40 GB is already used that month).
   --allow-broad
 ```
 
+**Orchestrating the staged batches (batch runner).** `scripts/run_coinbase_quality_map_batches.py`
+consumes the planner's `manifest.json` and drives the batches one at a time, with resume/skip and a
+single status/aggregate artifact — it does **not** re-implement any Lake or quota logic. Each batch is
+launched as the *exact* command the planner baked into the manifest (only the Python interpreter is
+swapped to the running one), so every `used_data`/headroom quota safeguard the runner enforces still
+applies to each batch. A batch counts as **complete** iff its runner wrote
+`coinbase_quality_map.json` under the batch's report dir (the runner writes it only on a clean exit; a
+quota-refused run writes nothing), so re-runs skip finished batches. Modes: **default (no flags)** is a
+read-only status view (classifies every batch complete / pending / failed / `blocked_quota`, writes
+`data/reports/coinbase_quality_map_batches/summary.json`, **no vendor I/O**); **`--dry-run`** prints the
+exact command `--execute` would run and writes nothing; **`--execute`** runs pending batches as real
+subprocesses (LIVE Lake I/O, still quota-gated), bounded by `--max-batches` (default **1** — one batch
+per monthly quota window), stopping the moment a batch is refused by the quota headroom. **Like the
+planner, this does not unlock the §5a CoinAPI backfill gate** — the broad full-window quality map
+remains the gate; the orchestrator only stages it safely.
+
+```bash
+# safe: show batch status + aggregate completed reports (no vendor I/O)
+.venv/bin/python scripts/run_coinbase_quality_map_batches.py
+# safe: preview the exact command the next batch would run
+.venv/bin/python scripts/run_coinbase_quality_map_batches.py --dry-run
+# LIVE: run ONE batch this quota window (the runner re-checks used_data + headroom)
+.venv/bin/python scripts/run_coinbase_quality_map_batches.py --execute
+```
+
 **Replay engine (Python reference vs native).** The pure-Python seed/reseed replay
 (`recon/reseed.py`) is the **correctness reference/oracle**, but it is single-process and its per-event
 `max(dict)/min(dict)` best-bid/ask scans make it O(N·L) — the 2026-07-01 Python-only quality-map smoke
