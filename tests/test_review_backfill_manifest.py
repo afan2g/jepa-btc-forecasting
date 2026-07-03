@@ -199,6 +199,11 @@ def test_segment_sources_aligned_with_stitch_policy():
     assert rv.SEGMENT_SOURCES == sp.SOURCES
 
 
+def test_seed_source_unreliable_reason_aligned_with_runner():
+    qm = _load_runner()
+    assert rv._SEED_SOURCE_UNRELIABLE == qm.SEED_SOURCE_UNRELIABLE
+
+
 def test_why_codes_cover_every_runner_fill_decision():
     qm = _load_runner()
     seen = {
@@ -427,6 +432,18 @@ def test_day_record_issues_seam_mismatch():
     assert not any("seams_mismatch" in i for i in rv.day_record_issues(_mk([mid])))  # correct seam
 
 
+def test_day_record_issues_scalar_seams_no_crash():
+    # a corrupt non-list `seams` (e.g. a scalar) must fail closed, not crash on list(seams)
+    day = "2025-01-02"
+    rec = _day(day, "lake_present_degraded",
+               _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                           full_day_reason="quality_over_usable_bar",
+                           fill_segments=[_full_day_seg(day)], seams=5,
+                           seam_policy={"seam_guard_s": 60.0}))
+    issues = rv.day_record_issues(rec)   # must not raise
+    assert "fill_day_missing_seams" in issues
+
+
 def test_summary_fill_counts_cross_checked():
     rep = _clean_reports()[0]
     rep["summary"]["coinapi_fill"] = {"fill_counts": {
@@ -467,14 +484,23 @@ def test_day_record_issues_fill_decision_contradicts_classification():
                             full_day_reason="quality_over_usable_bar"))
     assert any(i.startswith("fill_decision_contradicts_classification")
                for i in rv.day_record_issues(rec2))
-    # both legitimate inconclusive outcomes pass
+    # both legitimate inconclusive outcomes pass (the crossed-source fill needs its marking reason)
     ok_unresolved = _day("d", "inconclusive", _fill_block(None, "no_verdict"))
     ok_crossed = _day("d", "inconclusive",
                       _fill_block(True, "crossed_seed_source_cross_validated_2026-07-01",
-                                  fill_profile="full_day_fill", full_day_reason="crossed_seed_source"))
+                                  fill_profile="full_day_fill", full_day_reason="crossed_seed_source"),
+                      reasons=["seed_accepted_but_source_unreliable"])
     for rec in (ok_unresolved, ok_crossed):
         assert not any(i.startswith("fill_decision_contradicts_classification")
                        for i in rv.day_record_issues(rec))
+    # a crossed-source fill on an inconclusive day WITHOUT the marking reason is a contradiction
+    # (a stale report must not convert a no_verdict blocker into an approved fill)
+    bad_crossed = _day("d", "inconclusive",
+                       _fill_block(True, "crossed_seed_source_cross_validated_2026-07-01",
+                                   fill_profile="full_day_fill", full_day_reason="crossed_seed_source"),
+                       reasons=["no_seed_snapshots"])
+    assert any(i.startswith("fill_decision_contradicts_classification")
+               for i in rv.day_record_issues(bad_crossed))
 
 
 # =========================================================================== Task 6: counts

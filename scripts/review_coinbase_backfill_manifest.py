@@ -212,20 +212,27 @@ _CLASS_FILL_CONTRACT = {
     LAKE_USABLE: (False, "lake_usable"),
     EXCLUDED: (None, "excluded_not_in_scope"),
 }
-# `inconclusive` has two legitimate outcomes (order-independent of reason prose): unresolved, or the
-# crossed-seed-source fill (the provisional 2026-07-01 cross-validation policy).
-_INCONCLUSIVE_VALID_FILL = {(None, "no_verdict"),
-                            (True, "crossed_seed_source_cross_validated_2026-07-01")}
+# `inconclusive` has two legitimate outcomes: unresolved (no_verdict), or the crossed-seed-source fill
+# — but the latter is valid ONLY when the reason marks it (the runner routes it there iff
+# SEED_SOURCE_UNRELIABLE is in reasons; the provisional 2026-07-01 cross-validation policy).
+_CROSSED_SOURCE_FILL = (True, "crossed_seed_source_cross_validated_2026-07-01")
+_SEED_SOURCE_UNRELIABLE = "seed_accepted_but_source_unreliable"  # run_coinbase_quality_map.SEED_SOURCE_UNRELIABLE
 
 
-def _fill_contract_issue(cls, needs_fill, why):
-    """None if (needs_fill, why) matches the classification's runner contract, else an issue code."""
+def _fill_contract_issue(cls, needs_fill, why, reasons):
+    """None if (needs_fill, why[, reasons]) matches the classification's runner contract, else a code."""
     if cls in _CLASS_FILL_CONTRACT:
         if (needs_fill, why) != _CLASS_FILL_CONTRACT[cls]:
             return (f"fill_decision_contradicts_classification:{cls}:got=({needs_fill},{why}):"
                     f"expected={_CLASS_FILL_CONTRACT[cls]}")
     elif cls == INCONCLUSIVE:
-        if (needs_fill, why) not in _INCONCLUSIVE_VALID_FILL:
+        if (needs_fill, why) == _CROSSED_SOURCE_FILL:
+            # the crossed-source fill path is only legitimate when the reason marks it — otherwise a
+            # stale report could convert a no_verdict blocker into an approved fill.
+            if _SEED_SOURCE_UNRELIABLE not in (reasons or ()):
+                return (f"fill_decision_contradicts_classification:{cls}:crossed_source_fill_without_"
+                        f"{_SEED_SOURCE_UNRELIABLE}")
+        elif (needs_fill, why) != (None, "no_verdict"):
             return f"fill_decision_contradicts_classification:{cls}:got=({needs_fill},{why})"
     return None
 
@@ -269,8 +276,10 @@ def _fill_segments_issues(day, segments, seams) -> list:
     expected_seams = [cur.get("start_ts") for prev, cur in zip(segments, segments[1:])
                       if isinstance(prev, dict) and isinstance(cur, dict)
                       and prev.get("source") != cur.get("source")]
-    if list(seams or []) != expected_seams:
-        issues.append(f"seams_mismatch:expected={expected_seams}:got={list(seams or [])}")
+    # only derive a mismatch when seams is a list — a non-list seams (e.g. a scalar) is caught by the
+    # fill_day_missing_seams check in day_record_issues; `list(seams)` here would crash on a scalar.
+    if isinstance(seams, list) and seams != expected_seams:
+        issues.append(f"seams_mismatch:expected={expected_seams}:got={seams}")
     return issues
 
 
@@ -329,8 +338,9 @@ def day_record_issues(rec: dict) -> list:
             issues.append("fill_day_missing_seams")
         if not isinstance(cf.get("seam_policy"), dict):
             issues.append("fill_day_missing_seam_policy")
-    # the fill decision must match the classification it was derived from (never drop/invent a fill)
-    contract = _fill_contract_issue(cls, nf, why)
+    # the fill decision must match the classification (+ reasons) it was derived from (never
+    # drop/invent a fill, and only route crossed-source inconclusive days to a fill)
+    contract = _fill_contract_issue(cls, nf, why, rec.get("reasons"))
     if contract is not None:
         issues.append(contract)
     return issues
