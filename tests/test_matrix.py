@@ -119,7 +119,7 @@ def test_infinite_feature_or_cost_rejected():
 def test_nullable_or_datetime_timing_fails_closed():
     # Plain comparisons fail open under pd.NA (Series.all() skips NA) and run_study's
     # observed-lookback .max() skips NA rows — mirror validate_frame's integer/non-null
-    # timing guard so the legacy path and direct run_study callers are covered too.
+    # timing guard so direct run_study callers are covered too.
     df, feats, _ = make_matrix(signal_strength=1.0, seed=1)
     bad = df.copy()
     bad["t_barrier"] = bad["t_barrier"].astype("Int64"); bad.loc[0, "t_barrier"] = pd.NA

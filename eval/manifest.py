@@ -28,14 +28,6 @@ LEAKY_NAME_PATTERNS = ("fwd", "future", "forward", "barrier", "label", "target",
 
 VENUE_ROLES = ("signal", "target")
 
-# Fields that only exist in versioned manifests (required AND optional — declaring dtypes
-# or as_of_ns on a legacy dict must not be silently ignored). eval.runner uses this to
-# refuse a manifest that carries the v1 contract but lost its 'manifest_version' key (e.g.
-# a typo) instead of downgrading it to the unvalidated legacy path.
-V1_ONLY_FIELDS = (frozenset(REQUIRED_FIELDS) | frozenset(OPTIONAL_FIELDS)) - {
-    "manifest_version", "feature_cols", "max_lookback_ns", "embargo_ns", "gate",
-}
-
 _TIMING_COLS = ("t_event", "t_barrier", "t_feature_start", "t_available")
 # Required in the frame even when targets are optional: the timing/horizon checks need them.
 _STRUCTURAL_COLS = frozenset(_TIMING_COLS) | {"horizon"}
@@ -57,8 +49,8 @@ def _leaky_names(cols) -> list[str]:
 
 def leaky_feature_names(cols) -> list[str]:
     """Public leak screen: the subset of cols with label-derived names (LEAKY_NAME_PATTERNS
-    substrings, or a bare y/y_* name). Used by eval.runner's legacy branch and available to
-    manifest-authoring tools."""
+    substrings, or a bare y/y_* name). Available to manifest-authoring / pre-registration
+    tools (validate_manifest applies the same screen to a manifest's feature_cols)."""
     return _leaky_names(cols)
 
 

@@ -67,11 +67,9 @@ lag features upstream), and every declared horizon must be present in the
 frame. The result dict echoes `{dataset_id, build_id, generated_at,
 embargo_ns, max_lookback_ns, feature_cols}` under `"manifest"` so a run is
 reproducible from its own output. The `scripts/run_baseline.py` CLI accepts
-only v1 manifests (via `load_manifest`); legacy `{feature_cols, embargo_ns,
-max_lookback_ns, gate}` dicts still work for direct library callers of
-`run_from_manifest` (with a leaky-name screen but no frame validation) until
-the legacy branch is removed. A manifest that carries v1-only fields but lost
-`manifest_version` (typo) is refused rather than silently treated as legacy.
+only v1 manifests (via `load_manifest`), and `run_from_manifest` refuses
+non-versioned dicts with a migration error (including a full v1 manifest whose
+`manifest_version` key was lost to a typo).
 Note `gate` is optional at schema level but required by `run_from_manifest`
 and the CLI (`eval.runner.resolve_gate`); JEPA pretraining manifests may omit
 it and will consume the same manifest with
