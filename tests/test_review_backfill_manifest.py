@@ -773,6 +773,23 @@ def test_calendar_drift_blocks():
     assert any("2025-01-01" in x for x in blockers["calendar_drift"])
 
 
+def test_calendar_drift_missing_context_blocks():
+    cal = _calendar()
+    # a report day with NO calendar context must block (can't verify it's the right calendar)
+    rec = _day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))
+    del rec["calendar"]
+    blockers = rv.new_blockers()
+    rv.check_calendar_drift([{"report": {"days": [rec]}}], cal, blockers)
+    assert any("missing_calendar_context" in x for x in blockers["calendar_drift"])
+    # a report day missing one calendar field must block too
+    rec2 = _day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"),
+                calendar={"in_usable_days": True, "is_coinbase_fill_day": False,
+                          "excluded_reason": None})   # missing in_lake_all_days
+    blockers2 = rv.new_blockers()
+    rv.check_calendar_drift([{"report": {"days": [rec2]}}], cal, blockers2)
+    assert any("missing_in_lake_all_days" in x for x in blockers2["calendar_drift"])
+
+
 def test_fill_availability_blocks_unfillable_book_and_trade():
     cal = _calendar(fill_status={
         "2025-01-10": {"book": {"present": False, "mb": None, "ok": False},

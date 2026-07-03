@@ -683,20 +683,26 @@ def check_report_consistency(reports: list, blockers: dict) -> None:
 
 
 def check_calendar_drift(reports: list, cal: dict, blockers: dict) -> None:
-    """A mapped day's report `calendar` context must agree with the loaded usable calendar."""
+    """A mapped day's report `calendar` context must be PRESENT and agree with the loaded usable
+    calendar — it is the only guard against using a report built from a different calendar, so a
+    missing context must block readiness (not silently disable the check)."""
     lake_all = set(cal.get("lake_all_days") or [])
     fill = _fill_days(cal)
     excluded = cal.get("excluded_days_by_reason") or {}
     for r in reports:
         for rec in r["report"].get("days") or []:
             d = rec.get("day")
-            rc = rec.get("calendar") or {}
-            if "in_lake_all_days" in rc and rc["in_lake_all_days"] != (d in lake_all):
-                blockers["calendar_drift"].append(f"{d}:in_lake_all_days")
-            if "is_coinbase_fill_day" in rc and rc["is_coinbase_fill_day"] != (d in fill):
-                blockers["calendar_drift"].append(f"{d}:is_coinbase_fill_day")
-            if "excluded_reason" in rc and rc["excluded_reason"] != excluded.get(d):
-                blockers["calendar_drift"].append(f"{d}:excluded_reason")
+            rc = rec.get("calendar")
+            if not isinstance(rc, dict):
+                blockers["calendar_drift"].append(f"{d}:missing_calendar_context")
+                continue
+            for field, actual in (("in_lake_all_days", d in lake_all),
+                                  ("is_coinbase_fill_day", d in fill),
+                                  ("excluded_reason", excluded.get(d))):
+                if field not in rc:
+                    blockers["calendar_drift"].append(f"{d}:missing_{field}")
+                elif rc[field] != actual:
+                    blockers["calendar_drift"].append(f"{d}:{field}")
 
 
 def check_fill_availability(cal: dict, blockers: dict) -> None:
