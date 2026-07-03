@@ -314,6 +314,13 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
      (§A) term dominates when the bar holds few or **zero** trades — `t_event = max(t_event(N−1),
      t_cap, max(received_time) over events)` is **never earlier than the cap fire time** (nor the
      prior bar's `t_event`), or `t_available`/labels would start before the bar was decidable.
+   - **One decision per `(t_event, horizon)` — coalesce backlog ties (Codex deep-review #2):**
+     clamping to `t_event(N−1)` can give several bars the **same** `t_event` when a delayed backlog
+     drains at one instant. The evaluator scores rows **independently** (per-row PnL / trade counts,
+     `eval/baseline.py:88-105`), so duplicate-`t_event` rows would be counted as **multiple** trade
+     opportunities at one decision instant. Emit **at most one row per `(t_event, horizon)`** —
+     coalesce a backlog into the **last-closing bar** (the most-informed features/label at that
+     instant); T1/T9 dedupe on `(t_event, horizon)` before write, and §E lists it as an invariant.
    - **Feature/cost book snapshot (observable):** include book events with `received_time ≤
      t_event` (pre-filter, then fold in origin order — §C.1/#2); the **observable** Coinbase read
      **`coinbase_read_ts`** is the origin time of the last such book event (`≤ t_event`), feeding
@@ -457,6 +464,11 @@ covers it — no back-extension (Changelog / #6, #11). Rows failing the masks ar
 NaN-carried into the matrix (**`validate_matrix` rejects NaN/inf features** — §H; `validate_frame`
 covers only columns/timing/dtypes). This is the value-level complement to the timing invariants
 below.
+
+**Unique decision per `(t_event, horizon)` (Codex deep-review #2):** the monotone watermark can tie
+several backlog bars to one `t_event`; the producer emits **exactly one row per `(t_event, horizon)`**
+(coalesced to the last-closing bar, §C.2), so the evaluator's per-row PnL/trade counting
+(`eval/baseline.py:88-105`) cannot score one decision instant as multiple opportunities.
 
 **Well-defined values for legit edge emissions (Codex #4 — HIGH).** `validate_matrix` raises on
 the **first** NaN feature (`eval/matrix.py:53-57`) and aborts the whole day/window build, so every
@@ -626,7 +638,13 @@ interoperate: `ofi_integrated` (multi-level Cont-style OFI — E1.2 #1), `microp
 `largest_print`, `rv_intrabar`, `mae_intrabar`, `basis_binance_coinbase`,
 `ofi_binance_lagged`, `elapsed_ns`, `tod_sin`/`tod_cos`. Perp state
 (`funding`,`oi_change`,`liq_intensity`) enters as low-priority features or `extra_cols`
-conditioners (E2.4). Final list is pinned per build in the manifest.
+conditioners (E2.4). Final list is pinned per build in the manifest. **Causal normalizers (Codex
+deep-review #3):** every stationarizer — rolling z-score/scaler, EWMA, PCA-integrated OFI — must be
+fit **as-of `≤ t_event`** (trailing/shifted state, **never** full-window/full-day statistics), or it
+leaks future regimes into every feature while still passing `validate_frame` (which checks *declared*
+timing, not value causality — feature-manifest.md:17-20). The normalizer's look-back **counts toward
+`t_feature_start`/`max_lookback_ns`**, and §J's value-level no-lookahead test (T3) asserts a
+post-`t_event` mutation cannot change a past row's normalized feature.
 
 **Validation before write (fail closed):** the producer runs **both** `validate_frame(matrix,
 manifest)` (columns/timing/leakage/horizons/dtypes) **and** `eval.matrix.validate_matrix(matrix,
@@ -727,7 +745,16 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   returning the per-horizon schema.
 - **Features:** hand-built L2+trade micro-fixture with a known OFI/CVD/microprice-dev →
   exact expected values. **Value-level no-lookahead (T3):** out-of-order replay ⇒
-  byte-identical features (mirrors `tests/test_reconstruct_no_lookahead.py`).
+  byte-identical features (mirrors `tests/test_reconstruct_no_lookahead.py`). **Causal
+  normalizers (deep-review #3):** mutating data **after** a row's `t_event` must **not** change
+  that row's normalized (z-score/EWMA/PCA) feature values — proves the stationarizer is fit
+  as-of, not full-window (§H).
+- **As-of barrier volatility (deep-review #4):** the triple-barrier width at `t_event` is a
+  function of returns `≤ t_event` only — mutating returns **in/after** `[t_event, t_barrier]`
+  cannot change the barrier width (nor `label`) at `t_event` (§D/T5).
+- **Coalesce backlog (deep-review #2):** feeding a delayed backlog that clamps several bars to one
+  `t_event` yields **exactly one row per `(t_event, horizon)`** (the last-closing bar); no
+  duplicate `(t_event, horizon)` reaches the matrix (§C.2/§E).
 - **Labels:** planted up/down/flat paths → expected triple-barrier `label` and sign of
   `y_fwd_bps` off the Coinbase **mid** anchor (§B); barrier resolves within the horizon
   (`t_barrier ≤ t_event + horizon_ns`). **Span-anchor:** `t0 == t_event` and **`P0` = the true
@@ -778,8 +805,13 @@ default clock's reference stream — real *Coinbase* trade volume** (Codex #B; B
 calibration is scoped to the separate post-E2.5 Binance-clock path and must not size the
 Coinbase-default schedule); **τ measurement** (E1.1) to set the real horizon ladder; the
 **time-per-bar histogram** artifact; the **first real G1 run** over the usable calendar
-(704/730 d, OOS≈**April 2026** — data.md §5b) with real regime stratification, real DSR
-trial count, and PBO over ≥32 OOS samples. These are gated on backfill unlock and are
+(704/730 d) with real regime stratification, real DSR trial count, and PBO over ≥32 OOS samples.
+**OOS held out FIRST (Codex deep-review #1):** the clean ~1-month OOS (≈**April 2026**, data.md:22-25)
+is **partitioned out and touched once, last**, for the final G1 report — T10 calibrates thresholds,
+measures τ, and does all model/config selection on the **pre-OOS** data only, with labels/CV/metrics
+**pre-registered** before the OOS is read (experiment-plan:27-29). The runner just evaluates whatever
+rows it is given (`eval/runner.py:60-62`), so the producer/T10 must **exclude April from the
+calibration/selection matrix**, not merely annotate it. These are gated on backfill unlock and are
 **not** part of the code-complete producer.
 
 ---
@@ -795,7 +827,7 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T2** `feat/bars-snapshot` | **Two Coinbase reads (#1):** observable book at `coinbase_read_ts` (received-gated — features + `half_spread_bps`) **and** the true label book at `t_event` (origin cut — `P0`); `sample_topk_as_of` cuts on origin, so features pre-filter `received ≤ t_event` (#2); staleness cap on `t_event − coinbase_read_ts` (#8); mid + microprice (both emitted) | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py` + received-time + label-at-t_event tests | Pre |
 | **T3** `feat/bars-features` | Per-bar §6/E1.2 vector (OFI/CVD/microprice_dev/queue_imb/spread_tick/depth/slope/VWAP/intra-bar path); stationarization; **value-level no-lookahead test** | T2, `recon/orderbook.py:snapshot` | `bars/features.py` + no-lookahead test | Pre |
 | **T4** `feat/bars-xvenue` | **`t_event` = monotone watermark `max(t_event(N−1), max(received_time) over the bar's trades, cap_fire)` (non-decreasing across bars — #13); every input gated by per-event `received_time ≤ t_event` (exact); p99/max tail only for the live watermark, never medians** (P1); needs the received-time-bearing event record (§C.2); basis; perp-state conditioners; **sample-timing test (delayed-event guard)** | T3, data.md §5/§5b | `bars/align.py` + sample-timing test | Pre (Binance tail from E2.5 Post) |
-| **T5** `feat/labels-triple-barrier` | Triple-barrier (vol-scaled EWMA barriers, vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, `P0` = TRUE reconstructed mid at `t_event` (#1)**; unresolved barrier → realized return + `label=0` (#4) | T2 target anchor | `data/labels.py` + span-anchor test | Pre |
+| **T5** `feat/labels-triple-barrier` | Triple-barrier (**as-of/trailing** vol-scaled EWMA barriers — vol from returns `≤ t_event` only, params persisted, deep-review #4; vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, `P0` = TRUE reconstructed mid at `t_event` (#1)**; unresolved barrier → realized return + `label=0` (#4) | T2 target anchor | `data/labels.py` + span-anchor + as-of-vol tests | Pre |
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker + slippage, fee-tier param; **slippage includes the `coinbase_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable Coinbase book at `coinbase_read_ts` (one-sided book → drop, #4) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection test | Pre |
@@ -857,7 +889,9 @@ schema change.
   biases against the Binance-increment premise)? Gate the switch on E2.5 confidence + an E2.2
   downstream-PnL check.
 - **Q3 (T5):** vol-scaling estimator for the horizontal barriers — EWMA half-life of the
-  micro-window returns (spec says "EWMA"; the half-life is unspecified).
+  micro-window returns (spec says "EWMA"; the half-life is unspecified). The EWMA must be
+  **trailing/as-of `≤ t_event`** (never using returns in/after `[t_event, t_barrier]`, deep-review
+  #4), its params persisted; §J: mutating post-`t_event` returns cannot change the barrier width.
 - **Q4 (T1):** `target_bars_per_day` / time-cap `T` / `warmup_days` seed values before real
   calibration (drives the E0.3 gate; only the *seed* is pre-backfill, the calibrated value
   is T10).
@@ -1007,6 +1041,16 @@ schema change.
   the hash alone — a hash can't recover the thresholds for a rebuild/audit (§A/§H); **#B (P3):** the
   §C.2 member-observability parenthetical now says members are observable because **`t_event ≥` their
   max `received_time`** (the watermark is `≥`, not `=`), consistent with the monotone rule.
+- **Codex DEEP review (Codex on `b2be897`, requested per AGENTS.md Deep Review Guidelines) — 4
+  design-level P2 findings:** **#1** OOS (≈April 2026) is **held out first** — T10 calibrates/measures
+  τ/selects on **pre-OOS** data only, pre-registers labels/CV/metrics, and **excludes April from the
+  calibration/selection matrix** (data.md:22-25, experiment-plan:27-29; §split); **#2** the monotone
+  watermark can **tie backlog bars to one `t_event`** — emit **one row per `(t_event, horizon)`**
+  (coalesce to the last-closing bar) so the per-row-scoring evaluator (`eval/baseline.py:88-105`)
+  can't count one decision as several trades (§C.2/§E/§J); **#3** feature **normalizers must be causal
+  as-of `≤ t_event`** (never full-window), look-back counted in `max_lookback_ns` (§H/§J); **#4** the
+  **triple-barrier vol is trailing/as-of** (returns `≤ t_event`), params persisted, with a test that
+  post-`t_event` mutations can't change the barrier width (§D/T5/§J).
 
 ## Risks & assumptions
 
