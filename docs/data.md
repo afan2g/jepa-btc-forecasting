@@ -720,15 +720,17 @@ local lakeapi cache; vendor counter may lag ~60 min). Those two quality-map runs
   mids tracking within single-digit dollars (many exact $0.00 matches); both Lake reseeds (17:51:47Z,
   22:33:59Z) are far from the seam and clean (±30 s max $9.84–$38.57, 0 spikes >$50). Overlap parity meets
   the **2025-06-01-class bar** on central tendency and depth: |Δmid| **median $0.00** (mean $1.81,
-  signed_mean +$0.08 — no vendor bias), **corr 0.99997**, tight in relative terms (**p95 0.96 bps,
-  p99 3.10 bps, max 13.93 bps** — a tighter peak than the reference's ~$249 ≈ 37 bps); CoinAPI side
-  pristine (**0% crossed, 0% missing**), Lake side **0.0116% crossed**, **top-10 depth 100% both-present**
-  on both sides; **label agreement 0.9265 / 0.9729 / 0.9888** at 2/10/60 s. The heavier absolute-$ tail
-  (**122 spikes >$50**, max **$137.24 at 15:10:53Z**, ~25 min post-seam) is **genuine market volatility,
-  not a seam artifact**: 115 of the 122 fall in the single 15:00–16:00Z hour during a ~$100.8k→$96.1k
-  slide, |Δmid| scales with 1 s price velocity (corr 0.48) with no cumulative drift (hourly abs-mean
-  decays $9.37→$0.35), and **excluding that one hour the bps>7.5 tail collapses to 2 events — exactly the
-  2025-06-01 reference rate**. The elevated raw-$ count and modestly lower 2 s label agreement vs the
+  signed_mean +$0.08 — no vendor bias), **corr 0.99997**; CoinAPI side pristine (**0% crossed,
+  0% missing**), Lake side **0.0116% crossed**, **top-10 depth 100% both-present** on both sides;
+  **label agreement 0.9265 / 0.9729 / 0.9888** at 2/10/60 s. The |Δmid| *tail* is heavier than the
+  same-products seed/reseed recon reference (2025-06-01 book_delta_v2↔limitbook_full, p95/p99/max
+  **$0.48 / $4.35 / $66.59** — NOT the ~$249 L1-`quotes` sanity-check figure): here **p95 $9.44 /
+  p99 $30.37 / max $137.24** (**0.96 / 3.10 / 13.93 bps**), i.e. the peak is ~2× the recon reference,
+  and that excess is **genuine market volatility, not a seam artifact**: of the **122 spikes >$50** (the
+  max **$137.24 at 15:10:53Z**, ~25 min post-seam), 115 fall in the single 15:00–16:00Z hour during a
+  ~$100.8k→$96.1k slide, |Δmid| scales with 1 s price velocity (corr 0.48) with no cumulative drift
+  (hourly abs-mean decays $9.37→$0.35), and **excluding that one hour the bps>7.5 tail collapses to 2
+  events — exactly the 2025-06-01 recon-reference rate**. The elevated raw-$ count and modestly lower 2 s label agreement vs the
   reference are volatility/price-level effects (BTC ~$97–100k vs ~$67k makes a fixed $50 bucket ~1.5×
   easier to exceed), not stitch defects — independently reconfirmed by a 3-lens adversarial review of the
   artifacts. Reports (git-ignored):
