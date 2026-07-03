@@ -51,10 +51,14 @@ The tool is a **pure aggregation layer** over `assess_lake_day` outputs: it
 `full_day_reason`, `fill_segments`, `seams`, `seam_policy`, `trusted_lake_*`) and
 **never recomputes a stitch plan or reinterprets reason prose**.
 
-### Single-report mode
-For inspection, the tool may be pointed at one report with no plan manifest. In
-this mode `scope_complete` is forced `false` and `status` can never be `ready` —
-a lone report is never the full backfill scope.
+### Modes (mutually exclusive)
+- **Readiness mode** (`--plan-manifest`) — the gate. Plan-driven completeness checks
+  can reach `status="ready"`; otherwise fail-closed `status="blocking"`.
+- **Inspection mode** (`--report ...`, no plan manifest) — for eyeballing one or more
+  reports. `scope_complete` is forced `false` and `status` is always `report_only`
+  (a lone report is never the full backfill scope). It does **not** gate.
+
+`--plan-manifest` and `--report` are mutually exclusive; exactly one is required.
 
 ## 3. Output manifest schema (v1, stable)
 
@@ -104,7 +108,10 @@ byte-deterministic given an injected `generated_utc`.
     {
       "day": "2024-12-04",
       "classification": "inconclusive" | "lake_usable" | "lake_present_degraded"
-                        | "missing_needs_coinapi" | "excluded" | null,  // null = calendar-only day not in any report
+                        | "missing_needs_coinapi" | "excluded" | null,
+                        // one of the five quality-map classes for report-backed days;
+                        // null for calendar-only days (sources without "quality_map").
+                        // The classification enum check applies ONLY to report-backed days.
       "sources": ["quality_map"],        // which inputs contributed: quality_map|calendar_gap|calendar_trade|calendar_excluded
       "calendar": {                       // authoritative, from usable_calendar
         "in_lake_all_days": true,
@@ -159,25 +166,29 @@ byte-deterministic given an injected `generated_utc`.
     "trades_gb_measured": 2.6, "trades_gb_estimated": 0.0, "trades_gb_total": 2.6,
     "book_usd": 89.2, "trades_usd": 7.8, "gross_usd": 97.0,
     "credit_usd": 25.0, "net_usd": 72.0,
-    "calendar_gap_baseline_usd": 92.0,     // §8 anchor for reconciliation
-    "quality_map_addition_usd": 5.0,       // gross − calendar-gap baseline
+    "calendar_gap_baseline_usd": 92.0,     // COMPUTED from measured fill_status over calendar book+trade gap days
+    "quality_map_addition_usd": 5.0,       // gross − computed calendar-gap baseline
+    "docs_reference_usd": 92.0,            // docs §8 reference tied to the 2026-06-22 calendar snapshot (reconciliation only)
     "band": { "low_usd": 92.0, "high_usd": 97.0 }  // measured-only low vs +estimate high
   },
 
   "blockers": {                            // populated iff status=="blocking"; else all empty
     "structural": [], "missing_keys": [], "coverage_gaps": [],
     "inconsistencies": [], "unresolved_days": [], "batch_incomplete": [],
-    "trade_fill_unavailable": [], "calendar_drift": []
+    "book_fill_unavailable": [], "trade_fill_unavailable": [], "calendar_drift": []
   }
 }
 ```
 
 ## 4. Fail-closed rules
 
-**Default is fail-closed:** any condition below sets `meta.status="blocking"` and a
-**nonzero exit**. `--report-only` downgrades to exit 0 while still stamping
-`meta.status` and populating `blockers` (fail-closed is the default; report-only is
-an explicit, logged opt-in so the gate never silently fails open).
+**Default is fail-closed.** In **readiness mode**, any condition below sets
+`meta.status="blocking"` and exits **3**. `--report-only` keeps the honest `status`
+(`ready`/`blocking`) and the full `blockers`, but forces **exit 0** — an explicit,
+logged opt-in so the gate never silently fails open. **Inspection mode** (`--report`,
+no plan) always sets `status="report_only"` and exits 0; it does not gate. The
+`report_only` status value therefore denotes inspection mode; a `--report-only`
+readiness run keeps its true `blocking`/`ready` status.
 
 **Structural / input errors** → **exit 2**, `ERROR: ...` on stderr (PlanError style):
 plan manifest or any required report missing, unreadable, or not valid JSON / not a
@@ -205,8 +216,10 @@ JSON object; `meta.input_calendar` missing or unreadable.
   Implemented as "required quota/report completion fields must be present and indicate
   the batch ran", with strict missing-key handling — **not** a bare `quota.ok` check.
 - **inconsistencies** —
-  - unknown enum: `classification` ∉ the five classes, `coinapi_fill.why` ∉ the six
-    why-codes, or `fill_profile` ∉ the seven profile values;
+  - unknown enum (**report-backed days only**): `classification` ∉ the five classes,
+    `coinapi_fill.why` ∉ the six why-codes, or `fill_profile` ∉ the seven profile
+    values. A calendar-only day carries `classification=null` by construction (its
+    `sources` excludes `quality_map`) and is exempt from the classification enum check;
   - contradiction: `needs_fill==true` with `fill_profile` ∈ {`null`,`lake_only`}
     (**degraded/fill day with no fill policy**, §fix-2), or `fill_profile=="full_day_fill"`
     with `full_day_reason==null`, or a partial profile with `full_day_reason!=null`,
@@ -222,14 +235,21 @@ JSON object; `meta.input_calendar` missing or unreadable.
   `why=="no_verdict"` (unresolved `inconclusive` — no seed / rejected seed / load
   failure). Blocks **all** backfill readiness, not just its own batch.
 - **trade_fill_unavailable** — a trade-fill day (`coinbase_fill_days[d].trades==true`)
-  whose `fill_status[d].trades` is absent/not present, or `fill_status[d].error==true`,
-  or `d` ∈ `fill_days_unfillable`/`fill_days_probe_error`.
+  whose `fill_status[d].trades` is absent/not present/not `ok`, or
+  `fill_status[d].error==true`, or `d` ∈ `fill_days_unfillable`/`fill_days_probe_error`.
+- **book_fill_unavailable** — symmetric for a calendar **book-gap** day
+  (`coinbase_fill_days[d].book==true`) whose `fill_status[d].book` is absent/not
+  present/not `ok`, or `fill_status[d].error==true`, or `d` ∈
+  `fill_days_unfillable`/`fill_days_probe_error`. Calendar-derived book fills are part of
+  the complete backfill spec, and `ingest/verify_trades_and_calendar.py` records both
+  products in `fill_status`, so a book gap must be verifiably fillable too.
 
 **Ready** (`status="ready"`, `scope_complete=true`, exit 0) requires: every planned
 batch has a ran report; planned day-set == union of report days exactly (no missing,
-extra, or cross-batch duplicate); every book-gap and trade-fill day represented; no
-unresolved days; no inconsistencies; no calendar drift. A lone report (single-report
-mode) can never satisfy the plan-driven checks → never `ready`.
+extra, or cross-batch duplicate); every book-gap and trade-fill day represented **and
+verifiably fillable** (`fill_status`); no unresolved days; no inconsistencies; no
+calendar drift. A lone report (inspection mode) can never satisfy the plan-driven
+checks → never `ready`.
 
 ### Degraded vs unresolved (§fix-2)
 `lake_present_degraded` is a **normal** classification that maps to a book fill
@@ -250,18 +270,25 @@ missing report/calendar evidence.
 - Credit **$25** (flat-files pool) subtracted once from the book+trades gross.
 - Tiered discount ($1→$0.10/GB above 512 GB, §2.2) **unconfirmed** → flat $1/GB.
 - `cost_summary` keeps **measured vs estimated** GB/$ explicit and emits a low/high
-  band; the §8 calendar-gap baseline is carried for reconciliation. Spend Management
-  should be sized to the **high** band.
+  band. The **calendar-gap baseline is COMPUTED** from measured `fill_status` over the
+  calendar book+trade gap days, so it tracks the actual input calendar (which may be
+  regenerated with a different `anchor_end`). The docs §8 **$92** figure is carried
+  separately as `docs_reference_usd` — a reconciliation reference tied to the
+  2026-06-22 snapshot, **not** a hard-coded baseline. Spend Management should be sized
+  to the **high** band.
 
 ## 6. CLI
 
 ```
 scripts/review_coinbase_backfill_manifest.py
-  --plan-manifest PATH        # batch-plan manifest.json (authoritative batch registry)
-  [--report REPORT ...]       # single-report / ad-hoc mode (no plan; never 'ready')
-  --usable-calendar PATH      # default: plan.meta.input_calendar
+
+  # exactly one mode (mutually exclusive, one required):
+  --plan-manifest PATH        # READINESS mode: authoritative batch registry; can reach status=ready
+  --report REPORT ...         # INSPECTION mode: one or more reports, no plan; status is always report_only
+
+  --usable-calendar PATH      # default: plan.meta.input_calendar (required in readiness mode)
   --out PATH                  # default data/reports/backfill/coinbase_backfill_manifest.json
-  --report-only               # downgrade blocking to exit 0 (still stamps status/blockers)
+  --report-only               # readiness mode: downgrade a blocking verdict to exit 0 (keeps honest status + blockers)
   --generated-utc ISO         # injectable for deterministic tests
 ```
 
