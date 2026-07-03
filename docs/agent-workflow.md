@@ -12,7 +12,7 @@ This repo is set up for multiple local Claude Code workers and Codex PR review.
 
 ## Branches
 
-- Worker branches: `ai/claude/<issue-or-topic>`
+- Worker branches: Conventional Branch purpose-prefixed names, e.g. `feat/<topic>`, `fix/<topic>`, `chore/<topic>`; do not use agent/vendor prefixes such as `ai/` or `claude/`.
 - Integration branches: `integration/<date-or-topic>`
 - Base branch: `master`
 
@@ -41,15 +41,15 @@ review`.
 1. Create a worktree.
 
    ```bash
-   scripts/new_claude_worktree.sh <topic>
-   cd ../jepa-agent-worktrees/<topic>
+   scripts/new_claude_worktree.sh feat/<topic>
+   cd ../jepa-agent-worktrees/feat-<topic>
    claude
    ```
 
 2. Give Claude a task brief.
 
    ```text
-   You are working on branch ai/claude/<topic>.
+   You are working on branch feat/<topic>.
    Read CLAUDE.md and AGENTS.md first.
    Keep the change scoped to <task>.
    Run relevant checks.
@@ -81,7 +81,7 @@ review`.
 2. Create a disposable integration worktree.
 
    ```bash
-   scripts/new_integration_branch.sh <date-topic> ai/claude/one ai/claude/two
+   scripts/new_integration_branch.sh <date-topic> feat/one feat/two
    cd ../jepa-integration-worktrees/<date-topic>
    claude
    ```

@@ -355,7 +355,7 @@ Use a dedicated branch/worktree:
 cd /home/aaron/jepa-btc-forecasting
 git checkout master
 git pull --ff-only origin master
-scripts/new_claude_worktree.sh native-recon-engine
+scripts/new_claude_worktree.sh feat/native-recon-engine
 ```
 
 Prompt Claude to implement only this plan's scoped native replay engine. If the branch gets too large, split after Task 3: first PR for native conformance, second PR for script integration and benchmark/live docs.

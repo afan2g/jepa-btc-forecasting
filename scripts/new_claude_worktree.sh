@@ -3,11 +3,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/new_claude_worktree.sh <topic-slug> [base-branch]
+Usage: scripts/new_claude_worktree.sh <type>/<description> [base-branch]
 
 Creates a Claude worker branch and git worktree:
-  branch: ai/claude/<topic-slug>
-  path:   ../jepa-agent-worktrees/<topic-slug>
+  branch: <type>/<description>
+  path:   ../jepa-agent-worktrees/<type>-<description>
+
+Branch names follow Conventional Branch purpose prefixes only:
+  feat/, feature/, fix/, bugfix/, hotfix/, release/, chore/
 
 Environment:
   AGENT_WORKTREE_DIR  Override parent directory for worker worktrees.
@@ -19,18 +22,26 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -lt 1 ]]; then
   exit 0
 fi
 
-topic="$1"
+branch="$1"
 base="${2:-master}"
 
-if [[ ! "$topic" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  echo "topic-slug must contain only letters, numbers, dot, underscore, or hyphen" >&2
+if [[ ! "$branch" =~ ^(feat|feature|fix|bugfix|hotfix|release|chore)/[a-z0-9][a-z0-9.-]*[a-z0-9]$ && ! "$branch" =~ ^(feat|feature|fix|bugfix|hotfix|release|chore)/[a-z0-9]$ ]]; then
+  echo "branch must follow Conventional Branch purpose form: <type>/<description>" >&2
+  echo "allowed types: feat, feature, fix, bugfix, hotfix, release, chore" >&2
+  echo "description: lowercase letters, numbers, hyphens, and dots only" >&2
+  exit 2
+fi
+
+desc="${branch#*/}"
+if [[ "$desc" == *"--"* || "$desc" == *".."* || "$desc" == *".-"* || "$desc" == *"-."* \
+      || "$desc" == .* || "$desc" == *. || "$desc" == -* || "$desc" == *- ]]; then
+  echo "branch description must not contain consecutive separators or leading/trailing separators" >&2
   exit 2
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
 parent="${AGENT_WORKTREE_DIR:-$(dirname "$repo_root")/jepa-agent-worktrees}"
-branch="ai/claude/$topic"
-path="$parent/$topic"
+path="$parent/${branch//\//-}"
 
 if [[ -e "$path" ]]; then
   echo "worktree path already exists: $path" >&2

@@ -545,7 +545,7 @@ Dedicated branch/worktree from latest `origin/master`:
 ```bash
 cd /home/aaron/jepa-btc-forecasting
 git checkout master && git pull --ff-only origin master
-scripts/new_claude_worktree.sh binance-downloader
+scripts/new_claude_worktree.sh feat/binance-downloader
 ```
 
 Implement task-by-task. If the branch grows large, split after Task 5: PR-1 = downloader (Tasks 1–6), PR-2 = recon runner + tick scales (Task 7). Do **not** run the historical archive pull or unlock any backfill gate in the implementation PR.

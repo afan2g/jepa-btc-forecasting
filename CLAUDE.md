@@ -6,7 +6,7 @@ worker and integration-agent sessions.
 ## Claude Worker Agents
 
 - Work in one git worktree and one branch only.
-- Branch naming: `ai/claude/<issue-or-short-topic>`.
+- Branch naming: Conventional Branch purpose prefixes only, e.g. `feat/<issue-or-short-topic>`, `fix/<issue-or-short-topic>`, or `chore/<issue-or-short-topic>`. Do not use `ai/`, `claude/`, or other agent/vendor prefixes.
 - Start from latest `origin/master` unless the user names another base.
 - Keep the diff scoped to the assigned task.
 - Do not edit unrelated files, rewrite another worker's branch, or merge to
@@ -41,15 +41,15 @@ worker and integration-agent sessions.
 Create a worker worktree:
 
 ```bash
-scripts/new_claude_worktree.sh data-calendar
-cd ../jepa-agent-worktrees/data-calendar
+scripts/new_claude_worktree.sh feat/data-calendar
+cd ../jepa-agent-worktrees/feat-data-calendar
 claude
 ```
 
 Create a disposable integration branch/worktree from selected branches:
 
 ```bash
-scripts/new_integration_branch.sh 2026-06-23-data ai/claude/data-calendar ai/claude/baseline
+scripts/new_integration_branch.sh 2026-06-23-data feat/data-calendar feat/baseline
 cd ../jepa-integration-worktrees/2026-06-23-data
 claude
 ```

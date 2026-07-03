@@ -69,7 +69,7 @@ file as the durable reviewer and repository-contract guidance.
 ## Builder Rules
 
 - One agent, one task, one branch.
-- Use branch names like `ai/claude/<issue-or-topic>`.
+- Use Conventional Branch purpose-prefixed names like `feat/<topic>`, `fix/<topic>`, or `chore/<topic>`; do not use agent/vendor prefixes such as `ai/`, `claude/`, or `codex/` for worker branches.
 - Keep work in the branch's own worktree. Do not edit another agent's worktree.
 - Do not merge your own PR.
 - Do not force-push a branch after review unless the PR explicitly says why.
