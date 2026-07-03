@@ -62,8 +62,20 @@ DEFAULT_BACKOFF_CAP_S = 60.0
 
 
 # ----------------------------------------------------------------------------- error taxonomy
-class QuotaError(RuntimeError):
+class HardStop(RuntimeError):
+    """A RUN-fatal condition that aborts the whole pull immediately with setup exit 2 — never
+    retried, never recorded as a per-unit failure. Subclassed by QuotaError and AuthError so one
+    `except HardStop` in main() covers both."""
+
+
+class QuotaError(HardStop):
     """Vendor quota/credit exhaustion — a HARD stop (never retried); the run exits 2 (fail-safe)."""
+
+
+class AuthError(HardStop):
+    """Vendor auth/permission failure (AccessDenied, InvalidAccessKeyId — wrong subscriber keys or
+    the wrong AWS account, docs §2.1). A HARD stop: every pending unit would fail identically, so
+    abort with setup exit 2 rather than retrying / recording each partition as an error (exit 3)."""
 
 
 class TransientError(RuntimeError):
@@ -71,14 +83,18 @@ class TransientError(RuntimeError):
 
 
 # String markers so we never need to import botocore to classify a real ClientError (mirrors the
-# stringly-typed ingest/_common.is_quota_error). Explicit QuotaError/TransientError bypass these.
-# Markers are context-specific on purpose: BARE HTTP codes ("500"/"503") are deliberately excluded —
-# they match unrelated text ("row 5000", "expected 500 columns") and would silently retry a fatal
-# error; the named 5xx conditions (internalerror/serviceunavailable/bad gateway/gateway timeout)
-# already cover them. Quota markers avoid the bare "you have exceeded" (matches rate-limit throttles).
+# stringly-typed ingest/_common.is_quota_error). Explicit Quota/Auth/TransientError bypass these.
+# Markers are context-specific on purpose: BARE HTTP codes ("500"/"503"/"403") are deliberately
+# excluded — they match unrelated text ("row 5000", "expected 500 columns") and would misclassify a
+# fatal error; the named conditions already cover them. Quota markers avoid the bare "you have
+# exceeded" (matches rate-limit throttles).
 _QUOTA_MARKERS = ("quotaexceeded", "quota exceeded", "insufficient usage credits",
                   "download quota", "no usable credit", "exceeded your quota",
                   "exceeded your download")
+_AUTH_MARKERS = ("accessdenied", "access denied", "invalidaccesskeyid", "invalid access key",
+                 "signaturedoesnotmatch", "unrecognizedclient", "authfailure", "auth failure",
+                 "not authorized", "unauthorized", "expiredtoken", "token has expired",
+                 "invalidclienttokenid", "invalidtoken", "permission denied", "forbidden")
 _TRANSIENT_MARKERS = ("slowdown", "slow down", "throttl", "reduce your request rate",
                       "requesttimeout", "request timeout", "timed out", "timeout",
                       "connection reset", "connectionreset", "connection aborted",
@@ -87,14 +103,19 @@ _TRANSIENT_MARKERS = ("slowdown", "slow down", "throttl", "reduce your request r
 
 
 def classify_error(exc: BaseException) -> str:
-    """Map an exception to 'quota' (hard stop) | 'transient' (retry) | 'fatal' (record + continue)."""
+    """Map an exception to 'quota' | 'auth' (both HARD stops → exit 2) | 'transient' (retry) |
+    'fatal' (record + continue → exit 3)."""
     if isinstance(exc, QuotaError):
         return "quota"
+    if isinstance(exc, AuthError):
+        return "auth"
     if isinstance(exc, TransientError):
         return "transient"
     msg = str(exc).lower()
     if any(m in msg for m in _QUOTA_MARKERS):
         return "quota"
+    if any(m in msg for m in _AUTH_MARKERS):
+        return "auth"
     if any(m in msg for m in _TRANSIENT_MARKERS):
         return "transient"
     return "fatal"
@@ -282,6 +303,8 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
             kind = classify_error(exc)
             if kind == "quota":
                 raise QuotaError(str(exc)) from exc
+            if kind == "auth":                       # wrong keys/account → every unit fails the same
+                raise AuthError(str(exc)) from exc
             if kind == "transient" and attempt < retries:
                 sleep(_backoff_seconds(attempt, backoff_base, backoff_cap, rng))
                 continue
@@ -664,7 +687,7 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
     counts = {"ok": 0, "skip": 0, "missing": 0, "error": 0, "missing_required": 0}
     total_rows = 0
     per_unit = []
-    quota_hit = False
+    hard_stop = False
     lock = Lock()
 
     def _do(u: Unit) -> UnitResult:
@@ -691,19 +714,20 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
                 futures = {ex.submit(_do, u): u for u in pending}
                 try:
                     for fut in as_completed(futures):
-                        _record(futures[fut], fut.result())   # QuotaError re-raised here
-                except QuotaError:
-                    # HARD STOP: cancel every not-yet-started unit so a quota/credit wall cannot keep
-                    # draining the 300 GB/month budget — only the ≤jobs already-in-flight units finish
-                    # (fail-safe, do not proceed). cancel_futures needs Py3.9+.
+                        _record(futures[fut], fut.result())   # HardStop (quota/auth) re-raised here
+                except HardStop:
+                    # HARD STOP (quota/auth): cancel every not-yet-started unit so a quota wall or a
+                    # wrong-keys AccessDenied cannot keep hammering Lake for the remaining budget —
+                    # only the ≤jobs already-in-flight units finish. cancel_futures needs Py3.9+.
                     ex.shutdown(wait=False, cancel_futures=True)
                     raise
         else:
             for u in pending:
                 _record(u, _do(u))
-    except QuotaError as e:
-        print(f"*** Lake quota/credit hard stop: {e} — exiting 2 (fail-safe). ***", file=sys.stderr)
-        quota_hit = True
+    except HardStop as e:
+        print(f"*** Lake hard stop ({type(e).__name__}): {e} — exiting 2 (fail-safe). ***",
+              file=sys.stderr)
+        hard_stop = True
 
     try:
         used_after = float(used_data_fn())
@@ -718,7 +742,7 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
           f"(required-missing={counts['missing_required']}) error={counts['error']} "
           f"| rows={total_rows:,} | report: {path}")
 
-    if quota_hit:
+    if hard_stop:                                      # quota/credit exhaustion OR auth/permission
         return SETUP_ERROR_EXIT
     if counts["error"] or counts["missing_required"]:  # a transfer error OR a required-feed hole
         return PARTIAL_EXIT

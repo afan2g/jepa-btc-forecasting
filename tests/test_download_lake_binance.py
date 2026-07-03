@@ -298,6 +298,28 @@ def test_process_unit_quota_error_is_hard_stop(tmp_path):
     assert _count_calls(reader, "book_delta_v2") == 1      # quota is never retried
 
 
+def test_process_unit_auth_error_is_hard_stop(tmp_path):
+    root = str(tmp_path)
+    reader = FakeReader({"book_delta_v2": dl.AuthError("InvalidAccessKeyId")})
+    with pytest.raises(dl.AuthError):
+        dl.process_unit(reader, root, "book_delta_v2", *PERP, "2026-04-01",
+                        retries=5, sleep=lambda *_: None)
+    assert _count_calls(reader, "book_delta_v2") == 1      # auth is never retried
+
+
+def test_run_auth_error_exits_2_and_stops(tmp_path):
+    # a wrong-keys/wrong-account AccessDenied must abort with setup exit 2, NOT record each partition
+    # as an error (exit 3) and NOT keep re-issuing the same unauthorized request per unit.
+    reader = _perp_reader()
+    reader.plan["book_delta_v2"] = RuntimeError("AccessDenied: not authorized for this bucket")
+    code = dl.main(["--instrument", "binance-perp", "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 2
+    assert _count_calls(reader, "book_delta_v2") == 1      # not retried
+    assert "funding" not in {c[0] for c in reader.calls}   # hard stop — later units not attempted
+
+
 def test_process_unit_no_partial_parquet_on_midstream_failure(tmp_path):
     # a failure AFTER the first batch is written to .tmp must leave NO final parquet and NO temp.
     root = str(tmp_path)
@@ -319,12 +341,23 @@ def test_process_unit_no_partial_parquet_on_midstream_failure(tmp_path):
 # --------------------------------------------------------------------------- error classification
 def test_classify_error():
     assert dl.classify_error(dl.QuotaError("x")) == "quota"
+    assert dl.classify_error(dl.AuthError("x")) == "auth"
     assert dl.classify_error(dl.TransientError("x")) == "transient"
     assert dl.classify_error(RuntimeError("QuotaExceeded: over cap")) == "quota"
     assert dl.classify_error(RuntimeError("SlowDown, please retry")) == "transient"
     assert dl.classify_error(RuntimeError("RequestTimeout")) == "transient"
     assert dl.classify_error(RuntimeError("503 Service Unavailable")) == "transient"
     assert dl.classify_error(ValueError("schema drift: unknown column")) == "fatal"
+
+
+def test_classify_error_auth_failures_are_hard_stops():
+    # wrong subscriber keys / wrong AWS account → a run-fatal setup error, not a per-unit fatal.
+    assert dl.classify_error(RuntimeError("AccessDenied: not authorized")) == "auth"
+    assert dl.classify_error(RuntimeError("InvalidAccessKeyId")) == "auth"
+    assert dl.classify_error(RuntimeError("SignatureDoesNotMatch")) == "auth"
+    assert dl.classify_error(RuntimeError("The security token has expired")) == "auth"
+    assert dl.classify_error(RuntimeError("403 malformed row 4037")) == "fatal"   # bare 403 not auth
+    assert issubclass(dl.AuthError, dl.HardStop) and issubclass(dl.QuotaError, dl.HardStop)
 
 
 def test_classify_error_markers_are_not_over_broad():
