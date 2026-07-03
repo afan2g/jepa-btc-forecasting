@@ -105,14 +105,16 @@ consumer share one contract definition.
 a **streaming, day-partitioned k-way merge** of Binance+Coinbase deltas+trades on the
 engine-time axis (§C.1; `recon.merge_sorted` is the bounded-fixture oracle **only**, never
 the full-day path) → `bars.clock` (trailing-threshold schedule) emits bar boundaries →
-`bars.align` sets the received-time **decision `t_event`** and per-venue reads (§C.2) →
-`bars.snapshot` snapshots **both** books via `recon.reconstruct.sample_topk_as_of`
-(apply-before-read, strict `<`; every event gated by its own **`received_time ≤ t_event`** —
-ordered by `origin_time`; the Coinbase target book resolves to `coinbase_read_ts`, the last
-observed book origin, §C.2) → `bars.features` builds the per-bar stationarized
-vector → `data.labels` + `data.uniqueness` attach `y_fwd_bps`/`label`/`t_barrier`/
-`uniqueness` (**per horizon**, off Coinbase mid) → `bars.cost` attaches `cost_bps`/
-`half_spread_bps` → **guard-aware `stitch_policy` masks + `window_vendor_sources` drop
+`bars.align` sets the received-time **decision `t_event`** (§C.2) →
+`bars.snapshot` reconstructs **two Coinbase reads** (§C.2): the **observable book** at
+`coinbase_read_ts` (last origin among events with `received_time ≤ t_event` — features +
+`half_spread_bps`) and the **true label book** at `t_event` (plain origin cut, offline ground
+truth — `P0`); feature reads pre-filter `received_time ≤ t_event` then fold in origin order →
+`bars.features` builds the per-bar stationarized vector (trade-flow features over the bar's
+**origin-order members**, §C.2) → `data.labels` + `data.uniqueness` attach
+`y_fwd_bps`/`label`/`t_barrier`/`uniqueness` (**per horizon**, **`P0` = true Coinbase mid at
+`t_event`**) → `bars.cost` attaches `cost_bps` (incl. `coinbase_read_ts→t_event` latency
+slippage)/`half_spread_bps` → **guard-aware `stitch_policy` masks + `window_vendor_sources` drop
 cross-seam/guard/uncovered rows** (§C.3) → per-day parquet → consolidate the labeled window
 → **`validate_frame` + `validate_matrix`** (fail closed — the NaN/inf/finite screens live in
 `validate_matrix`, §H/T8) → write `model_matrix.parquet` + `feature_manifest.json`.
@@ -147,7 +149,13 @@ BTC ranges 2×+; dollar bars are homoscedastic).
   window) use a fixed seed threshold and are flagged/excluded from the labeled matrix.
   The build records the **full per-day threshold schedule + its content hash** in the
   manifest (`bar_clock.threshold_schedule_hash`), not a single scalar — so the sampling is
-  reproducible and auditably causal.
+  reproducible and auditably causal. **Coverage normalization (Codex #12):** the trailing
+  average sums each prior day's **raw** completed notional, so a low-coverage (~93%/gappy) or
+  CoinAPI-filled day skews `threshold_d` for every later day whose 7–30 d window includes it
+  (the day's *trades* feed the aggregate at clock-construction time even if that day's *rows*
+  are later seam-masked). Normalize each day's volume by its **covered fraction** (or exclude
+  sub-coverage days from the trailing average) — distinct from the future-volume look-ahead
+  already handled above.
 - **Time cap** `T` (≈2–5 s): bounds worst-case heteroscedasticity (§5.2 — a dead Sunday
   must not become one 45-min bar). Emit a **`emitted_by_time_cap`** boolean per bar
   (diagnostic `extra_cols`, opted-in via the manifest — never a feature).
@@ -194,12 +202,31 @@ anchor's price path and the v1 runner consumes exactly one target pair, so a per
 the microprice path (or emit a separate precomputed microprice target set). Emitting both mid and
 microprice *base-price series* per bar is cheap; the *labels* are not free to re-anchor.
 
-The producer snapshots the Coinbase target book at **`coinbase_read_ts`** — the last Coinbase
-book state with `received_time ≤ t_event` (§C.2), **never at `t_event`** — the target mid, microprice, **and**
-`half_spread_bps` (§G) all read at the lagged timestamp so labels and cost never use future
-Coinbase book state (Codex P1). It records both mid and microprice as the label anchor
-series; the forward label (§D) uses this lagged mid/microprice as the base price `P0`, with
-the triple barrier and the emitted span running over `[t_event, t_barrier]` (§C.2).
+**Three reads, three timestamps (§C.2, Codex #1).** The producer reconstructs the Coinbase
+book with two cutoffs per bar and keeps the reads apart:
+
+- **Label base price `P0`** = the **true reconstructed mid** (or microprice) at **`t_event`** —
+  a plain **origin-time** cut (`sample_topk_as_of` at the `t_event` origin cutoff). The label is
+  offline **ground truth**, *not* observability-gated: reading the realized book at the decision
+  time is correct, and the barrier path already runs forward over `[t_event, t_barrier]`. **`P0`
+  is never read at `coinbase_read_ts`** — that would fold the already-realized, *past-and-feature-
+  observable* `[coinbase_read_ts, t_event]` drift into `y_fwd_bps` (a common-mode target leak;
+  see Changelog / #1).
+- **Feature / cost book** = the **observable** book at **`coinbase_read_ts`** (last origin among
+  events with `received_time ≤ t_event`) — feeds book-shape features and `half_spread_bps` (§G).
+  The entry-latency drift `coinbase_read_ts → t_event` is charged **forward as `cost_bps`
+  slippage** (§G), not backward into the label.
+- **Staleness cap (Codex #8):** because the clock triggers on **trades** while the book is a
+  separate channel, bars keep closing through a Coinbase **book-feed dropout** (the ~93%/gappy
+  regime, data.md §5b — an *intra-vendor* gap, **not** a stitch seam, so the §C.3 seam masks do
+  not catch it; "origin_time 100% populated" is timestamp presence, not gap absence). Drop any
+  row whose observable book is older than a pinned cap (`t_event − coinbase_read_ts >
+  staleness_cap_ns`) — else features/`half_spread_bps` are stale (`P0` is fine under the spine,
+  but the feature/cost read still is not).
+
+Both mid and microprice are emitted as base-price series; the forward label (§D) uses the
+`t_event` **mid** as `P0` (microprice arm gated on parity), with the triple barrier and emitted
+span over `[t_event, t_barrier]`.
 
 ---
 
@@ -220,6 +247,13 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    k-way merge (spec §3). Snapshot = book inclusive of all events with `ts_engine ≤` the read
    time, **strict `<` apply-before-read at the trade boundary**
    (`recon/reconstruct.py:sample_topk_as_of`, `order_key` deltas-before-trades).
+   **`sample_topk_as_of` cuts on the ORIGIN axis (Codex #2)** (`time_of = ts_engine`,
+   `recon/reconstruct.py:67,138`) — it folds every event with `origin ≤ cutoff`, which is **not**
+   the received-gated set when origin ≠ received order. So **feature/cost** reconstruction must
+   **pre-filter events to `received_time ≤ t_event`, then fold in origin order** (a delayed
+   `origin ≤ coinbase_read_ts` but `received > t_event` straggler must be excluded); the **label**
+   read uses the plain origin cut at `t_event` (offline ground truth — §C.2/§B). Both then reuse
+   the same top-K folding.
    **CoinAPI fill segments are the exception (Codex P2), for *both* book and trades:**
    - **Book:** Coinbase gap days filled from CoinAPI `limitbook_full` must replay in strict
      **`seq` (file) order via `recon.coinapi`**, *not* a `ts_engine` merge — the opening
@@ -265,17 +299,28 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
      max(received_time) over the bar's events)`; `t_event` is **never earlier than the cap fire
      time**, or `t_available`/labels would start before the bar was decidable. Live: a bounded
      watermark waits for stragglers up to `t_cap`; offline this is exact.
-   - **Book snapshots** (both venues — incl. the Coinbase target mid/microprice **and**
-     `half_spread_bps`): include book events with `received_time ≤ t_event`; the Coinbase
-     target **`coinbase_read_ts`** is the **origin time of the last such book event**
-     (`≤ t_event`), so labels and cost never use unobserved future book state (§B).
-   - **Trade-flow features** (CVD, aggressor imbalance, largest print): include trades with
-     `received_time ≤ t_event`.
-   - **Label anchor (Codex P2):** base price `P0` = the last-observable Coinbase mid/microprice
-     at `coinbase_read_ts`, but the **triple barrier + emitted span run over `[t_event, t_barrier]`**
-     (`t0 = t_event`, `t_barrier ≥ t_event`) — aligned with the CPCV purge/embargo (§F) and seam
-     masks (§C.3); the lagged read supplies only `P0` (charging realistic latency drift into
-     `y_fwd_bps`) and leaves **no** barrier hit in the `[coinbase_read_ts, t_event]` gap unpurged.
+   - **Feature/cost book snapshot (observable):** include book events with `received_time ≤
+     t_event` (pre-filter, then fold in origin order — §C.1/#2); the **observable** Coinbase read
+     **`coinbase_read_ts`** is the origin time of the last such book event (`≤ t_event`), feeding
+     book-shape **features** and `half_spread_bps` (§G). A staleness cap drops rows whose
+     observable book is too old (§B/#8).
+   - **Trade-flow features over the bar's origin-order MEMBERS (Codex #3):** `cvd`,
+     `aggressor_imb`, `largest_print`, `signed_vol`, `vwap_minus_mid`, `ofi_integrated` are
+     computed over exactly the trades that constitute the bar (accumulated in **origin order up to
+     the crossing trade**), **not** the received-gated superset `{received ≤ t_event}`. The
+     superset also contains early-arriving **next-bar** trades (origin after the crossing trade);
+     folding them here would make `cvd` non-additive across bars and double-count prints, with the
+     value depending on receive-time jitter. Members are automatically observable
+     (`t_event = max(received_time)` over members), so no separate gate is needed on them — only
+     the point-in-time **book snapshot** uses the received-gate.
+   - **Label base price `P0` — the TRUE book at `t_event` (Codex #1):** `P0` = mid (or
+     microprice) of the **true reconstructed Coinbase book at `t_event`** — a plain **origin** cut,
+     the offline **ground truth**, *not* observability-gated. The triple barrier + emitted span run
+     over `[t_event, t_barrier]` (`t0 = t_event`), aligned with the CPCV purge/embargo (§F) and
+     seam masks (§C.3). `P0` is **never** read at `coinbase_read_ts`: doing so folds the
+     already-realized, past-and-feature-observable `[coinbase_read_ts, t_event]` drift into
+     `y_fwd_bps` — a common-mode target leak the E0.4 control cannot catch (Changelog). Entry
+     latency is charged **forward** as `cost_bps` slippage (§G).
    - `t_available == t_event` is **correct by construction** — every input has
      `received_time ≤ t_event`; `availability_lag_ns` stays 0 (§E).
    - **Lag constants are TAIL bounds, never medians (Codex P1):** where a scalar is unavoidable —
@@ -301,18 +346,30 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    60 s guard band survive (Codex P2). For the **vendor-coverage** test use
    **`window_vendor_sources(start, end, segments)` (`recon/stitch_policy.py:430`)** — the row
    is kept only when *both* its feature window
-   `[t_feature_start, t_event]` and label window **`[coinbase_read_ts, t_barrier]`** (extended
-   back to the base-price read `coinbase_read_ts ≤ t_event`, Codex P2 — else `y_fwd_bps` could
-   measure one vendor's `P0` to another vendor's future book across a seam; the CPCV *span* stays
-   `[t_event, t_barrier]`) return a singleton
-   `{lake}` or `{coinapi}`; any mixed-vendor, `excluded`, or `UNCOVERED` (day-edge overhang)
+   `[t_feature_start, t_event]` and label window **`[t_event, t_barrier]`** return a singleton
+   `{lake}` or `{coinapi}` (with `P0` at `t_event` under the spine, the label window needs **no**
+   back-extension — the observable feature/cost read at `coinbase_read_ts` already sits inside the
+   feature window, so `feature_valid_mask` covers it; Changelog / #6, #11); any mixed-vendor,
+   `excluded`, or `UNCOVERED` (day-edge overhang)
    window is masked. **Do not use `vendor_source_at(...)` for this** — it is per-*sample*
    and only sees the endpoint, so it would miss an excluded/uncovered span *inside* the
    window (`label_valid_mask`/`feature_valid_mask` cover the seam/guard geometry on a
    regular grid but, per their own docstrings, must be intersected with the whole-window
    vendor set). Never train across a seam
-   (`SeamPolicy.exclude_labels_crossing_seam`/`exclude_features_crossing_seam`). The
-   consumed stitch-plan id + `SeamPolicy.as_dict()` are recorded in the manifest `sources`
+   (`SeamPolicy.exclude_labels_crossing_seam`/`exclude_features_crossing_seam`).
+
+   **Day-edge `UNCOVERED` overhang is a PARTITION ARTIFACT, not a real seam exclusion (Codex #9).**
+   `window_vendor_sources` tags any window overhanging the per-day segment partition as
+   `UNCOVERED` (`recon/stitch_policy.py:443-444`; its docstring flags cross-midnight as an
+   unhandled bar-builder follow-up). With day-partitioned builds (§I), **every** bar within
+   `max_lookback_ns` of day-start or within the horizon of day-end overhangs the partition and is
+   masked — **even when the adjacent day is the same vendor with continuous coverage and no seam**
+   — systematically deleting ~the last 60 s + first `max_lookback` of all 704 days
+   (disproportionately the 60 s rung). Do **not** count this under the "correct" exclusions above:
+   either **stitch adjacent-day segments for edge windows** (T9 loads the neighbor day's plan) or,
+   if deferred, **quantify and explicitly accept** the row loss in the manifest.
+
+   The consumed stitch-plan id + `SeamPolicy.as_dict()` are recorded in the manifest `sources`
    / `bar_clock` for reproducibility. This is a **T9 assembly step and a T9/T10 acceptance
    criterion** (§Task breakdown). The masking *code* is testable now on synthetic seams;
    the *final* seam list is a product of the backfill/parity gate (§before/after split).
@@ -337,10 +394,18 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
   *target* is fixed physical time). One matrix row per (bar, horizon) tag; the built
   runner groups by `horizon` and gates each rung independently
   (`eval/runner.py`, `eval/study.py`).
+- **Every declared horizon must survive masking (Codex #5 — HIGH).** The 60 s rung's label
+  window is 30× the 2 s rung's and the guard band (`seam_guard_s = 60 s`, §C.3) is sized to it,
+  so 60 s rows are seam/guard-masked far more heavily. If a (sub-)window masks **all** rows of a
+  declared horizon, `run_from_manifest` **rejects the whole matrix** (`eval/runner.py:47-50`); if
+  it leaves fewer than `n_groups`, `cpcv_splits` raises `n_groups > n_samples`
+  (`data/cv.py:47-50`). The producer must guarantee **≥ `n_groups` surviving rows per declared
+  horizon** (or emit only horizons that survive), and the §J fixtures must be sized so masking
+  cannot zero a horizon.
 - **`y_fwd_bps`** = normalized forward return (bps) over the span **`[t_event, t_barrier]`**
-  (decision time, §C — *not* the bar close), base price `P0` = the last-observable Coinbase
-  target **mid** (§B default; microprice arm gated on parity) at `coinbase_read_ts` (§C.2);
-  **never raw price** (§8).
+  (decision time, §C — *not* the bar close), base price `P0` = the **true reconstructed Coinbase
+  target mid at `t_event`** (§B default; microprice arm gated on parity), **never** the lagged
+  `coinbase_read_ts` read (Changelog / #1); **never raw price** (§8).
 
 ---
 
@@ -359,11 +424,28 @@ contract, restated as production rules:
 | `t_barrier` | first-barrier-hit time (TP/SL/time), forward from `t_event` | `t_event ≤ t_barrier ≤ t_event + horizons[tag]` |
 
 **Seam integrity (§C.3):** additionally, every emitted row's `[t_feature_start, t_event]`
-feature window and **`[coinbase_read_ts, t_barrier]`** label window (extended back to the
-base-price read) must be seam-/guard-clean and single-vendor-backed (`recon/stitch_policy.py`); rows failing the masks are dropped, never NaN-carried into the
-matrix (**`validate_matrix` rejects NaN/inf features** — §H; `validate_frame` covers only
-columns/timing/dtypes, Codex P2). This is the value-level complement to the timing invariants
+feature window and **`[t_event, t_barrier]`** label window must be seam-/guard-clean and
+single-vendor-backed (`recon/stitch_policy.py`). The observable feature/cost book read at
+`coinbase_read_ts ≤ t_event` sits **inside** the feature window, so `feature_valid_mask` already
+covers it — no back-extension (Changelog / #6, #11). Rows failing the masks are dropped, never
+NaN-carried into the matrix (**`validate_matrix` rejects NaN/inf features** — §H; `validate_frame`
+covers only columns/timing/dtypes). This is the value-level complement to the timing invariants
 below.
+
+**Well-defined values for legit edge emissions (Codex #4 — HIGH).** `validate_matrix` raises on
+the **first** NaN feature (`eval/matrix.py:53-57`) and aborts the whole day/window build, so every
+*legitimately emitted* row must be finite — the "drop mask-failing rows" policy above never fires
+for these:
+- **Zero-/one-trade bars** (cap-closed quiet intervals, §C.2): define trade-flow features on an
+  empty trade set explicitly — `cvd`/`aggressor_imb`/`vwap_minus_mid`/`largest_print`/`rv_intrabar`/
+  `mae_intrabar`/`signed_vol`/`trade_count` = **0** (book-shape features still come from the
+  observable book snapshot). *Or* drop the row — but then `emitted_by_time_cap` quiet bars never
+  reach the matrix; pin one policy.
+- **Unresolved barrier:** `y_fwd_bps` when no TP/SL fires before the vertical barrier = the realized
+  return to `t_barrier = t_event + horizon` (never NaN); `label` = 0 (time-barrier).
+- **One-sided book:** `half_spread_bps` when the observable book at `coinbase_read_ts` has an empty
+  side — **drop the row** (no valid spread) rather than emit NaN.
+These are producer obligations, tested in §J.
 
 **Value-level no-lookahead is the producer's own gate.** The manifest validates
 *declared* timing and screens *names*; it does **not** prove feature *values* were
@@ -398,14 +480,22 @@ the columns CPCV consumes and to pin `embargo_ns` correctly:
   is **not** the raw feature-window length. Undersizing it would let a post-test train row's
   feature window reach into the test label span. The consumer cross-checks exactly this
   quantity (`eval/study.py:28` uses `(t_event − t_feature_start).max()`) and fails closed,
-  but the producer must size it right at build time.
-- **Embargo (E0.4): `embargo_ns ≥ max(label horizon, longest feature look-back)`.** The
-  span-overlap purge already covers the label-horizon side; `embargo_ns` guards the
-  **feature look-back** side after a test block. The producer sets
-  `embargo_ns = max(max_lookback_ns, max horizon_ns)` and the schema enforces
-  `embargo_ns ≥ max_lookback_ns` (`eval/manifest.py`), re-checked at runtime against the
-  observed per-row look-back (`eval/study.py:28-32`). This makes the analysis in the
-  LightGBM-integration plan's "Embargo vs label horizon" note hold by construction.
+  but the producer must size it right at build time. **Outlier-robust look-back (Codex #13):** a
+  raw `.max()` lets a single late-received **old-origin straggler** (admitted by the
+  `received_time ≤ t_event` gate) inflate `max_lookback_ns → embargo_ns →` CPCV purging across all
+  704 days — and the §E `t_feature_start` invariant is *circular* (the outlier both sets and
+  satisfies the bound). Size the look-back with a **robust/capped** estimator (high percentile +
+  **clip/flag** beyond-tail stragglers), not a raw max, and drop/flag rows whose look-back exceeds
+  the cap. (Pairs with #7 — both reduce embargo bloat.)
+- **Embargo (E0.4): `embargo_ns = max_lookback_ns` (Codex #7).** `_cpcv_iter` applies the embargo
+  from `hi` = the merged test interval's **upper** bound = max `t_barrier` over test rows
+  (`data/cv.py:61-63`), which **already includes the label horizon**. So — exactly as the
+  span-overlap purge above states — the only clearance the embargo must *add* is the **feature
+  look-back**: `embargo_ns = max_lookback_ns`. The schema only requires `embargo_ns ≥
+  max_lookback_ns` (`eval/manifest.py`), re-checked at runtime (`eval/study.py:28-32`). Adding
+  `max horizon_ns` would **double-count** the horizon and purge up to an extra 60 s of clean train
+  rows after every test block — needlessly pushing a rung toward `g1_inconclusive`/fail given the
+  ≥32-OOS / `min_trades=30` scarcity limits.
 - **Uniqueness** = 1/(# label spans covering `t_event`) — the concurrency weight
   (`eval/synthetic.py:_concurrency_uniqueness` is the reference to port to
   `data/uniqueness.py`); optional sequential-bootstrap weights are a follow-up. **Compute it
@@ -440,15 +530,20 @@ cross-cutting discipline).
   ranges ~120 bps (base) → ~5 bps (top tier) (spec §10.2); the assumed fee tier is a
   **pre-registered producer parameter**, recorded in the manifest `sources`/`bar_clock`
   block, not hidden in code. At realistic solo volume the cost wall is large — this is
-  the G1 stakes (data.md/§10).
-- **`half_spread_bps`** (per row) = ½·(Coinbase best_ask − best_bid)/mid from the target book
-  at **`coinbase_read_ts`** (the last-observed Coinbase book, `received_time ≤ t_event`,
-  §B/§C.2 — not `t_event`, so cost never uses future book state). `validate_matrix` requires
-  both cost columns ≥ 0.
+  the G1 stakes (data.md/§10). **Entry-latency slippage (Codex #1):** `slippage_bps` **includes**
+  the `coinbase_read_ts → t_event` drift — the price move between the last *observable* book and
+  the decision — charged **forward as a cost** (the label `P0` is now the true `t_event` mid, so
+  this drift is a real execution cost, not a label shift).
+- **`half_spread_bps`** (per row) = ½·(Coinbase best_ask − best_bid)/mid from the **observable**
+  target book at **`coinbase_read_ts`** (`received_time ≤ t_event`, §B/§C.2 — the observable book,
+  so cost is realistic and uses no future state; a **one-sided** book → drop the row, §E/#4).
+  `validate_matrix` requires both cost columns ≥ 0.
 - **Gate (G1):** `run_study` reports gross **and** net side-by-side, MCC, DSR (vs the trial
   dispersion, effective-N), and **PBO via CSCV** (needs ≥32 finite OOS samples else
-  `g1_inconclusive`; `eval/study.py:62`). A real G1 pass needs enough traded samples
-  (`min_trades=30`, `min_eff_trades=10`; `eval/runner.py:DEFAULT_GATE`) → **post-backfill**.
+  `g1_inconclusive` **only when the gate would otherwise pass** — `g1_inconclusive = passing and
+  not pbo_available`, `eval/study.py:70-72`; a weak <32-sample build is an ordinary **FAIL**, §J).
+  A real G1 pass needs enough traded samples (`min_trades=30`, `min_eff_trades=10`;
+  `eval/runner.py:DEFAULT_GATE`) → **post-backfill**.
 - **E0.5 sanity gate (already built, keep green):** the evaluator scores a known-zero-edge
   synthetic series as DSR≈0 / PnL≤0 (`tests/test_gate_synthetic.py`) — it does not
   manufacture edge.
@@ -469,10 +564,10 @@ sorted keys.
 
 **Emitted manifest (v1 required fields, `eval/manifest.py`):**
 
-- `manifest_version: 1`, `dataset_id`, `build_id` = **content hash over the matrix bytes +
-  all build params, with `generated_at` EXCLUDED** (a wall-clock timestamp must not change
-  the identity of an otherwise-identical build — §I/P3), `time: {unit: "ns", timezone:
-  "UTC"}`.
+- `manifest_version: 1`, `dataset_id`, `build_id` = **content hash over the canonical *logical
+  row values* + all build params** (NOT file bytes — pandas/pyarrow embed version-stamped
+  `created_by`/`pandas_version` metadata, so byte-identity is environment-coupled; §I/#10), with
+  `generated_at` EXCLUDED, `time: {unit: "ns", timezone: "UTC"}`.
 - `bar_clock: {kind: "dollar", reference_stream, target_bars_per_day, time_cap_ns,
   warmup_days, threshold_schedule_hash, feed_lag_tail_ns {binance_book, binance_trade, coinbase_book, coinbase_trade — p99/max live-watermark bound; offline reads use per-event received_time, §C.2}, seam_policy}` —
   the **per-day trailing threshold schedule is pinned by hash** (§A, not a scalar), and
@@ -487,7 +582,7 @@ sorted keys.
   "coinapi/limitbook_full", <reviewed-stitch/backfill-manifest-id>, …]` + fee-tier
   assumption — the **consumed stitch plan is a recorded source** (§C.3). `generated_at`:
   ISO-8601 UTC, **injectable** (a build param, fixed in tests) and **excluded from
-  `build_id`** so identical rebuilds are byte-identical (§I/P3).
+  `build_id`** so identical rebuilds share a `build_id`/logical rows (§I/#10).
 - `max_lookback_ns`, `embargo_ns` (`embargo_ns ≥ max_lookback_ns`, §F);
   `availability_lag_ns: 0` (synchronous — §C/§E). Optional `extra_cols`
   (`emitted_by_time_cap`, funding/OI diagnostics), `dtypes`, `gate` (the pre-registered
@@ -527,17 +622,21 @@ stratification is an additive tag (experiment-plan cross-cutting discipline).
   **`data/processed/feature_manifest.json`** — the exact paths the integration test and
   CLI expect (`tests/test_baseline_integration.py`, `scripts/run_baseline.py`).
 
-**Determinism (repo convention — `plan_lake_binance_batches.py`).** Determinism is defined
-as **identical `model_matrix.parquet` bytes + identical `build_id`**, where `build_id` is
-the content hash over (rows + all build params) **excluding the manifest `generated_at`**.
-Rules: iterate the **sorted** usable-day list from `data/usable_calendar.json`; apply the
-seam masks (§C.3) deterministically from the pinned stitch plan; stable-sort matrix rows by
-`t_event` (also required for reproducible PBO blocking — `eval/study.py:58-61`); pin the
-per-day trailing threshold schedule by hash (§A); seed all RNG
-(`np.random.default_rng(seed)`). **`generated_at` is an injectable build param** (fixed in
-tests, real wall-clock in production) and is the *only* field allowed to differ between two
-otherwise-identical builds — it never enters `build_id` or the matrix bytes. This
-reconciles the byte-identical-rebuild test (§J) with a real generation timestamp.
+**Determinism (Codex #10).** `plan_lake_binance_batches.py` writes stdlib JSON/text (genuinely
+byte-reproducible); **parquet is not** — pandas/pyarrow embed a version-stamped `created_by` +
+`pandas_version` blob and writer options (compression, row-group size, dict encoding, statistics)
+are unspecified, so two builds on identical data but a different pyarrow/pandas patch produce
+different bytes. Determinism is therefore defined as **identical canonical *logical rows* +
+identical `build_id`** (`build_id` = hash of canonical logical row values + build params, §H) —
+**not** file-byte identity. The §J acceptance test compares **logical-row equality**
+(canonicalized values); if byte-identity is wanted instead, first **pin/normalize writer options**
+(`version`, `compression`, `use_dictionary`, `write_statistics`, row-group size). Rules: iterate
+the **sorted** usable-day list from `data/usable_calendar.json`; apply the seam masks (§C.3)
+deterministically; stable-sort rows by `t_event` (also required for reproducible PBO blocking —
+`eval/study.py:58-61`); pin the per-day threshold schedule by hash (§A); seed all RNG
+(`np.random.default_rng(seed)`). **`generated_at` is an injectable build param** (fixed in tests,
+real wall-clock in production) — the *only* field allowed to differ between otherwise-identical
+builds; it never enters `build_id`.
 
 **ModelMatrix schema (one row per bar×horizon):** `feature_cols` (float, no NaN/inf) +
 `RESERVED` = `y_fwd_bps`(float bps), `label`(int ∈{-1,0,1}), `t_event`/`t_barrier`/
@@ -563,15 +662,23 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   clock legitimately re-bins day `d` when its raw trades change (Codex P2: keep raw trades fixed
   and mutate only the completed-volume schedule feed, or inject the spike into a future day).
   Warm-up days use the seed threshold and are flagged/excluded.
-- **Decision-time / sample-timing (P1):** the label runs forward from `t_event`; **every read
-  event has `received_time ≤ t_event`** — planting a **delayed** event (`received_time >
-  t_event` but `origin_time ≤ t_event`) must **not** enter the snapshot/features (regression
-  guard: a median-lag read would wrongly include it). Asserts `t_event == max(received_time)`
-  over the bar's trades (plant a delayed non-crossing trade whose `received_time` exceeds the
-  crossing trade's — `t_event` must track it) and, for an `emitted_by_time_cap` bar (incl. a
-  **zero-trade** quiet interval), `t_event ≥` the cap fire time; the Coinbase target book resolves
-  to `coinbase_read_ts` (last observed, not `t_event`), and `t_available == t_event` holds *without*
-  look-ahead.
+- **Decision-time / sample-timing (P1):** the label runs forward from `t_event`; **every
+  *feature* read event has `received_time ≤ t_event`** — planting a **delayed** event
+  (`received_time > t_event` but `origin_time ≤ t_event`) must **not** enter the *feature* snapshot
+  (regression guard: a plain-origin cut would wrongly include it, §C.1/#2). Asserts
+  `t_event == max(received_time)` over the bar's trades (plant a delayed non-crossing trade whose
+  `received_time` exceeds the crossing trade's — `t_event` must track it) and, for an
+  `emitted_by_time_cap` bar (incl. a **zero-trade** quiet interval), `t_event ≥` the cap fire time;
+  the **observable feature/cost book** resolves to `coinbase_read_ts` while the **label `P0`**
+  reads the *true* book at `t_event` (§C.2/#1); `t_available == t_event` holds *without* look-ahead.
+- **Trade-flow membership (Codex #3):** plant an early-arriving next-bar trade (origin after the
+  crossing trade, `received ≤ t_event`); the bar's `cvd`/`aggressor_imb`/`largest_print` must be
+  computed over the **origin-order members** only — asserting `cvd` is bar-additive and prints are
+  not double-counted into both bars.
+- **Legit edge emissions (Codex #4):** a **zero-trade** cap-closed bar builds with trade-flow
+  features = 0 (or is dropped per the pinned policy) and **passes `validate_matrix`** (no NaN); an
+  unresolved-barrier row gets the realized return to `t_barrier` + `label = 0`; a one-sided-book
+  row is **dropped**, not NaN-emitted. A dead-Sunday window cannot wedge the build.
 - **Seam masking (P2a):** a synthetic day with a planted seam (two vendor segments +
   `SeamPolicy` guard) drops every bar whose feature/label window crosses the seam **or sits
   inside the guard band** (guard-aware `feature_valid_mask`/`label_valid_mask`, **not**
@@ -580,15 +687,18 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   span *inside* the window** case (the per-sample `vendor_source_at` would miss it). No
   surviving row spans a seam or guard band
   (`recon/stitch_policy.py:label_valid_mask`/`feature_valid_mask`/`window_vendor_sources`).
+  **Horizon survival (Codex #5):** the multi-horizon fixture is sized so masking leaves **≥
+  `n_groups` rows per declared horizon** — else the 60 s rung is masked out and
+  `run_from_manifest`/`cpcv_splits` crash instead of returning the per-horizon schema.
 - **Features:** hand-built L2+trade micro-fixture with a known OFI/CVD/microprice-dev →
   exact expected values. **Value-level no-lookahead (T3):** out-of-order replay ⇒
   byte-identical features (mirrors `tests/test_reconstruct_no_lookahead.py`).
 - **Labels:** planted up/down/flat paths → expected triple-barrier `label` and sign of
   `y_fwd_bps` off the Coinbase **mid** anchor (§B); barrier resolves within the horizon
-  (`t_barrier ≤ t_event + horizon_ns`). **Span-anchor (P2):** with `coinbase_read_ts <
-  t_event`, the emitted `t0 == t_event` (not the lagged read), base price `P0` = the lagged
-  mid, and a planted barrier hit in the `[coinbase_read_ts, t_event]` gap produces **no** row
-  whose span starts before `t_event`.
+  (`t_barrier ≤ t_event + horizon_ns`). **Span-anchor:** `t0 == t_event` and **`P0` = the true
+  reconstructed mid at `t_event`** (an origin cut, not the lagged `coinbase_read_ts` read); since
+  the label reads the offline ground-truth book at `t_event`, **no `[coinbase_read_ts, t_event]`
+  gap case applies** (Changelog / #1).
 - **Leakage-control gate (E0.4):** random k-fold (no purge) shows inflated CV vs
   purged/embargoed on a synthetic overlapping-label series — the controls bite.
 - **Manifest round-trip:** producer emits matrix+manifest on a tiny fixture →
@@ -597,9 +707,11 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   tiny/weak fixture yields an ordinary G1 **fail**, not `g1_inconclusive` — that flag needs a
   LightGBM rung to pass the solo gate with PBO unavailable (`eval/study.py:70-72`). Assert a
   specific G1 outcome only with a deliberately-planted-signal fixture sized to pass solo.
-- **Determinism (P3):** two builds of the same fixture with **different injected
-  `generated_at`** ⇒ **identical `model_matrix.parquet` bytes and identical `build_id`**
-  (the timestamp is excluded from the hash); the manifests differ only in `generated_at`.
+- **Determinism (P3/#10):** two builds of the same fixture with **different injected
+  `generated_at`** ⇒ **identical canonical logical rows and identical `build_id`** (the timestamp
+  is excluded from the hash) — assert **logical-row equality**, not raw parquet bytes (which are
+  pyarrow/pandas-version-coupled unless writer options are pinned, §I); the manifests differ only
+  in `generated_at`.
 
 **Tier 2 — real-data (skipif-gated, runs only after backfill unlock):**
 `data/processed/*` present ⇒ the E0.3 median-bar histogram, τ ladder, and the first real
@@ -643,14 +755,14 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | Task | Scope | Builds on (file:line) | Deliverable | Pre/Post backfill |
 | --- | --- | --- | --- | --- |
 | **T1** `feat/bars-clock` | Dollar-notional clock (accumulate in `origin_time` order, **close at `max(received_time)` of the bar's trades, or ≥ the cap fire time for `emitted_by_time_cap` bars** — P1) + hybrid time cap + **trailing/as-of-only per-day threshold schedule + warm-up** (P2b) + `emitted_by_time_cap`; Coinbase-order sort; **prerequisites: received-time-bearing event record (§C.2) + CoinAPI Coinbase-trades normalizer (§C.1) — neither exists** | `recon/events.py:Trade` (needs both timestamps); streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle only, §C.1) | `bars/clock.py` + threshold-causality test | Pre (calibration Post) |
-| **T2** `feat/bars-snapshot` | Dual-book snapshot over events with **`received_time ≤ t_event`** (Coinbase target → `coinbase_read_ts` = last observed, P1); mid + microprice (both emitted) | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py` + received-time test | Pre |
+| **T2** `feat/bars-snapshot` | **Two Coinbase reads (#1):** observable book at `coinbase_read_ts` (received-gated — features + `half_spread_bps`) **and** the true label book at `t_event` (origin cut — `P0`); `sample_topk_as_of` cuts on origin, so features pre-filter `received ≤ t_event` (#2); staleness cap on `t_event − coinbase_read_ts` (#8); mid + microprice (both emitted) | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py` + received-time + label-at-t_event tests | Pre |
 | **T3** `feat/bars-features` | Per-bar §6/E1.2 vector (OFI/CVD/microprice_dev/queue_imb/spread_tick/depth/slope/VWAP/intra-bar path); stationarization; **value-level no-lookahead test** | T2, `recon/orderbook.py:snapshot` | `bars/features.py` + no-lookahead test | Pre |
 | **T4** `feat/bars-xvenue` | **`t_event` = `max(received_time)` over the bar's trades (origin≠received order); every input gated by per-event `received_time ≤ t_event` (exact); p99/max tail only for the live watermark, never medians** (P1); needs the received-time-bearing event record (§C.2); basis; perp-state conditioners; **sample-timing test (delayed-event guard)** | T3, data.md §5/§5b | `bars/align.py` + sample-timing test | Pre (Binance tail from E2.5 Post) |
-| **T5** `feat/labels-triple-barrier` | Triple-barrier (vol-scaled EWMA barriers, vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, base price `P0` = last-observable `coinbase_read_ts` mid (P2)** | T2 target anchor | `data/labels.py` + span-anchor test | Pre |
+| **T5** `feat/labels-triple-barrier` | Triple-barrier (vol-scaled EWMA barriers, vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, `P0` = TRUE reconstructed mid at `t_event` (#1)**; unresolved barrier → realized return + `label=0` (#4) | T2 target anchor | `data/labels.py` + span-anchor test | Pre |
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
-| **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker+slippage, fee-tier param) + `half_spread_bps` from the Coinbase book at `coinbase_read_ts` (lagged, P1) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
+| **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker + slippage, fee-tier param; **slippage includes the `coinbase_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable Coinbase book at `coinbase_read_ts` (one-sided book → drop, #4) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection test | Pre |
-| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; NaN/inf row rejected pre-write; byte-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
+| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
 | **T10** `feat/producer-calibration` (Post) | Consume the **final reviewed seam list**; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; first real G1. **Acceptance: seam masking holds on the real stitch plan** | T9, backfilled data + reviewed stitch plan | E0.3/E0.5 artifacts + G1 result | **Post** (backfill unlock) |
 
 ---
@@ -667,9 +779,11 @@ schema change.
    notional clock is the post-E2.5 target**, enabled once E2.5 pins the Binance trade-lag tail
    for the live loop. Combined B+C is an ablation knob (E2.2 decides).
    Trigger venue is a manifest parameter, so the switch is config, not a rewrite.
-2. **Label anchor** = Coinbase **mid** (primary — the anchor the seam-parity gate
-   validates, `recon/parity.py:68,243`), **microprice** as an ablation arm **gated on
-   first adding a microprice-parity check** (P2c; §B).
+2. **Label anchor** = Coinbase **mid** (primary — the anchor the seam-parity gate validates,
+   `recon/parity.py:68,243`), **microprice** as an ablation arm **gated on first adding a
+   microprice-parity check** (P2c; §B). **`P0` is read from the TRUE book at `t_event`** (an
+   origin cut, offline ground truth), **not** the observable `coinbase_read_ts` read — the
+   entry-latency drift is a `cost_bps` slippage, not a label shift (Changelog / #1).
 3. **Sample timing / observability (P1):** decision `t_event` on the **received-time** axis;
    every input gated by its own **`received_time ≤ t_event`** (exact, per-event — the target
    venue is **not** zero-lag), with **p99/max tail** constants (never medians) only for the
@@ -683,8 +797,8 @@ schema change.
 6. **Output** = day-partitioned intermediates → one consolidated
    `data/processed/model_matrix.parquet` (+ manifest), matching the built consumer's
    expected paths and AGENTS.md streaming rule.
-7. **Determinism (P3)** = matrix bytes + `build_id`, with `generated_at` **injectable and
-   excluded from the hash** (§I).
+7. **Determinism (P3/#10)** = canonical **logical rows** + `build_id` (not fragile parquet
+   bytes), with `generated_at` **injectable and excluded from the hash** (§I).
 8. **Horizon ladder** = `{2s,10s,60s}` default; the ~20–30 s τ-rung is added post-backfill by
    **rerunning label/matrix production** (T10) to emit its bar×horizon rows — the runner rejects
    a declared-but-missing horizon, so it is **not** a manifest-only edit (§D, Codex P2).
@@ -735,16 +849,18 @@ schema change.
   fixture oracle (P2, §C.1) — traced to `recon/merge.py:11-16`,
   `recon/stitch_policy.py:385,391,406`, `eval/runner.py:60`, data.md §5/§5b.
 - Review round 3 (Codex on `34b87e9`) incorporated: **book-feed vs trade-feed lag split**
-  (P1 — trigger uses the trade lag, snapshot the book lag; §C.2), **Coinbase target snapshot
-  + `half_spread_bps` at the lagged `coinbase_read_ts`** (P1, §B/§G), **CoinAPI fill segments
+  (P1 — trigger uses the trade lag, snapshot the book lag; §C.2), **`half_spread_bps` at the
+  observable `coinbase_read_ts`** (P1, §G) — *(the **target/label** snapshot part is
+  **SUPERSEDED**: `P0` moved to the true `t_event` book, /code-review #1)* — **CoinAPI fill segments
   replay in `seq` order** not a `ts_engine` merge (P2, §C.1), and the tiny-fixture test
   asserts **schema not `g1_inconclusive`** (P3, §J) — traced to data.md §5b/134-140,
   `recon/coinapi.py:13-29`, `eval/study.py:70-72`.
 - Review round 4 (Codex on `991991d`) incorporated: **CoinAPI trades routing** for the 52
   Coinbase fill days — a trades normalizer/replay is a new **producer prerequisite** (P2,
   §C.1; does not exist — `recon/coinapi.py` is book-only), and the **triple-barrier span/purge
-  is anchored at `[t_event, t_barrier]`** with the lagged read supplying only the base price
-  `P0` (P2, §C.2/§D/§B/T5) — traced to data.md §5b/§4.3.
+  is anchored at `[t_event, t_barrier]`** — *(the "lagged read supplies `P0`" part is
+  **SUPERSEDED**: `P0` is the true `t_event` book, /code-review #1)* (P2, §C.2/§D/§B/T5) —
+  traced to data.md §5b/§4.3.
 - Review round 5 (Codex on `6a4f931`) incorporated: **offline reads gate on per-event
   `received_time ≤ t_event`** (exact), not `origin − median_lag` — a median leaves ~50 % of
   events as look-ahead; scalar lags are demoted to **p99/max tail bounds** for the live
@@ -775,19 +891,60 @@ schema change.
   `emitted_by_time_cap` bars (few or **zero** trades) `t_event = max(t_cap, max(received_time))`
   and is **never earlier than the cap fire time** (P1, §C.2/§E/§J/T1) — and decision #1 now
   restates `max(received_time)` over the bar's trades rather than the single trigger receipt (P1).
-- Review round 11 (Codex on `aefcb03`) incorporated: the **label vendor/seam mask extends back
-  to the base-price read** — label window `[coinbase_read_ts, t_barrier]` (not `[t_event,
-  t_barrier]`), so a seam between `P0` and the forward path can't splice two vendors into
-  `y_fwd_bps` (the CPCV *span* stays `[t_event, t_barrier]`; P2, §C.3/§E) — and the
-  **threshold-causality test asserts on `threshold_d`, not bar boundaries** (a real trade spike
-  legitimately re-bins day `d`; mutate only the schedule feed or a future day; P2, §J).
+- Review round 11 (Codex on `aefcb03`) incorporated: the **label vendor/seam mask back-extension**
+  to `[coinbase_read_ts, t_barrier]` — *(**SUPERSEDED / obviated** by /code-review #1: with `P0` at
+  `t_event` the label window is cleanly `[t_event, t_barrier]` and the back-extension is removed)* —
+  and the **threshold-causality test asserts on `threshold_d`, not bar boundaries** (a real trade
+  spike legitimately re-bins day `d`; mutate only the schedule feed or a future day; P2, §J).
+- **Claude `/code-review` pass (2026-07-03, docs-only) — 14 findings.** *(Codex hit its
+  code-review usage limit at round 11; these are from a Claude review, no bot — replied on the
+  threads directly.)*
+  - **SPINE / #1 (P1) — `P0` label anchor moved from `coinbase_read_ts` back to the true
+    reconstructed mid at `t_event`. This SUPERSEDES the earlier lagged-`P0` decision** (Codex
+    P1/P2, **rounds 4/10/11**), which introduced a **common-mode target leak**: reading `P0` at
+    `coinbase_read_ts < t_event` folded the already-realized `[coinbase_read_ts, t_event]` drift
+    into `y_fwd_bps` — drift that is *past* at the decision and observable through the bar's own
+    Coinbase trade features (`vwap_minus_mid`/`cvd`/`ofi_integrated`), so a model fits it as
+    spurious edge; being identical across the purged and leaky-control pipelines, the E0.4
+    leakage-control gate cannot catch it. **Entry-latency is now a cost, not a label shift** —
+    charged forward as `cost_bps` slippage (§G). Three-read discipline: **label** = true book at
+    `t_event` (origin cut); **features** = observability-gated (`received ≤ t_event`, origin
+    order); **cost** = observable book at `coinbase_read_ts` + latency slippage.
+    (§B/§C.1/§C.2/§D/§E/§G/§J/T2/T5/T7)
+  - **#6 & #11 resolved by OBVIATION:** with `P0` at `t_event` the label window is cleanly
+    `[t_event, t_barrier]`; the round-11 back-extension to `[coinbase_read_ts, t_barrier]` is
+    **removed** (§C.3/§E) — the observable feature/cost read at `coinbase_read_ts` already sits
+    inside the feature window, so `feature_valid_mask` covers it (no separate patch).
+  - **#2 (P1):** `sample_topk_as_of` cuts on **origin**, so feature/cost reads **pre-filter
+    `received ≤ t_event` then fold in origin order**; the label keeps the plain origin cut (§C.1/§C.2).
+  - **#3 (P1):** trade-flow features over the bar's **origin-order members**, not the received-gated
+    superset (else CVD non-additive / prints double-counted; §C.2/§J).
+  - **#4 (HIGH):** defined finite values for legit edge emissions — zero-/one-trade bars,
+    unresolved barrier, one-sided book — so `validate_matrix` can't abort on a legitimate NaN (§E/§J).
+  - **#5 (HIGH):** guarantee **≥ `n_groups` rows per declared horizon** (heavy 60 s masking else
+    makes the runner/`cpcv_splits` reject the matrix); size §J fixtures accordingly (§D/§J).
+  - **#7 (MED):** `embargo_ns = max_lookback_ns` — the test-interval upper edge already includes the
+    horizon, so `max horizon_ns` double-counted and over-purged (§F).
+  - **#8:** staleness cap on `t_event − coinbase_read_ts` for intra-vendor book-feed dropout (§B).
+  - **#9 (MED-HIGH):** day-edge `UNCOVERED` overhang is a **partition artifact** — stitch
+    adjacent-day segments for edge windows or quantify/accept the loss, not silent seam-safety (§C.3).
+  - **#10 (MED):** `build_id` = hash of **logical rows** + params (parquet bytes are
+    pyarrow/pandas-version-coupled); determinism test relaxed to logical equality (§H/§I).
+  - **#12:** normalize the trailing threshold by covered fraction (§A).
+  - **#13:** robust/capped `max_lookback_ns`, not a raw `.max()` a straggler inflates (§F).
+  - **#14 (LOW):** §G wording — `g1_inconclusive` only *when the gate would otherwise pass* (§G).
 
 ## Risks & assumptions
 
+- **Risk (label-leak fix is load-bearing, #1):** `P0` at `t_event` (the true reconstructed book),
+  **not** `coinbase_read_ts`, is the corrected discipline. A future edit that re-lags `P0` to the
+  observable read reintroduces the common-mode target leak (Changelog); the
+  `[coinbase_read_ts, t_event]` entry drift belongs in `cost_bps` slippage, not the label.
 - **Assumes** `origin_time` stays 100% populated for `book_delta_v2` (data.md §5,
   measured 2026-06-22) — if a future span is empty, the sampler falls back to
   `received_time` (Tokyo capture keeps it a tight proxy; `recon/ingest.py` already
-  supports the fallback).
+  supports the fallback). **100% *presence* ≠ gap absence (#8):** an intra-vendor book-feed
+  dropout still needs the §B staleness cap.
 - **Assumes** the consumer contract (`eval/matrix.py:RESERVED`, `eval/manifest.py` v1) is
   stable; if it changes, T8/T9 must re-sync. Low risk — it is frozen and heavily tested.
 - **Risk:** threshold/latency/fee defaults (Q1–Q5) are seeds until real data; the plan
