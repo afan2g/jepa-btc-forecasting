@@ -803,7 +803,11 @@ def test_build_manifest_ready(tmp_path):
     assert s["excluded_days"] == ["2025-01-20"]
     assert s["unresolved_days"] == []
     assert len(m["meta"]["inputs"]["usable_calendar"]["sha256"]) == 64
-    assert len(m["meta"]["inputs"]["batch_reports"][0]["sha256"]) == 64
+    br0 = m["meta"]["inputs"]["batch_reports"][0]
+    assert len(br0["sha256"]) == 64
+    # the batch days-file the stale-report guard reads is sha-pinned for a reproducible audit trail
+    assert len(br0["batch_days_file"]["sha256"]) == 64
+    assert br0["batch_days_file"]["path"].endswith("batch_001_days.txt")
 
 
 def test_build_manifest_cost_summary(tmp_path):

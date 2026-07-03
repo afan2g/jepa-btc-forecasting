@@ -816,6 +816,21 @@ def _assemble(days, sections, cost, blockers, *, status, scope_complete, generat
     }
 
 
+def _batch_report_input(r: dict, out_dir) -> dict:
+    """meta.inputs entry for one batch: the report sha256 PLUS the batch days-file sha256 (the
+    stale-report guard reads that days-file to gate readiness, so pinning it makes the exact
+    gate-passing day-set reproducible from the manifest — spec §fix-3 input identity)."""
+    b = r["batch"] or {}
+    bf = b.get("file")
+    days_file = None
+    if out_dir and bf:
+        path = os.path.join(out_dir, bf)
+        days_file = {"path": path, "sha256": sha256_file(path) if os.path.exists(path) else None}
+    return {"report_dir": r["report_dir"], "path": r["path"], "sha256": sha256_file(r["path"]),
+            "batch_file": bf, "batch_days_file": days_file,
+            "n_days": len(r["report"].get("days") or [])}
+
+
 def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only) -> dict:
     plan = load_json_object(plan_path, what="plan manifest")
     resolved_cal = cal_path or (plan.get("meta") or {}).get("input_calendar")
@@ -836,14 +851,12 @@ def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only)
 
     blocking = any_blockers(blockers)
     status = "blocking" if blocking else "ready"
+    out_dir = (plan.get("meta") or {}).get("out_dir")
     inputs = {
         "plan_manifest": {"path": plan_path, "sha256": sha256_file(plan_path)},
         "usable_calendar": {"path": resolved_cal, "sha256": sha256_file(resolved_cal),
                             "anchor_end": cal.get("anchor_end")},
-        "batch_reports": [{"report_dir": r["report_dir"], "path": r["path"],
-                           "sha256": sha256_file(r["path"]),
-                           "batch_file": (r["batch"] or {}).get("file"),
-                           "n_days": len(r["report"].get("days") or [])} for r in reports],
+        "batch_reports": [_batch_report_input(r, out_dir) for r in reports],
         "n_batches": len(reports),
         "plan_generated_utc": (plan.get("meta") or {}).get("generated_utc"),
     }
