@@ -219,9 +219,16 @@ def validate_calendar(cal: dict, path: str) -> None:
     plan.skipped.fill_days_book_gap); a malformed non-bool fill flag likewise reads as False while
     the day stays a batch day."""
     for field, typ in _REQUIRED_CALENDAR_FIELDS:
-        if not isinstance(cal.get(field), typ):
+        v = cal.get(field)
+        if not isinstance(v, typ):
             raise ReviewInputError(f"usable calendar {path}: missing or invalid required field "
                                    f"'{field}' (expected {typ.__name__})")
+        for d in v:   # dict keys or list items — each must be a real YYYY-MM-DD (planner does this)
+            try:
+                dt.date.fromisoformat(d)
+            except (TypeError, ValueError):
+                raise ReviewInputError(f"usable calendar {path}: field '{field}' has an invalid day "
+                                       f"{d!r} (expected YYYY-MM-DD)") from None
     for d, v in cal["coinbase_fill_days"].items():
         if not isinstance(v, dict) or not all(isinstance(v.get(k), bool) for k in ("book", "trades")):
             raise ReviewInputError(f"usable calendar {path}: coinbase_fill_days entry {d} must be a "
@@ -795,18 +802,23 @@ def check_fill_availability(cal: dict, blockers: dict) -> None:
 def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -> None:
     """Every REPORT-driven book fill (a mapped day with coinapi_fill.needs_fill True) must be
     verifiably available. A present-but-degraded/crossed-seed day is never a calendar book-gap, so
-    `check_fill_availability` never sees it. Require the report's own `coinapi.fillable` True AND,
-    when the calendar carries measured status for the day, the stricter `is_fillable` (present AND
-    ok) — the report's `fillable` only checks `book.present`, so a `present=true, ok=false`
-    (unverifiable) flat file would otherwise reach `ready` and even be priced from the bad MB."""
+    `check_fill_availability` never sees it. Available iff any of: a local CoinAPI parquet on disk
+    (`coinapi.parquet_local`); the calendar's stricter `is_fillable` (present AND ok) when it carries
+    measured status; or the report's own `coinapi.fillable` (which only reflects `book.present`) when
+    the calendar has no measured status. A `present=true, ok=false` (unverifiable) flat file with no
+    local parquet blocks, rather than reaching `ready` priced from the bad MB."""
     for d, rec in day_index.items():
         cf = _as_dict(rec.get("coinapi_fill"))
         if cf.get("needs_fill") is not True:
             continue
-        if _as_dict(rec.get("coinapi")).get("fillable") is not True:
+        coinapi = _as_dict(rec.get("coinapi"))
+        if coinapi.get("parquet_local") is True:
+            continue   # CoinAPI data already on disk for the day → the fill is available
+        if _fill_status(cal, d) is not None:
+            if not is_fillable(cal, d, "book"):
+                blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
+        elif coinapi.get("fillable") is not True:
             blockers["book_fill_unavailable"].append(f"{d}:report_coinapi_fillable_not_true")
-        elif _fill_status(cal, d) is not None and not is_fillable(cal, d, "book"):
-            blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
 
 
 # ----------------------------------------------------------- sections + cost summary + assembly

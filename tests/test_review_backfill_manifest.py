@@ -355,6 +355,13 @@ def test_validate_calendar():
     del no_lake["lake_all_days"]
     with pytest.raises(rv.ReviewInputError, match="lake_all_days"):
         rv.validate_calendar(no_lake, "cal")
+    # a non-ISO day key would crash _synth_full_day_plan later → reject at validation
+    bad_key = _calendar(coinbase_fill_days={"bad-day": {"book": True, "trades": False}})
+    with pytest.raises(rv.ReviewInputError, match="invalid day"):
+        rv.validate_calendar(bad_key, "cal")
+    bad_list = _calendar(lake_all_days=["2025-01-01", 20250102])   # non-string day
+    with pytest.raises(rv.ReviewInputError, match="invalid day"):
+        rv.validate_calendar(bad_list, "cal")
 
 
 def test_readiness_rejects_malformed_calendar_fill_flag(tmp_path):
@@ -954,6 +961,16 @@ def test_check_report_fill_availability_blocks_unverified_report_fill():
     rv.check_report_fill_availability(day_index, {}, blockers)
     assert set(blockers["book_fill_unavailable"]) == {
         "d1:report_coinapi_fillable_not_true", "d3:report_coinapi_fillable_not_true"}
+
+
+def test_report_fill_available_via_local_parquet():
+    # a report-driven fill with CoinAPI data already on disk (parquet_local) is available even
+    # though coinapi.fillable is None (not a calendar gap) — must NOT block
+    day_index = {"d1": {"coinapi_fill": {"needs_fill": True},
+                        "coinapi": {"fillable": None, "parquet_local": True}}}
+    blockers = rv.new_blockers()
+    rv.check_report_fill_availability(day_index, {}, blockers)
+    assert blockers["book_fill_unavailable"] == []
 
 
 def test_check_report_fill_availability_rechecks_calendar_ok():
