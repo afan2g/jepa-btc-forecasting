@@ -931,6 +931,18 @@ def test_check_reports_validation_and_meta_drift(tmp_path):
     assert any("symbol" in x for x in blockers["inconsistencies"])
 
 
+def test_wrong_market_report_blocks(tmp_path):
+    # reports all for another market (consistent across batches → no drift) must still fail closed
+    rep = _report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))],
+                  exchange="BINANCE", symbol="ETH-USDT")
+    plan_path, cal_path = _write_tree(tmp_path, reports=[rep])
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    reps, _ = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_report_consistency(reps, blockers)
+    assert any("wrong_market" in x for x in blockers["inconsistencies"])
+
+
 def test_missing_pinned_meta_blocks(tmp_path):
     # a pinned run-parameter omitted from every report defeats the drift pin → block, don't pass
     rep = _report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])

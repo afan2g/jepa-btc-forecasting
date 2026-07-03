@@ -82,6 +82,11 @@ BLOCKER_KEYS = ("structural", "missing_keys", "coverage_gaps", "inconsistencies"
 # Run parameters pinned across batch reports: differing sampling (grid_ms/k) or reconstruction
 # (engine/policy) produce incompatible quality verdicts, so a ready manifest must not combine them.
 _META_PIN_FIELDS = ("exchange", "symbol", "thresholds", "grid_ms", "k", "engine", "policy")
+# This tool is specifically the Coinbase BTC-USD backfill gate (the calendar/plan are Coinbase); a
+# report for another market (run_coinbase_quality_map supports --exchange/--symbol) must fail closed
+# even if all batches are consistently the wrong market.
+EXPECTED_EXCHANGE = "COINBASE"
+EXPECTED_SYMBOL = "BTC-USD"
 
 
 class ReviewInputError(ValueError):
@@ -765,6 +770,12 @@ def check_report_consistency(reports: list, blockers: dict) -> None:
         for issue in summary_count_issues(report):
             blockers["inconsistencies"].append(f"{r['report_dir']}: {issue}")
         meta = _as_dict(report.get("meta"))
+        # absolute product check: consistency across batches isn't enough — reports must be for the
+        # Coinbase BTC-USD target this gate covers, not another market run through the same tooling.
+        if meta.get("exchange") != EXPECTED_EXCHANGE or meta.get("symbol") != EXPECTED_SYMBOL:
+            blockers["inconsistencies"].append(
+                f"{r['report_dir']}: wrong_market:{meta.get('exchange')}/{meta.get('symbol')} "
+                f"(expected {EXPECTED_EXCHANGE}/{EXPECTED_SYMBOL})")
         # a pinned field missing from EVERY report would make all pins equal (None==None) and pass
         # drift silently — require each to be present, else the compatibility pin is defeated.
         for f in _META_PIN_FIELDS:
