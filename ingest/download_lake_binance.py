@@ -208,7 +208,7 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
                  schema_version: str | None = None, overwrite: bool = False,
                  retries: int = DEFAULT_RETRIES, backoff_base: float = DEFAULT_BACKOFF_BASE_S,
                  backoff_cap: float = DEFAULT_BACKOFF_CAP_S, sleep=time.sleep, rng=None,
-                 manifest_root: str | None = None, lock=None) -> UnitResult:
+                 manifest_root: str | None = None, lock=None, sparse_ok: bool = False) -> UnitResult:
     """Download ONE (feed, exchange, symbol, day) partition via an injected `reader`.
 
     `reader(feed, exchange, symbol, day_iso)` returns an iterable of pyarrow batches / pandas frames
@@ -247,7 +247,9 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
         try:
             stream = reader(feed, exchange, symbol, day_iso)
             if stream is None:                       # no vendor file (sparse liquidations, gap, …)
-                rec = {**base, "status": "missing", "ts": now_iso()}
+                # `sparse_ok` (liquidations) → an expected quiet-day gap; otherwise a REQUIRED feed's
+                # miss is a real hole the run must surface (main exits 3), never a silent success.
+                rec = {**base, "status": "missing", "sparse_ok": bool(sparse_ok), "ts": now_iso()}
                 _append(rec)
                 return UnitResult("missing", 0, None, rec)
             os.makedirs(os.path.dirname(final), exist_ok=True)   # partition dir must exist for the .tmp
@@ -311,10 +313,33 @@ def plan_units(instrument_keys: list[str], feeds_arg: str | None, days: list[str
     return units
 
 
-def estimate_request_gb(instrument_keys: list[str], feeds_arg: str | None, n_days: int) -> float:
-    """Conservative GB estimate for the whole request (the `book` seed is budgeted by estimate_gb
-    whenever book_delta_v2 is requested)."""
-    return sum(lb.estimate_gb(key, resolve_feeds(key, feeds_arg), n_days) for key in instrument_keys)
+def unit_gb(unit: Unit) -> float:
+    """Conservative per-day GB for ONE unit — a scoped feed OR the `book` seed (both are keys in the
+    per-(exchange,symbol) table). Summing over the units that will actually transfer is what makes
+    the gate estimate the real work, not the whole range (see pending_units)."""
+    return lb.LAKE_GB_PER_DAY[(unit.exchange, unit.symbol)][unit.feed]
+
+
+def pending_units(units: list[Unit], out_root: str, *, overwrite: bool) -> list[Unit]:
+    """Units that will actually transfer: all when --overwrite, else only those whose final
+    data.parquet does not yet exist. The quota/broad gate estimates from THESE (not the full range),
+    so a --resume of a mostly-complete batch gates only the remaining work — otherwise, once the
+    first run consumed quota, a resume of one leftover partition could spuriously exit 4."""
+    if overwrite:
+        return list(units)
+    return [u for u in units
+            if not lb.is_done(out_root, u.feed, u.exchange, u.symbol, u.day)]
+
+
+FEED_MISS_NONFATAL_KIND = "events"   # FEED_KIND class whose missing partitions are non-fatal (sparse)
+
+
+def feed_miss_is_fatal(feed: str) -> bool:
+    """A missing partition is a real data gap for every feed EXCEPT sparse/event feeds (liquidations,
+    FEED_KIND 'events' — genuinely absent on quiet days, Risk Q2). The `book` seed and every other
+    feed are REQUIRED (recon can't seed/build without them), so a miss there is fatal → the run exits
+    3 (partial) rather than reporting a hole as success (plan Requirement 3)."""
+    return lb.FEED_KIND.get(feed) != FEED_MISS_NONFATAL_KIND
 
 
 # ----------------------------------------------------------------------------- live vendor path (approval-gated)
@@ -521,7 +546,8 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         if not days:
             raise ValueError("day source resolved to zero days — nothing to download")
         units = plan_units(instrument_keys, args.feeds, days)       # also validates (instr,feed) pairs
-        est_gb = estimate_request_gb(instrument_keys, args.feeds, len(days))
+        pending = pending_units(units, args.out, overwrite=args.overwrite)
+        est_gb = sum(unit_gb(u) for u in pending)     # gate/estimate ONLY the not-yet-done units
     except (ValueError, KeyError, FileNotFoundError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
@@ -549,7 +575,7 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
     report = {"args": {"instruments": instrument_keys, "feeds": args.feeds,
                        "days": [days[0], days[-1]] if days else [], "n_days": len(days),
                        "out": args.out, "overwrite": args.overwrite, "jobs": args.jobs},
-              "n_units": len(units), "est_gb": round(est_gb, 4),
+              "n_units": len(units), "n_pending": len(pending), "est_gb": round(est_gb, 4),
               "used_data_before": round(used_gb, 4)}
 
     # ---- dry-run: metadata + plan only, zero parquet transfer -----------------------------------
@@ -575,7 +601,7 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
     manifest_root = args.manifest or args.out
     lb.cleanup_tmp(args.out)
 
-    counts = {"ok": 0, "skip": 0, "missing": 0, "error": 0}
+    counts = {"ok": 0, "skip": 0, "missing": 0, "error": 0, "missing_required": 0}
     total_rows = 0
     per_unit = []
     quota_hit = False
@@ -584,11 +610,14 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
     def _do(u: Unit) -> UnitResult:
         return process_unit(reader, args.out, u.feed, u.exchange, u.symbol, u.day,
                             overwrite=args.overwrite, retries=args.retries, sleep=sleep,
-                            manifest_root=manifest_root, lock=lock)
+                            manifest_root=manifest_root, lock=lock,
+                            sparse_ok=not feed_miss_is_fatal(u.feed))
 
     def _record(u: Unit, res: UnitResult) -> None:
         nonlocal total_rows
         counts[res.status] = counts.get(res.status, 0) + 1
+        if res.status == "missing" and feed_miss_is_fatal(u.feed):
+            counts["missing_required"] += 1        # a required-feed hole → run exits 3, never success
         total_rows += res.rows
         per_unit.append({"feed": u.feed, "symbol": u.symbol, "dt": u.day, "status": res.status,
                          "rows": res.rows})
@@ -626,11 +655,12 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
                   per_unit=per_unit)
     path = _write_report(args.report_dir, report)
     print(f"Done. ok={counts['ok']} skip={counts['skip']} missing={counts['missing']} "
-          f"error={counts['error']} | rows={total_rows:,} | report: {path}")
+          f"(required-missing={counts['missing_required']}) error={counts['error']} "
+          f"| rows={total_rows:,} | report: {path}")
 
     if quota_hit:
         return SETUP_ERROR_EXIT
-    if counts["error"]:
+    if counts["error"] or counts["missing_required"]:  # a transfer error OR a required-feed hole
         return PARTIAL_EXIT
     return 0
 

@@ -153,6 +153,27 @@ def test_process_unit_missing_file_records_missing(tmp_path):
     assert r["status"] == "missing" and r["feed"] == "liquidations"
 
 
+def test_process_unit_missing_stamps_sparse_ok(tmp_path):
+    root = str(tmp_path)
+    r1 = dl.process_unit(FakeReader({"liquidations": None}), root, "liquidations", *PERP,
+                         "2026-04-01", sparse_ok=True, sleep=lambda *_: None)
+    assert r1.status == "missing" and r1.record["sparse_ok"] is True     # expected quiet-day gap
+    r2 = dl.process_unit(FakeReader({"trades": None}), root, "trades", *PERP, "2026-04-02",
+                         sparse_ok=False, sleep=lambda *_: None)
+    assert r2.status == "missing" and r2.record["sparse_ok"] is False    # required-feed hole
+
+
+def test_feed_miss_is_fatal_policy():
+    # only sparse/event feeds (liquidations) may go missing without failing the run; the `book` seed
+    # and every other feed are required.
+    assert dl.feed_miss_is_fatal("book_delta_v2") is True
+    assert dl.feed_miss_is_fatal("trades") is True
+    assert dl.feed_miss_is_fatal("funding") is True
+    assert dl.feed_miss_is_fatal("open_interest") is True
+    assert dl.feed_miss_is_fatal(lb.SEED_PRODUCT) is True                # `book` seed is required
+    assert dl.feed_miss_is_fatal("liquidations") is False               # sparse, Risk Q2
+
+
 # --------------------------------------------------------------------------- SEED_PRODUCT (book)
 def test_process_unit_writes_book_seed_snapshot(tmp_path):
     # The 20-level `book` seed product must be downloaded (it seeds Stage-2 recon), written to its own
@@ -287,7 +308,51 @@ def test_run_end_to_end_writes_all_units_incl_book_seed(tmp_path):
     assert len(reports) == 1
     rep = json.loads(reports[0].read_text())
     assert rep["counts"]["ok"] >= 5 and rep["counts"]["missing"] == 1
+    assert rep["counts"]["missing_required"] == 0        # the lone miss is sparse liquidations
     assert rep["dry_run"] is False
+
+
+def test_run_missing_required_feed_exits_3(tmp_path):
+    # a missing REQUIRED feed (trades) is a real data gap → exit 3, never a silent success (exit 0).
+    reader = _perp_reader()
+    reader.plan["trades"] = None                          # no vendor file for a required feed
+    code = dl.main(["--instrument", "binance-perp", "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 3
+    rep = json.loads(next((tmp_path / "rep").glob("*.json")).read_text())
+    assert rep["counts"]["missing_required"] == 1         # trades hole counted; liquidations is not
+
+
+def test_run_missing_required_book_seed_exits_3(tmp_path):
+    # the `book` seed is required (recon can't seed without it) → its miss is fatal too.
+    reader = _perp_reader()
+    reader.plan["book"] = None
+    code = dl.main(["--instrument", "binance-perp", "--feeds", "book_delta_v2",
+                    "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 3
+
+
+def test_run_resume_gates_only_pending_units_not_full_batch(tmp_path):
+    # A broad batch mostly downloaded: the quota/broad gate must estimate ONLY the not-done units,
+    # else a --resume of one leftover partition spuriously exits 4 after the first run used quota.
+    raw = tmp_path / "raw"
+    days = [f"2026-04-{d:02d}" for d in range(1, 11)]     # 10 days
+    for d in days[:-1]:                                   # pre-complete 9/10 → only the last pending
+        p = pathlib.Path(lb.raw_parquet_path(str(raw), "trades", *SPOT, d))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"done")
+    dfile = tmp_path / "days.txt"
+    dfile.write_text("\n".join(days) + "\n")
+    reader = FakeReader({"trades": [_batch(2)]})
+    # --max-gb sits BETWEEN the full-batch estimate (10 × 0.021 GB) and one pending day (0.021 GB):
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades", "--days-file", str(dfile),
+                    "--max-gb", "0.05", "--out", str(raw), "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 0                                      # gated on 1 pending day, not the full 10
+    assert {c[3] for c in reader.calls} == {days[-1]}     # only the leftover day transferred
 
 
 def test_run_partial_failure_exits_3(tmp_path):
