@@ -743,11 +743,18 @@ def build_report(per_day_results, *, meta: dict) -> dict:
 
     `gate.lake_required_pass` — no required-day `fail` (structural/metric fails only ever land on a
     required day; fill/excluded days are routed away). `gate.coinapi_fill_deferred` — the fill
-    `(venue, day)` cases whose CoinAPI validation is still pending (the locked backfill gate).
-    `gate.bars_ready` = `lake_required_pass` AND `coinapi_fill_deferred == []`; Phase 4 gates on
-    `bars_ready`, never `lake_required_pass` alone, so a span with an unvalidated/locked fill is never
-    buildable."""
+    `(venue, day)` cases whose CoinAPI validation is still pending (the locked backfill gate); a
+    Phase-3b CoinAPI replacement record (`vendor_source="coinapi"`, pass/warn) for the same key
+    CLEARS its deferral (§8). `gate.bars_ready` = `lake_required_pass` AND `coinapi_fill_deferred ==
+    []`; Phase 4 gates on `bars_ready`, never `lake_required_pass` alone, so a span with an
+    unvalidated/locked fill is never buildable."""
     days = [dict(r) for r in per_day_results]
+    # A CoinAPI-validated fill (vendor_source="coinapi", pass/warn) CLEARS the Lake-side coinapi_fill
+    # deferral for its (day, venue) — §8: a pass/warn CoinAPI fill removes the day from
+    # coinapi_fill_deferred (a CoinAPI-side fail keeps it deferred). Phase 3b feeds both the Lake
+    # deferral record and the normalized CoinAPI replacement record into one report.
+    cleared_fills = {(r["day"], r["venue"]) for r in days
+                     if r.get("vendor_source") == "coinapi" and r["status"] in (PASS, WARN)}
     counts = {s: 0 for s in STATUSES}
     by_venue = {v: {s: 0 for s in STATUSES} for v in VENUES}
     fail_day_venues: list[dict] = []
@@ -766,7 +773,7 @@ def build_report(per_day_results, *, meta: dict) -> dict:
         elif status == WARN:
             warn_day_venues.append({"day": r["day"], "venue": r["venue"],
                                     "reason_codes": list(r["reason_codes"])})
-        elif status == COINAPI_FILL:
+        elif status == COINAPI_FILL and (r["day"], r["venue"]) not in cleared_fills:
             coinapi_fill_deferred.append({"day": r["day"], "venue": r["venue"]})
     lake_required_pass = not blocking_failures
     gate = {"lake_required_pass": lake_required_pass,

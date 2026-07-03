@@ -366,6 +366,23 @@ def test_coinapi_source_fill_day_is_validated_not_re_deferred():
                                    calendar_state=fill)["status"] == tc.COINAPI_FILL
 
 
+def test_validated_coinapi_fill_clears_the_lake_deferral():
+    # §8: the Phase-3b CoinAPI replacement record (vendor_source="coinapi", pass/warn) for a fill day
+    # CLEARS the Lake-side coinapi_fill deferral for that (day, venue), so bars_ready can become true.
+    fill = {"route": tc.ROUTE_COINAPI_FILL}
+    lake_defer = tc.validate_trade_frame(None, "coinbase", "2024-08-06", calendar_state=fill)
+    coinapi_ok = tc.validate_trade_frame(_clean_full_day(start="2024-08-06T00:00:00"), "coinbase",
+                                         "2024-08-06", calendar_state=fill, vendor_source="coinapi")
+    g = tc.build_report([lake_defer, coinapi_ok],
+                        meta={"generated_utc": "2026-07-02T00:00:00+00:00"})["summary"]["gate"]
+    assert g["coinapi_fill_deferred"] == [] and g["bars_ready"] is True
+    # without the CoinAPI validation the day stays deferred (bars_ready false)
+    g2 = tc.build_report([lake_defer],
+                         meta={"generated_utc": "2026-07-02T00:00:00+00:00"})["summary"]["gate"]
+    assert {"day": "2024-08-06", "venue": "coinbase"} in g2["coinapi_fill_deferred"]
+    assert g2["bars_ready"] is False
+
+
 # --------------------------------------------------------------------------- 10. report JSON stability
 def test_report_is_strict_json_and_byte_deterministic(tmp_path):
     records = [
