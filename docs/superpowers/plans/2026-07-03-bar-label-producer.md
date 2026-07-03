@@ -101,6 +101,12 @@ package alongside the built `data/cv.py`. Manifest *writing* is a thin helper in
 `eval/manifest.py` (the module that already owns the schema), so the producer and
 consumer share one contract definition.
 
+**Packaging (Codex #P3):** the new `bars/` package **must** be added to `pyproject.toml`
+`[tool.setuptools.packages.find] include` — currently `["recon*", "eval*", "data*"]`, which
+omits `bars*` — or a non-editable install / CLI import of the producer fails (repo-root test
+runs would still pass, hiding it). T1 (the first `bars/` module) carries the `include = [...,
+"bars*"]` update and extends `tests/test_packaging.py::test_baseline_packages_are_shipped`.
+
 **Data flow (one instrument-day, then consolidate):**
 a **streaming, day-partitioned k-way merge** of Binance+Coinbase deltas+trades on the
 engine-time axis (§C.1; `recon.merge_sorted` is the bounded-fixture oracle **only**, never
@@ -134,8 +140,9 @@ BTC ranges 2×+; dollar bars are homoscedastic).
   Binance-perp clock yet:** a Binance-triggered close (a Binance **trade**) is observable only
   at its own `received_time`; offline that is exact per-event, but the **live** watermark needs
   a Binance trade-lag **tail (p99)** that E2.5 pins — until then it is unquantified for the live
-  loop. A Coinbase-triggered close is a **local** trade whose `received_time` is known today
-  (data.md §5b), so `t_event =` its receipt is fully quantified now (§C.2). **Post-E2.5
+  loop. A Coinbase-triggered close is a **local** trade, so its **monotone-watermark `t_event`**
+  (`max(t_event(N−1), max(received_time) over members, cap_fire)`, §C.2/#13 — **not** the single
+  trigger-trade receipt) is fully quantified today (data.md §5b). **Post-E2.5
   target (spec §5.1, the information-optimal clock):** Binance-perp notional (deepest venue's
   aggression), **enabled once the Binance trade/book lags are pinned** — then §C.2 uses them.
   *Ablation knob:* combined Binance+Coinbase notional (§5.1 open; E2.2 resolves on
@@ -985,6 +992,12 @@ schema change.
   fixture must plant the "survives" seam **past the guard band** (`(t_barrier + guard_ns, t_event +
   60 s]`), not merely past `t_barrier` — since §C.3 extends the actual span by `guard_ns`, a seam in
   `(t_barrier, t_barrier + guard_ns]` must still be **dropped**; the test now asserts both (§J).
+- Review round 16 (Codex on `99151d0`) incorporated — 2 findings: **#A (P2):** §A's first clock-rule
+  statement now matches the **monotone watermark** (not the single trigger-trade receipt), so T1's
+  first read agrees with §C.2/T1; **#B (P3):** the new `bars/` package must be added to
+  `pyproject.toml` `[tool.setuptools.packages.find] include` (currently `recon*/eval*/data*`) and
+  `tests/test_packaging.py` extended, or non-editable installs / CLI fail to import the producer
+  (carried by T1; §Module layout).
 
 ## Risks & assumptions
 
