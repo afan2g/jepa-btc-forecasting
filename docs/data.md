@@ -664,8 +664,8 @@ passes.
 **Status: COMPLETE.** Both arms are validated on real data: (a) the fill-**decision**/plan wiring on both
 documented seam days (the two `--no-cold-ab` Lake-only quality-map runs below), and (b) the
 **CoinAPI-overlap stitch/parity** check (plan Q8 item 16) on 2025-01-07 via one bounded single-day CoinAPI
-pull + the parity gate (see "CoinAPI overlap/stitch parity — RUN and PASSED" below). Closing this item
-does NOT unlock backfill — the broad full-window map remains the gate.
+pull + the parity gate (see "CoinAPI overlap/stitch parity — RUN … stitch VALIDATED" below). Closing this
+item does NOT unlock backfill — the broad full-window map remains the gate.
 Confirms the report wiring + partial-fill policy (`recon/stitch_policy.py`, seam plan; native coverage
 metrics) produce the EXPECTED real-day fill decisions on the two documented seam days. Two single-day
 quota-gated runs, each est ~0.48 GB (well under the 5 GB auto cap, no `--allow-broad`); `used_data`
