@@ -92,13 +92,13 @@ def _full_day_seg(day, source="coinapi", reason="quality_over_usable_bar"):
 
 
 def _day(day, classification, coinapi_fill, *, trusted=(None, None),
-         calendar=None, reasons=None) -> dict:
+         calendar=None, reasons=None, fillable=None) -> dict:
     return {
         "day": day, "classification": classification, "reasons": reasons or [],
         "lake_book_delta_v2_present": classification != "missing_needs_coinapi",
         "quality": {"grid_ms": 1000, "trusted_lake_start_ts": trusted[0],
                     "trusted_lake_end_ts": trusted[1], "n_invalid_runs": 0, "invalid_runs": []},
-        "coinapi": {"parquet_local": False, "parquet_path": None, "fillable": None},
+        "coinapi": {"parquet_local": False, "parquet_path": None, "fillable": fillable},
         "calendar": calendar or {"in_usable_days": True, "in_lake_all_days": True,
                                  "is_coinbase_fill_day": False, "excluded_reason": None},
         "coinapi_fill": coinapi_fill,
@@ -136,7 +136,8 @@ def _clean_reports():
              _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
                          full_day_reason="quality_over_usable_bar",
                          fill_segments=[_full_day_seg("2025-01-02")],
-                         seams=[], seam_policy={"seam_guard_s": 60.0})),
+                         seams=[], seam_policy={"seam_guard_s": 60.0}),
+             fillable=True),   # report-driven fill: CoinAPI availability verified (Fix 1 gate)
         _day("2025-01-11", "lake_usable", _fill_block(False, "lake_usable"),
              calendar=_TRADE_ONLY_CTX),
     ])]
@@ -247,6 +248,14 @@ def test_load_json_object_non_object_raises(tmp_path):
     p = tmp_path / "x.json"
     p.write_text("[1, 2, 3]")
     with pytest.raises(rv.ReviewInputError, match="must be a JSON object"):
+        rv.load_json_object(str(p), what="thing")
+
+
+def test_load_json_object_rejects_nonfinite_constant(tmp_path):
+    # Fix 4: a bare NaN/Infinity token (json.load accepts it by default) fails closed at the boundary
+    p = tmp_path / "x.json"
+    p.write_text('{"mb": NaN}')
+    with pytest.raises(rv.ReviewInputError, match="non-finite"):
         rv.load_json_object(str(p), what="thing")
 
 
@@ -450,6 +459,36 @@ def test_day_record_issues_seam_mismatch():
     assert not any("seams_mismatch" in i for i in rv.day_record_issues(_mk([mid])))  # correct seam
 
 
+def test_day_record_issues_fill_plan_needs_coinapi_segment():
+    # Fix 2: a full_day_fill whose only whole-day segment is source=lake pulls nothing from CoinAPI
+    day = "2025-01-02"
+    bad = _day(day, "lake_present_degraded",
+               _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                           full_day_reason="quality_over_usable_bar",
+                           fill_segments=[_full_day_seg(day, source="lake")],
+                           seams=[], seam_policy={"seam_guard_s": 60.0}))
+    assert "fill_day_missing_coinapi_segment" in rv.day_record_issues(bad)
+    # a full_day_fill mixing coinapi + a non-coinapi segment is also flagged
+    o, e = _day_bounds(day)
+    mid = o + rv.DAY_NS // 2
+    mixed = _day(day, "lake_present_degraded",
+                 _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                             full_day_reason="quality_over_usable_bar",
+                             fill_segments=[{"source": "coinapi", "start_ts": o, "start_iso": _seg_iso(o),
+                                             "end_ts": mid, "end_iso": _seg_iso(mid), "reason": "r"},
+                                            {"source": "lake", "start_ts": mid, "start_iso": _seg_iso(mid),
+                                             "end_ts": e, "end_iso": _seg_iso(e), "reason": "r"}],
+                             seams=[mid], seam_policy={"seam_guard_s": 60.0}))
+    assert "full_day_fill_non_coinapi_segment" in rv.day_record_issues(mixed)
+    # a legit single-coinapi full-day plan stays clean
+    ok = _day(day, "lake_present_degraded",
+              _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                          full_day_reason="quality_over_usable_bar",
+                          fill_segments=[_full_day_seg(day)], seams=[],
+                          seam_policy={"seam_guard_s": 60.0}))
+    assert not any("coinapi_segment" in i for i in rv.day_record_issues(ok))
+
+
 def test_day_record_issues_scalar_seams_no_crash():
     # a corrupt non-list `seams` (e.g. a scalar) must fail closed, not crash on list(seams)
     day = "2025-01-02"
@@ -537,6 +576,16 @@ def test_summary_counts_consistent_ok_and_mismatch():
     rep_bad = _clean_reports()[0]
     rep_bad["summary"]["counts"]["lake_usable"] = 99
     assert rv.summary_count_issues(rep_bad) != []
+
+
+def test_summary_counts_non_numeric_is_mismatch_not_crash():
+    # Fix 3: int() over an untrusted non-numeric count previously crashed; now it's a mismatch
+    rep = _clean_reports()[0]
+    rep["summary"]["counts"]["lake_usable"] = "many"
+    rep["summary"]["coinapi_fill"]["fill_counts"]["needs_fill"] = [1]
+    issues = rv.summary_count_issues(rep)   # must not raise
+    assert any("summary_counts_mismatch:lake_usable" in i for i in issues)
+    assert any("fill_counts_mismatch:needs_fill" in i for i in issues)
 
 
 # =========================================================================== Task 7: day record
@@ -729,6 +778,18 @@ def test_completeness_missing_out_dir_fails_closed(tmp_path):
     assert any("days-file" in x for x in blockers["batch_incomplete"])
 
 
+def test_load_batch_reports_rejects_non_string_day(tmp_path):
+    # Fix 5: a numeric report `day` would make _universe's sorted() crash on a mixed int/str set
+    plan_path, cal_path = _write_tree(tmp_path)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    rpath = os.path.join(plan["batches"][0]["report_dir"], "coinbase_quality_map.json")
+    rep = json.loads(_pl.Path(rpath).read_text())
+    rep["days"][0]["day"] = 20250101
+    _pl.Path(rpath).write_text(json.dumps(rep))
+    with pytest.raises(rv.ReviewInputError, match="day must be a string"):
+        rv.load_batch_reports(plan)
+
+
 def test_completeness_duplicate_day_across_batches_blocks(tmp_path):
     reports = [_report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))]),
                _report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])]
@@ -799,6 +860,31 @@ def test_calendar_drift_missing_context_blocks():
     blockers2 = rv.new_blockers()
     rv.check_calendar_drift([{"report": {"days": [rec2]}}], cal, blockers2)
     assert any("missing_in_lake_all_days" in x for x in blockers2["calendar_drift"])
+
+
+def test_check_report_fill_availability_blocks_unverified_report_fill():
+    # Fix 1: a report-driven needs_fill day whose report coinapi.fillable != True must block
+    day_index = {
+        "d1": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": False}},
+        "d2": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": True}},
+        "d3": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": None}},
+        "d4": {"coinapi_fill": {"needs_fill": False}, "coinapi": {"fillable": None}},
+    }
+    blockers = rv.new_blockers()
+    rv.check_report_fill_availability(day_index, blockers)
+    assert set(blockers["book_fill_unavailable"]) == {
+        "d1:report_coinapi_fillable_not_true", "d3:report_coinapi_fillable_not_true"}
+
+
+def test_readiness_blocks_report_fill_without_availability(tmp_path):
+    reports = _clean_reports()
+    reports[0]["days"][1]["coinapi"]["fillable"] = None   # 2025-01-02 degraded fill, unverified
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    assert m["meta"]["status"] == "blocking"
+    assert any("report_coinapi_fillable_not_true" in x
+               for x in m["blockers"]["book_fill_unavailable"])
 
 
 def test_fill_availability_blocks_unfillable_book_and_trade():
@@ -952,6 +1038,19 @@ def test_cli_input_error_exit_2(tmp_path):
     rc = rv.main(["--plan-manifest", str(tmp_path / "nope.json"),
                   "--out", str(tmp_path / "m.json")])
     assert rc == rv.INPUT_ERROR_EXIT
+
+
+def test_cli_nonfinite_input_fails_closed_without_touching_out(tmp_path):
+    # Fix 4: a NaN size must fail closed at load (exit 2) BEFORE write_manifest truncates --out
+    cal = _calendar()
+    cal["fill_status"]["2025-01-10"]["book"]["mb"] = float("nan")
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal)
+    out = tmp_path / "existing_manifest.json"
+    out.write_text('{"prior": "good manifest"}')   # a prior good artifact that must NOT be destroyed
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(out),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.INPUT_ERROR_EXIT
+    assert json.loads(out.read_text()) == {"prior": "good manifest"}   # untouched
 
 
 def test_cli_requires_exactly_one_mode():

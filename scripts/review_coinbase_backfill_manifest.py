@@ -96,12 +96,18 @@ def sha256_file(path: str) -> str:
 
 def load_json_object(path: str, *, what: str) -> dict:
     """Load a JSON object or raise a clear ReviewInputError. Fail-closed: a missing/invalid/
-    non-object input is a structural error (exit 2), never a silent default."""
+    non-object input is a structural error (exit 2), never a silent default. Bare NaN/Infinity
+    tokens (which json.load accepts by default) are rejected here at the boundary, before any build
+    or file write — otherwise a non-finite size would crash write_manifest AFTER it truncated --out."""
     if not os.path.exists(path):
         raise ReviewInputError(f"{what} not found: {path}")
+
+    def _reject_nonfinite(token):
+        raise ReviewInputError(f"{what} {path} contains a non-finite JSON constant ({token}); "
+                               "NaN/Infinity are not allowed")
     try:
         with open(path) as f:
-            obj = json.load(f)
+            obj = json.load(f, parse_constant=_reject_nonfinite)
     except json.JSONDecodeError as e:
         raise ReviewInputError(f"{what} {path} is not valid JSON: {e}") from None
     if not isinstance(obj, dict):
@@ -344,6 +350,15 @@ def day_record_issues(rec: dict) -> list:
         else:
             # segments must partition the day AND seams must match their source-change boundaries
             issues.extend(_fill_segments_issues(rec.get("day"), segs, cf.get("seams")))
+            # a fill plan must actually PULL from CoinAPI: require >=1 coinapi segment, and a
+            # full_day_fill must be entirely coinapi (single-coinapi by construction). Otherwise a
+            # stale lake-only "full_day_fill" would pass review as an executable fill that downloads
+            # nothing from CoinAPI.
+            srcs = [s.get("source") for s in segs if isinstance(s, dict)]
+            if "coinapi" not in srcs:
+                issues.append("fill_day_missing_coinapi_segment")
+            elif prof == FULL_DAY_FILL and any(src != "coinapi" for src in srcs):
+                issues.append("full_day_fill_non_coinapi_segment")
         if not isinstance(cf.get("seams"), list):        # may be empty (full_day) but never null
             issues.append("fill_day_missing_seams")
         if not isinstance(cf.get("seam_policy"), dict):
@@ -396,7 +411,9 @@ def summary_count_issues(report: dict) -> list:
     want = recompute_class_counts(days)
     issues = []
     for c in CLASSES:
-        if int(got.get(c, 0)) != want[c]:
+        # compare raw (no int() coercion): a non-numeric/None/list count from untrusted input then
+        # becomes a normal mismatch blocker rather than an uncaught ValueError/TypeError (want[c] is int)
+        if got.get(c, 0) != want[c]:
             issues.append(f"summary_counts_mismatch:{c}:summary={got.get(c)}:recomputed={want[c]}")
     fc_got = _as_dict(summary.get("coinapi_fill")).get("fill_counts")
     if not isinstance(fc_got, dict):
@@ -404,7 +421,7 @@ def summary_count_issues(report: dict) -> list:
         issues.append("summary_fill_counts_missing")
     else:   # a stale fill_counts from a prior run must not pass review
         for k, v in _recompute_fill_counts(days).items():
-            if int(fc_got.get(k, 0)) != v:
+            if fc_got.get(k, 0) != v:   # raw compare (no int()): non-numeric -> mismatch, not a crash
                 issues.append(f"fill_counts_mismatch:{k}:summary={fc_got.get(k)}:recomputed={v}")
     return issues
 
@@ -563,6 +580,10 @@ def load_batch_reports(plan: dict) -> tuple:
                 raise ReviewInputError(f"{rpath}: report 'days' must contain objects, got "
                                        f"{type(rec).__name__}")
             d = rec.get("day")
+            if not isinstance(d, str):
+                # a non-string day (e.g. numeric 20250102 or null) would make _universe's sorted()
+                # raise TypeError over a mixed int/str set — fail closed here (exit 2) instead.
+                raise ReviewInputError(f"{rpath}: report day must be a string, got {type(d).__name__}")
             if d in day_index:
                 raise ReviewInputError(f"day {d} appears in more than one batch report "
                                        "(duplicate_across_batches); batch day-sets must be disjoint")
@@ -722,6 +743,18 @@ def check_fill_availability(cal: dict, blockers: dict) -> None:
             blockers["trade_fill_unavailable"].append(d)
 
 
+def check_report_fill_availability(day_index: dict, blockers: dict) -> None:
+    """Every REPORT-driven book fill (a mapped day with coinapi_fill.needs_fill True) must have the
+    report's own CoinAPI availability flag `coinapi.fillable` True. A present-but-degraded/crossed-
+    seed day is never a calendar book-gap, so `check_fill_availability` never sees it; without this
+    a degraded day whose CoinAPI replacement is unavailable would reach `ready` and authorize an
+    unfillable backfill."""
+    for d, rec in day_index.items():
+        cf = _as_dict(rec.get("coinapi_fill"))
+        if cf.get("needs_fill") is True and _as_dict(rec.get("coinapi")).get("fillable") is not True:
+            blockers["book_fill_unavailable"].append(f"{d}:report_coinapi_fillable_not_true")
+
+
 # ----------------------------------------------------------- sections + cost summary + assembly
 def _sections(days: list) -> dict:
     sec = {"full_day_book_fills": [], "partial_day_book_fills": [], "trade_fills": [],
@@ -858,6 +891,7 @@ def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only)
     check_report_consistency(reports, blockers)
     check_calendar_drift(reports, cal, blockers)
     check_fill_availability(cal, blockers)
+    check_report_fill_availability(day_index, blockers)
 
     days = [build_day_record(d, day_index.get(d), cal) for d in _universe(reports, cal)]
     sections, cost = _sections(days), _cost_summary(days, cal)
