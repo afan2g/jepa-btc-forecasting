@@ -708,7 +708,14 @@ local lakeapi cache; vendor counter may lag ~60 min). Those two quality-map runs
   gate reconstructed BOTH vendors on the 1 s grid and compared the post-seam OVERLAP. The Lake side is
   warmup-gated to `trusted_lake_start_ts` = **14:45:03Z** (bit-identical to the quality-map seam and the
   `fill_segments` boundary), so the compared grid is **33,287 / 86,400** points (53,103 pre-seam +
-  10 crossed-Lake samples excluded, reported transparently). **The stitch is clean.** The handoff is
+  10 crossed-Lake samples excluded). Those are the parity gate's *only* comparison exclusions
+  (`since_ts`/warmup + crossed-Lake, `scripts/run_coinbase_parity.py`); it does **not** apply the
+  `seam_guard_s`=60 s band, so the compared grid still spans the 60 seam-adjacent samples
+  `[14:45:03Z, 14:46:03Z)` and any label origins whose windows touch the seam. Production stitching
+  additionally masks that ±60 s guard and every seam-crossing label/feature window (plan Q4/Q6) — but
+  because the seam-adjacent window is clean (0 |Δmid| spikes >$50 in the first 5 min, below), that extra
+  masking removes only clean samples, so the metrics here are **not** inflated by seam settling; they are
+  if anything conservative relative to the guarded training window. **The stitch is clean.** The handoff is
   discontinuity-free — the first 5 min after 14:45:03Z carry **0** |Δmid| spikes >$50, with both vendors'
   mids tracking within single-digit dollars (many exact $0.00 matches); both Lake reseeds (17:51:47Z,
   22:33:59Z) are far from the seam and clean (±30 s max $9.84–$38.57, 0 spikes >$50). Overlap parity meets
