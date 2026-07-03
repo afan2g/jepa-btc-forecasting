@@ -46,9 +46,17 @@ def test_classify_error():
     assert dl.classify_error(ValueError("schema drift: unknown column")) == "fatal"
 
 
+def test_classify_error_s3_500_is_transient():
+    # botocore surfaces a retryable HTTP 500 as `An error occurred (500) ...: Internal Server Error`
+    msg = "An error occurred (500) when calling the GetObject operation: Internal Server Error"
+    assert dl.classify_error(RuntimeError(msg)) == "transient"
+    assert dl.classify_error(RuntimeError("An error occurred (503) when calling ...")) == "transient"
+
+
 def test_classify_error_markers_are_not_over_broad():
     assert dl.classify_error(ValueError("expected 500 columns, got 12")) == "fatal"
     assert dl.classify_error(ValueError("malformed row 5040")) == "fatal"
+    assert dl.classify_error(ValueError("byte offset 502341 invalid")) == "fatal"   # not (502)
     assert dl.classify_error(RuntimeError("Please reduce your request rate")) == "transient"
 
 

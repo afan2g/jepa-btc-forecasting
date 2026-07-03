@@ -90,8 +90,9 @@ class TransientError(RuntimeError):
 # stringly-typed ingest/_common.is_quota_error). Explicit Quota/Auth/TransientError bypass these.
 # Markers are context-specific on purpose: BARE HTTP codes ("500"/"503"/"403") are deliberately
 # excluded — they match unrelated text ("row 5000", "expected 500 columns") and would misclassify a
-# fatal error; the named conditions already cover them. Quota markers avoid the bare "you have
-# exceeded" (matches rate-limit throttles).
+# fatal error. The PARENTHESIZED forms ("(500)") ARE matched: they are botocore's `An error occurred
+# (500) ...` shape and cannot appear in "row 5000"/"expected 500 columns". Quota markers avoid the
+# bare "you have exceeded" (matches rate-limit throttles).
 _QUOTA_MARKERS = ("quotaexceeded", "quota exceeded", "insufficient usage credits",
                   "download quota", "no usable credit", "exceeded your quota",
                   "exceeded your download")
@@ -103,7 +104,8 @@ _TRANSIENT_MARKERS = ("slowdown", "slow down", "throttl", "reduce your request r
                       "requesttimeout", "request timeout", "timed out", "timeout",
                       "connection reset", "connectionreset", "connection aborted",
                       "serviceunavailable", "service unavailable", "bad gateway",
-                      "gateway timeout", "internalerror", "internal error", "temporarily")
+                      "gateway timeout", "internalerror", "internal error",
+                      "internal server error", "(500)", "(502)", "(503)", "(504)", "temporarily")
 
 
 def classify_error(exc: BaseException) -> str:
