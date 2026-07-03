@@ -227,6 +227,13 @@ def sorted_engine_clock(df: pd.DataFrame) -> pd.Series:
     return clock.sort_values(kind="mergesort")
 
 
+def _clock_or_sort(df: pd.DataFrame, clock: pd.Series | None) -> pd.Series:
+    """The caller-supplied pre-sorted engine clock, or `sorted_engine_clock(df)` when called
+    standalone. `compute_metrics` sorts ONCE and threads the result through every time-based metric so
+    the dominant O(n log n) stable sort isn't repeated ~6× on a multi-GB live day."""
+    return sorted_engine_clock(df) if clock is None else clock
+
+
 def monotonic_after_sort(df: pd.DataFrame) -> bool:
     """Whether the post-fallback engine clock is non-decreasing after the stable sort, treating any
     residual `NaT`/sentinel (`< 2015-01-01`) as INVALID — an unresolvable clock never reads as
@@ -258,10 +265,10 @@ def dup_trade_ids(df: pd.DataFrame) -> dict:
             "dup_trade_id_frac": _f(count / n) if n else 0.0}
 
 
-def dup_timestamp_clusters(df: pd.DataFrame) -> dict:
+def dup_timestamp_clusters(df: pd.DataFrame, clock: pd.Series | None = None) -> dict:
     """Duplicate engine-clock (`origin_time`) cluster metrics (§4 row 7): the number of distinct
     same-ns timestamps with count>1, and the max multiplicity."""
-    clock = sorted_engine_clock(df)
+    clock = _clock_or_sort(df, clock)
     if clock.empty:
         return {"dup_ts_cluster_count": 0, "dup_ts_max_cluster": 0}
     counts = clock.value_counts()
@@ -270,24 +277,25 @@ def dup_timestamp_clusters(df: pd.DataFrame) -> dict:
             "dup_ts_max_cluster": int(counts.max())}
 
 
-def _abs_returns(df: pd.DataFrame) -> np.ndarray:
+def _abs_returns(df: pd.DataFrame, clock: pd.Series | None = None) -> np.ndarray:
     """`abs(price.pct_change())` on the price series ordered by the engine clock (§4 row 9). Division
     warnings on a corrupt zero price are suppressed — the zero itself is caught by `price_out_of_range`
     and the resulting inf still trips `price_spike`."""
-    order = sorted_engine_clock(df).index
+    order = _clock_or_sort(df, clock).index
     price = df.loc[order, "price"].to_numpy(dtype="float64")
     with np.errstate(divide="ignore", invalid="ignore"):
         rets = np.abs(np.diff(price) / price[:-1])
     return rets
 
 
-def price_checks(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS) -> dict:
+def price_checks(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS,
+                 clock: pd.Series | None = None) -> dict:
     """Price sanity metrics (§4 row 9): min/max/median, p99 AND max of consecutive abs-return, and the
     count of prices outside the robust `[median/factor, median×factor]` band (an isolated corrupt print
     the p99 misses)."""
     price = df["price"].to_numpy(dtype="float64")
     median = float(np.nanmedian(price)) if len(price) else float("nan")
-    rets = _abs_returns(df)
+    rets = _abs_returns(df, clock)
     finite = rets[np.isfinite(rets)]
     p99 = float(np.quantile(finite, 0.99)) if finite.size else 0.0
     max_ret = float(np.nanmax(rets)) if rets.size and np.isfinite(rets).any() else (
@@ -331,9 +339,9 @@ def notional_checks(df: pd.DataFrame) -> dict:
             "notional_max_trade": _f(np.nanmax(notional)) if len(notional) else float("nan")}
 
 
-def interarrival(df: pd.DataFrame) -> dict:
+def interarrival(df: pd.DataFrame, clock: pd.Series | None = None) -> dict:
     """Inter-arrival gap summary on the sorted engine clock (§4 row 12): median/p95/p99/max seconds."""
-    clock = sorted_engine_clock(df)
+    clock = _clock_or_sort(df, clock)
     if len(clock) < 2:
         return {"interarrival_median_s": 0.0, "interarrival_p95_s": 0.0,
                 "interarrival_p99_s": 0.0, "interarrival_max_s": 0.0}
@@ -345,11 +353,12 @@ def interarrival(df: pd.DataFrame) -> dict:
             "interarrival_max_s": _f(np.max(secs))}
 
 
-def hour_coverage(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS) -> dict:
+def hour_coverage(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS,
+                  clock: pd.Series | None = None) -> dict:
     """UTC-hour coverage of the engine clock (§4 row 13): fully-empty hours (missing) and non-empty
     hours below `sparse_hour_min_rows` (sparse). Computed on the post-fallback clock so substituted
     rows land in their real hour, not 1970 (the P2 clock fix)."""
-    clock = sorted_engine_clock(df)
+    clock = _clock_or_sort(df, clock)
     if clock.empty:
         return {"missing_hour_count": 24, "sparse_hour_count": 0,
                 "missing_hours": list(range(24)), "sparse_hours": []}
@@ -378,13 +387,13 @@ def lag_metrics(df: pd.DataFrame) -> dict:
             "recv_origin_lag_neg_frac": _f(np.mean(lag_ms < 0))}
 
 
-def off_day_frac(df: pd.DataFrame, day: str | None) -> float | None:
+def off_day_frac(df: pd.DataFrame, day: str | None, clock: pd.Series | None = None) -> float | None:
     """Fraction of resolved engine-clock rows that fall OUTSIDE the requested UTC `day`
     `[00:00, next-00:00)` (§1 existence). A correct day partition is ≈0; a wholly mislabeled
     partition is ≈1. `None` when no `day` is supplied (metric N/A)."""
     if day is None:
         return None
-    clock = sorted_engine_clock(df)
+    clock = _clock_or_sort(df, clock)
     if clock.empty:
         return 0.0
     start = pd.Timestamp(day)
@@ -408,8 +417,12 @@ def compute_metrics(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS,
     """All §4 per-frame metrics on the loaded frame (after the §5 sort). Every float is plain-python;
     report-time `_json_safe` nulls any non-finite value. `day` (when supplied) enables the §1
     existence `off_day_frac` check that the frame is actually the requested UTC date."""
-    clock = sorted_engine_clock(df)
-    _, origin_null, unresolved = build_engine_clock(df)
+    # Build the engine clock + sort ONCE, then thread the sorted clock through every time-based metric
+    # (dup-ts, price abs-returns, inter-arrival, hour coverage, off-day) so the dominant stable sort
+    # runs a single time on a multi-GB day. `monotonic_after_sort` reduces to "no unresolved rows"
+    # (the sorted resolved clock is always non-decreasing), so it needs no extra sort here.
+    clock_full, origin_null, unresolved = build_engine_clock(df)
+    clock = clock_full[~unresolved].sort_values(kind="mergesort")
     rcol = _received_col(df)
     m = {
         "row_count": int(len(df)),
@@ -419,19 +432,19 @@ def compute_metrics(df: pd.DataFrame, thresholds: TradeThresholds = THRESHOLDS,
         "received_time_available": rcol is not None,
         "received_time_null_frac": (_f(_null_ts_mask(df[rcol]).mean())
                                     if rcol is not None and len(df) else None),
-        "monotonic_after_sort": monotonic_after_sort(df),
+        "monotonic_after_sort": not bool(unresolved.any()),
         "was_presorted": was_presorted(df),
         "used_received_time_fallback": bool(origin_null.any()),
         "engine_clock_unresolved_count": int(unresolved.sum()),
-        "off_day_frac": off_day_frac(df, day),
+        "off_day_frac": off_day_frac(df, day, clock=clock),
     }
-    m.update(dup_timestamp_clusters(df))
+    m.update(dup_timestamp_clusters(df, clock=clock))
     m.update(dup_trade_ids(df))
-    m.update(price_checks(df, thresholds))
+    m.update(price_checks(df, thresholds, clock=clock))
     m.update(size_checks(df))
     m.update(notional_checks(df))
-    m.update(interarrival(df))
-    m.update(hour_coverage(df, thresholds))
+    m.update(interarrival(df, clock=clock))
+    m.update(hour_coverage(df, thresholds, clock=clock))
     m.update(lag_metrics(df))
     m.update(side_values(df))
     return m
