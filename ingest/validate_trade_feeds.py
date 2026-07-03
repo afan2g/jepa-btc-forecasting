@@ -74,16 +74,24 @@ REPORT_NAME = "trade_feed_validation.json"
 
 
 # --------------------------------------------------------------------------- day / venue resolution
+def _canonical_day(token: str) -> str:
+    """Validate and CANONICALIZE a day token to `YYYY-MM-DD`. `date.fromisoformat` (≥3.11) accepts
+    non-canonical ISO forms (basic `20240806`, week dates), but the usable-calendar keys are all
+    `YYYY-MM-DD`; keeping a raw token would make a known fill/excluded day miss its calendar entry
+    and route as a required Lake day. A malformed token raises `ValueError` (fail fast)."""
+    return dt.date.fromisoformat(token).isoformat()
+
+
 def _validate_days(tokens) -> list[str]:
-    """Validate each token is an ISO `YYYY-MM-DD` date and de-dupe, preserving first-seen order.
-    A malformed date raises `ValueError` (fail fast rather than silently mislabel a partition)."""
+    """Canonicalize each token to `YYYY-MM-DD` and de-dupe on the canonical key, preserving
+    first-seen order. A malformed date raises `ValueError`."""
     seen: set[str] = set()
     out: list[str] = []
     for t in tokens:
-        dt.date.fromisoformat(t)                     # raises ValueError on a malformed day
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
+        iso = _canonical_day(t)
+        if iso not in seen:
+            seen.add(iso)
+            out.append(iso)
     return out
 
 
@@ -126,15 +134,18 @@ def resolve_days(args, cal: dict | None) -> tuple[list[str], str]:
     """Resolve the `(days, selection_mode)` per the §3 precedence (first match wins):
     `--days` → `--days-file` → `--start/--end` (in-range regime cohort + seeded stratified sample of
     `--sample-n` usable days) → the safe 5-day default sample. Bounded by design: no broad default."""
-    if args.days:
+    # `is not None` (not truthiness): an EXPLICITLY-provided-but-empty selector (`--days ""` from an
+    # unset shell var) must resolve to [] and hit the empty-selection guard, NOT silently fall
+    # through to the default sample and pull data on a live run.
+    if args.days is not None:
         return _validate_days(t.strip() for t in args.days.split(",") if t.strip()), "explicit_days"
-    if args.days_file:
-        text = pathlib.Path(args.days_file).read_text()
+    if args.days_file is not None:
+        text = pathlib.Path(args.days_file).read_text() if args.days_file else ""
         toks = (t.strip() for line in text.splitlines() for t in line.split(",") if t.strip())
         return _validate_days(toks), "days_file"
     if args.start:
-        start, end = args.start, args.end
-        dt.date.fromisoformat(start), dt.date.fromisoformat(end)   # validate the range endpoints
+        start = _canonical_day(args.start)                        # canonicalize the range endpoints
+        end = _canonical_day(args.end)                            # so YYYY-MM-DD string compares hold
         cohort = [d for d in REGIME_COHORT if start <= d <= end]
         usable = [d for d in (cal or {}).get("usable_days", []) if start <= d <= end]
         sample = stratified_sample_days([d for d in usable if d not in cohort],

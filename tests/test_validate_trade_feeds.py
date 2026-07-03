@@ -115,6 +115,32 @@ def test_days_file_is_read(tmp_path):
     assert mode == "days_file"
 
 
+def test_explicit_but_empty_selector_is_not_silently_defaulted(tmp_path):
+    # `--days ""` (e.g. `--days "$UNSET"`) is an EXPLICIT-but-empty selection: it must NOT fall
+    # through to the 5-day default sample (which would pull data on a live run). It resolves to []
+    # under the explicit branch and hits the empty-selection guard → main() exit 2.
+    days, mode = vf.resolve_days(vf.parse_args(["--days", ""]), cal=None)
+    assert days == [] and mode == "explicit_days"
+    assert vf.main(["--days", "", "--calendar", str(tmp_path / "none.json")]) == 2
+    # same for an explicitly-empty --days-file
+    days2, mode2 = vf.resolve_days(vf.parse_args(["--days-file", ""]), cal=None)
+    assert days2 == [] and mode2 == "days_file"
+
+
+def test_day_tokens_are_canonicalized_to_iso_yyyy_mm_dd():
+    # date.fromisoformat (≥3.11) accepts basic-format 20240806, but the usable-calendar keys are
+    # YYYY-MM-DD; an un-canonicalized token would mis-route a known fill/excluded day as required.
+    import datetime as _dt
+    try:
+        _dt.date.fromisoformat("20240806")
+    except ValueError:
+        pytest.skip("interpreter's date.fromisoformat rejects basic-format dates (<3.11)")
+    days, _ = vf.resolve_days(vf.parse_args(["--days", "20240806,2025-06-01"]), cal=None)
+    assert days == ["2024-08-06", "2025-06-01"]          # canonicalized to YYYY-MM-DD
+    days2, _ = vf.resolve_days(vf.parse_args(["--days", "2024-08-06,20240806"]), cal=None)
+    assert days2 == ["2024-08-06"]                       # two spellings dedupe to one canonical key
+
+
 def test_range_selection_is_deterministic_and_reproducible():
     cal = {"usable_days": ([f"2024-{m:02d}-{d:02d}" for m in range(7, 13) for d in range(1, 28)]
                            + [f"2026-01-{d:02d}" for d in range(1, 28)]
