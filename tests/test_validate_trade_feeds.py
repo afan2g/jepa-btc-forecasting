@@ -62,11 +62,18 @@ def _write_cal(tmp_path, cal):
 
 # --------------------------------------------------------------------------- 1. import is vendor-free
 def test_import_does_not_touch_lakeapi_or_boto3():
-    # Importing the wrapper must NOT import lakeapi/boto3 (they load only inside the live seam);
-    # main() must exist and be callable (its live work guarded under __main__).
+    # Importing the wrapper must NOT import lakeapi/boto3 (they load only inside the live seam).
+    # Assert on the DELTA of a reload, not global sys.modules membership: another test module in a
+    # full-suite run (e.g. test_verify_script → scripts.verify_book_delta_v2) imports the vendor
+    # clients at module scope, so a bare `"lakeapi" not in sys.modules` is order-dependent. Re-running
+    # the wrapper's module body must add NEITHER client. (The fresh-interpreter subprocess test below
+    # is the authoritative, fully-isolated guarantee.)
+    import importlib
+    before = {m for m in ("lakeapi", "boto3") if m in sys.modules}
+    importlib.reload(vf)
+    after = {m for m in ("lakeapi", "boto3") if m in sys.modules}
+    assert after == before                           # reloading the wrapper imported no vendor client
     assert callable(vf.main)
-    assert "lakeapi" not in sys.modules
-    assert "boto3" not in sys.modules
 
 
 def test_import_is_vendor_free_in_a_fresh_interpreter():
