@@ -14,12 +14,16 @@ import pathlib
 import subprocess
 import sys
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
-from ingest import download_lake_binance as dl
-from ingest import lake_binance as lb
+# pyarrow is a downloader-only dep (pyproject `baseline` extra), NOT a base dependency — skip this
+# whole module (rather than error at collection) when the default suite runs without it. The pure
+# helpers in ingest.lake_binance / download_lake_binance need only pandas, imported after this gate.
+pa = pytest.importorskip("pyarrow")
+pq = pytest.importorskip("pyarrow.parquet")
+
+from ingest import download_lake_binance as dl  # noqa: E402
+from ingest import lake_binance as lb  # noqa: E402
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 PERP = ("BINANCE_FUTURES", "BTC-USDT-PERP")
@@ -391,6 +395,19 @@ def test_run_reversed_date_range_exits_2(tmp_path):
                     "--start", "2026-04-02", "--end", "2026-04-01", "--out", str(tmp_path / "raw"),
                     "--report-dir", str(tmp_path / "rep")],
                    reader=_perp_reader(), used_data_fn=lambda: 0.0)
+    assert code == 2
+
+
+def test_run_live_setup_failure_exits_2(tmp_path, monkeypatch):
+    # with no injected reader/used_data_fn, main() builds the live session; a setup failure (missing
+    # AWS keys, or boto3 absent) must return the documented exit 2, not raise / exit 1.
+    def _boom(*a, **k):
+        raise RuntimeError("Crypto Lake AWS key 'aws_access_key_id' not found")
+    monkeypatch.setattr(dl, "lake_session", _boom)
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",
+                    "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   sleep=lambda *_: None)               # no reader, no used_data_fn → forces session
     assert code == 2
 
 

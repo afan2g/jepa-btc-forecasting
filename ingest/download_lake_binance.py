@@ -339,8 +339,10 @@ def lake_session(env_path: str = ".env"):
             region_name=env.get("region", "eu-west-1"),
         )
     except KeyError as e:
-        raise SystemExit(f"Crypto Lake AWS key {e} not found in .env or environment "
-                         "(need aws_access_key_id and aws_secret_access_key).") from None
+        # A normal exception (NOT SystemExit) so main() maps it to the documented setup exit 2,
+        # rather than a bare SystemExit propagating as exit 1 / breaking the 0/2/3/4 contract.
+        raise RuntimeError(f"Crypto Lake AWS key {e} not found in .env or environment "
+                           "(need aws_access_key_id and aws_secret_access_key).") from None
 
 
 def used_gb_from_response(resp) -> float:
@@ -524,16 +526,20 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
 
-    # ---- session + used_data telemetry (fail-safe: unreadable used_data → exit 2) ---------------
-    session = None
-    if used_data_fn is None or (reader is None and not args.dry_run) or (lister is None and args.dry_run):
-        session = lake_session()                                    # live path (approval-gated)
-    if used_data_fn is None:
-        used_data_fn = lambda: _live_used_gb(session)               # noqa: E731
+    # ---- session + used_data telemetry (fail-safe → exit 2: missing keys/deps OR unreadable
+    # used_data — never proceed blind; live session construction is inside the guard too so a
+    # missing AWS key / boto3 returns the documented setup exit, not a traceback / exit 1) --------
     try:
+        session = None
+        if (used_data_fn is None or (reader is None and not args.dry_run)
+                or (lister is None and args.dry_run)):
+            session = lake_session()                                # live path (approval-gated)
+        if used_data_fn is None:
+            used_data_fn = lambda: _live_used_gb(session)           # noqa: E731
         used_gb = float(used_data_fn())
     except Exception as e:                                          # noqa: BLE001 — fail safe, do not proceed blind
-        print(f"ERROR: could not read Lake used_data (fail-safe): {e}", file=sys.stderr)
+        print(f"ERROR: Lake setup failed or used_data unreadable (fail-safe, exit 2): {e}",
+              file=sys.stderr)
         return SETUP_ERROR_EXIT
 
     # ---- quota / broad-pull gate BEFORE any transfer (may SystemExit(4)) ------------------------
