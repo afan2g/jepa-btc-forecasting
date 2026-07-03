@@ -371,6 +371,24 @@ def test_day_record_issues_missing_keys():
     assert "missing_key:coinapi_fill" in issues
 
 
+def test_day_record_issues_non_bool_needs_fill():
+    # needs_fill=1 equals True under ==, but build_day_record's `is True` would drop the fill
+    rec = _day("2025-01-02", "lake_present_degraded",
+               {"needs_fill": 1, "why": "quality_over_usable_bar", "fill_profile": None,
+                "full_day_reason": None, "fill_segments": None, "seams": None, "seam_policy": None})
+    assert any("non_bool_needs_fill" in i for i in rv.day_record_issues(rec))
+
+
+def test_readiness_blocks_non_bool_needs_fill(tmp_path):
+    reports = _clean_reports()
+    reports[0]["days"][1]["coinapi_fill"]["needs_fill"] = 1   # 2025-01-02 degraded, numeric needs_fill
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    assert m["meta"]["status"] == "blocking"
+    assert any("non_bool_needs_fill" in x for x in m["blockers"]["inconsistencies"])
+
+
 def test_day_record_issues_fill_day_requires_stitch_plan():
     # a fill day (needs_fill=True, real profile) missing the executable stitch plan must be flagged
     bad = _day("d", "lake_present_degraded",

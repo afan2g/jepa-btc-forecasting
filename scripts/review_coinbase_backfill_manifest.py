@@ -302,6 +302,10 @@ def day_record_issues(rec: dict) -> list:
     if "classification" in rec and cls not in CLASSES:
         issues.append(f"unknown_classification:{cls}")
     nf, why = cf.get("needs_fill"), cf.get("why")
+    # needs_fill must be strictly true/false/null: a JSON number like 1 equals True under ==, so the
+    # contract check would pass, but build_day_record uses `is True` and would silently drop the fill.
+    if nf is not None and not isinstance(nf, bool):
+        issues.append(f"non_bool_needs_fill:{nf!r}")
     prof, fdr = cf.get("fill_profile"), cf.get("full_day_reason")
     if why is not None and why not in WHY_CODES:
         issues.append(f"unknown_why:{why}")
