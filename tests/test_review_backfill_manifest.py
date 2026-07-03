@@ -663,6 +663,13 @@ def test_day_record_issues_fill_decision_contradicts_classification():
                        reasons=["no_seed_snapshots"])
     assert any(i.startswith("fill_decision_contradicts_classification")
                for i in rv.day_record_issues(bad_crossed))
+    # reasons as a STRING (substring-matches the marker) must NOT satisfy the crossed-source contract
+    str_reasons = _day("d", "inconclusive",
+                       _fill_block(True, "crossed_seed_source_cross_validated_2026-07-01",
+                                   fill_profile="full_day_fill", full_day_reason="crossed_seed_source"),
+                       reasons="seed_accepted_but_source_unreliable")
+    assert any(i.startswith("fill_decision_contradicts_classification")
+               for i in rv.day_record_issues(str_reasons))
 
 
 # =========================================================================== Task 6: counts

@@ -316,8 +316,10 @@ def _fill_contract_issue(cls, needs_fill, why, reasons):
     elif cls == INCONCLUSIVE:
         if (needs_fill, why) == _CROSSED_SOURCE_FILL:
             # the crossed-source fill path is only legitimate when the reason marks it — otherwise a
-            # stale report could convert a no_verdict blocker into an approved fill.
-            if _SEED_SOURCE_UNRELIABLE not in (reasons or ()):
+            # stale report could convert a no_verdict blocker into an approved fill. reasons must be a
+            # list/tuple of codes (the runner routes via `set(reasons)`); a bare string would
+            # substring-match the marker and falsely pass.
+            if not (isinstance(reasons, (list, tuple)) and _SEED_SOURCE_UNRELIABLE in reasons):
                 return (f"fill_decision_contradicts_classification:{cls}:crossed_source_fill_without_"
                         f"{_SEED_SOURCE_UNRELIABLE}")
         elif (needs_fill, why) != (None, "no_verdict"):
