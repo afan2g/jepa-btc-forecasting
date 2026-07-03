@@ -261,6 +261,16 @@ def day_record_issues(rec: dict) -> list:
         q = rec.get("quality") or {}
         if q.get("trusted_lake_start_ts") is not None or q.get("trusted_lake_end_ts") is not None:
             issues.append("full_day_with_trusted_lake_span")
+    # a fill day must carry an EXECUTABLE stitch plan (segments partition the day; spec §9 #3).
+    # The runner always emits these for a needs_fill day; their absence is a corrupt report that
+    # would otherwise pass an approved fill with no plan for the backfill runner to execute.
+    if nf is True and prof not in (None, LAKE_ONLY):
+        if not isinstance(cf.get("fill_segments"), list) or not cf.get("fill_segments"):
+            issues.append("fill_day_missing_fill_segments")
+        if not isinstance(cf.get("seams"), list):        # may be empty (full_day) but never null
+            issues.append("fill_day_missing_seams")
+        if not isinstance(cf.get("seam_policy"), dict):
+            issues.append("fill_day_missing_seam_policy")
     # the fill decision must match the classification it was derived from (never drop/invent a fill)
     contract = _fill_contract_issue(cls, nf, why)
     if contract is not None:

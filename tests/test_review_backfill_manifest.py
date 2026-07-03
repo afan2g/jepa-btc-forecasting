@@ -286,7 +286,10 @@ def test_report_missing_keys():
 def test_day_record_issues_clean():
     rec = _day("2025-01-02", "lake_present_degraded",
                _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
-                           full_day_reason="quality_over_usable_bar"))
+                           full_day_reason="quality_over_usable_bar",
+                           fill_segments=[{"source": "coinapi", "start_ts": 1, "start_iso": "x",
+                                           "end_ts": 2, "end_iso": "y", "reason": "r"}],
+                           seams=[], seam_policy={"seam_guard_s": 60.0}))
     assert rv.day_record_issues(rec) == []
 
 
@@ -331,6 +334,25 @@ def test_day_record_issues_missing_keys():
     issues = rv.day_record_issues(rec)
     assert "missing_key:classification" in issues
     assert "missing_key:coinapi_fill" in issues
+
+
+def test_day_record_issues_fill_day_requires_stitch_plan():
+    # a fill day (needs_fill=True, real profile) missing the executable stitch plan must be flagged
+    bad = _day("d", "lake_present_degraded",
+               _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                           full_day_reason="quality_over_usable_bar"))  # segments/seams/seam_policy None
+    issues = rv.day_record_issues(bad)
+    assert "fill_day_missing_fill_segments" in issues
+    assert "fill_day_missing_seams" in issues
+    assert "fill_day_missing_seam_policy" in issues
+    # a complete fill day (seams may be an empty list on a full-day route) is not flagged
+    ok = _day("d", "lake_present_degraded",
+              _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                          full_day_reason="quality_over_usable_bar",
+                          fill_segments=[{"source": "coinapi", "start_ts": 1, "start_iso": "x",
+                                          "end_ts": 2, "end_iso": "y", "reason": "r"}],
+                          seams=[], seam_policy={"seam_guard_s": 60.0}))
+    assert not any(i.startswith("fill_day_missing_") for i in rv.day_record_issues(ok))
 
 
 def test_day_record_issues_fill_decision_contradicts_classification():
@@ -614,6 +636,18 @@ def test_malformed_report_day_missing_classification_fails_closed(tmp_path):
                                     report_only=False)
     assert m["meta"]["status"] == "blocking"
     assert any("classification" in x for x in m["blockers"]["missing_keys"])
+
+
+def test_readiness_blocks_fill_day_without_stitch_plan(tmp_path):
+    # a fill day stripped of its stitch plan must not reach a ready manifest with an unexecutable fill
+    reports = _clean_reports()
+    cf = reports[0]["days"][1]["coinapi_fill"]   # 2025-01-02 degraded full_day_fill
+    cf["fill_segments"], cf["seams"], cf["seam_policy"] = None, None, None
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    assert m["meta"]["status"] == "blocking"
+    assert any("fill_day_missing" in x for x in m["blockers"]["inconsistencies"])
 
 
 def test_readiness_blocks_fill_contradicting_classification(tmp_path):
