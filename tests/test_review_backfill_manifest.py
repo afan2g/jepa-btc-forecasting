@@ -1132,7 +1132,10 @@ def test_calendar_drift_missing_context_blocks():
 
 
 def test_check_report_fill_availability_blocks_unverified_report_fill():
-    # Fix 1: a report-driven needs_fill day whose report coinapi.fillable != True must block
+    # Only POSITIVE evidence of unavailability blocks: an EXPLICIT coinapi.fillable==False (d1). A
+    # None fillable with no measured fill_status (d3) is the normal quality-map-added present fill
+    # priced by the nominal estimate and does NOT block; d2 (fillable True) is available; d4 needs no
+    # fill. Requiring pre-downloaded proof for present-degraded days would defeat pre-spend approval.
     day_index = {
         "d1": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": False}},
         "d2": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": True}},
@@ -1141,25 +1144,25 @@ def test_check_report_fill_availability_blocks_unverified_report_fill():
     }
     blockers = rv.new_blockers()
     rv.check_report_fill_availability(day_index, {}, blockers)
-    assert set(blockers["book_fill_unavailable"]) == {
-        "d1:report_coinapi_fillable_not_true", "d3:report_coinapi_fillable_not_true"}
+    assert blockers["book_fill_unavailable"] == ["d1:report_coinapi_fillable_false"]
 
 
 def test_report_fill_available_via_local_parquet(tmp_path):
-    # a report-driven fill with CoinAPI data on disk is available (fillable None, not a calendar gap)
+    # a local CoinAPI parquet re-stat'd on disk makes a fill available even against an EXPLICIT
+    # coinapi.fillable==False (the data is already in hand) — the flag is re-verified, not trusted
     pq = tmp_path / "data.parquet"
     pq.write_text("x")
     day_index = {"d1": {"coinapi_fill": {"needs_fill": True},
-                        "coinapi": {"fillable": None, "parquet_local": True,
+                        "coinapi": {"fillable": False, "parquet_local": True,
                                     "parquet_path": str(pq)}}}
     blockers = rv.new_blockers()
     rv.check_report_fill_availability(day_index, {}, blockers)
     assert blockers["book_fill_unavailable"] == []
-    # if the parquet is gone, the stale report flag must NOT be trusted → blocked
+    # once the parquet is gone the stale flag is not trusted, and the explicit fillable=False blocks
     pq.unlink()
     blockers2 = rv.new_blockers()
     rv.check_report_fill_availability(day_index, {}, blockers2)
-    assert blockers2["book_fill_unavailable"] == ["d1:report_coinapi_fillable_not_true"]
+    assert blockers2["book_fill_unavailable"] == ["d1:report_coinapi_fillable_false"]
 
 
 def test_fill_status_container_non_dict():
@@ -1182,11 +1185,12 @@ def test_report_book_fill_on_trade_only_day_uses_report_evidence():
     blockers = rv.new_blockers()
     rv.check_report_fill_availability(ok, cal, blockers)
     assert blockers["book_fill_unavailable"] == []
-    # but a report that isn't itself fillable still blocks
-    bad = {"2025-01-11": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": None}}}
+    # a report that is EXPLICITLY not fillable still blocks (None would be the normal present-fill
+    # case and would not block)
+    bad = {"2025-01-11": {"coinapi_fill": {"needs_fill": True}, "coinapi": {"fillable": False}}}
     blockers2 = rv.new_blockers()
     rv.check_report_fill_availability(bad, cal, blockers2)
-    assert blockers2["book_fill_unavailable"] == ["2025-01-11:report_coinapi_fillable_not_true"]
+    assert blockers2["book_fill_unavailable"] == ["2025-01-11:report_coinapi_fillable_false"]
 
 
 def test_report_book_fill_malformed_book_status_fails_closed():
@@ -1213,15 +1217,30 @@ def test_check_report_fill_availability_rechecks_calendar_ok():
     assert blockers["book_fill_unavailable"] == ["2025-01-02:calendar_book_not_ok"]
 
 
-def test_readiness_blocks_report_fill_without_availability(tmp_path):
+def test_readiness_blocks_report_fill_explicitly_unfillable(tmp_path):
+    # an EXPLICIT coinapi.fillable=False on a report-driven fill still blocks readiness
     reports = _clean_reports()
-    reports[0]["days"][1]["coinapi"]["fillable"] = None   # 2025-01-02 degraded fill, unverified
+    reports[0]["days"][1]["coinapi"]["fillable"] = False   # 2025-01-02 degraded fill, not fillable
     plan_path, cal_path = _write_tree(tmp_path, reports=reports)
     m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
                                     report_only=False)
     assert m["meta"]["status"] == "blocking"
-    assert any("report_coinapi_fillable_not_true" in x
+    assert any("report_coinapi_fillable_false" in x
                for x in m["blockers"]["book_fill_unavailable"])
+
+
+def test_readiness_quality_map_present_fill_without_evidence_is_normal(tmp_path):
+    # the pre-spend workflow: a report-driven degraded/crossed-source present fill (coinapi.fillable
+    # None, no fill_status entry, no local parquet) is a NORMAL quality-map-added fill priced by the
+    # nominal estimate and must NOT block readiness — requiring pre-downloaded proof would be circular.
+    reports = _clean_reports()
+    reports[0]["days"][1]["coinapi"]["fillable"] = None   # 2025-01-02 degraded full_day_fill
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    assert m["blockers"]["book_fill_unavailable"] == []
+    assert m["meta"]["status"] == "ready"
+    assert "2025-01-02" in m["sections"]["full_day_book_fills"]
 
 
 def test_fill_availability_blocks_unfillable_book_and_trade():

@@ -898,13 +898,19 @@ def check_fill_availability(cal: dict, blockers: dict) -> None:
 
 
 def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -> None:
-    """Every REPORT-driven book fill (a mapped day with coinapi_fill.needs_fill True) must be
-    verifiably available. A present-but-degraded/crossed-seed day is never a calendar book-gap, so
-    `check_fill_availability` never sees it. Available iff any of: a local CoinAPI parquet on disk
-    (`coinapi.parquet_local`); the calendar's stricter `is_fillable` (present AND ok) when it carries
-    measured status; or the report's own `coinapi.fillable` (which only reflects `book.present`) when
-    the calendar has no measured status. A `present=true, ok=false` (unverifiable) flat file with no
-    local parquet blocks, rather than reaching `ready` priced from the bad MB."""
+    """Report-driven book fills (mapped days with coinapi_fill.needs_fill True). A present-but-
+    degraded/crossed-seed day is never a calendar book-gap, so `check_fill_availability` never sees
+    it — and, not being a calendar gap, it carries no measured `fill_status` and (per
+    run_coinbase_quality_map, which leaves it unset for days absent from fill_status) a
+    `coinapi.fillable` of None. These quality-map-added present fills are NORMAL fills priced by the
+    nominal estimate; requiring pre-downloaded proof would be circular for a PRE-spend approval gate.
+    So this blocks only on POSITIVE evidence of unavailability, never on a mere absence of evidence:
+      * a local CoinAPI parquet re-stat'd on disk NOW makes the fill available even against the two
+        block cases below (the data is already in hand);
+      * a MEASURED calendar book status that is present-but-not-ok / malformed blocks (an
+        unverifiable flat file must not reach `ready` priced from bad MB);
+      * an EXPLICIT report `coinapi.fillable == False` blocks (the runner positively found it not
+        fillable). `fillable == None` — the normal present-fill case, no probe — does NOT block."""
     for d, rec in day_index.items():
         cf = _as_dict(rec.get("coinapi_fill"))
         if cf.get("needs_fill") is not True:
@@ -916,15 +922,15 @@ def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -
         if coinapi.get("parquet_local") is True and isinstance(pq, str) and os.path.exists(pq):
             continue   # local CoinAPI parquet re-verified on disk → the fill is available
         fs = _fill_status(cal, d)
-        # The trade-only fallback applies ONLY to the legitimate `book is None` case (trades verified,
-        # no book gap check). Any non-null book status — a real dict OR a MALFORMED value (string/
-        # list) — goes through the strict is_fillable, which fails closed on a non-dict; only a null
-        # book falls back to the report's coinapi.fillable evidence.
+        # A non-null MEASURED book status — a real dict OR a MALFORMED value (string/list) — goes
+        # through the strict is_fillable, which fails closed on a non-dict. Only when there is no
+        # measured book status do we consult the report: an EXPLICIT fillable==False blocks, but a
+        # None fillable is the normal quality-map-added present fill (no probe) and is NOT blocked.
         if isinstance(fs, dict) and fs.get("book") is not None:
             if not is_fillable(cal, d, "book"):
                 blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
-        elif coinapi.get("fillable") is not True:
-            blockers["book_fill_unavailable"].append(f"{d}:report_coinapi_fillable_not_true")
+        elif coinapi.get("fillable") is False:
+            blockers["book_fill_unavailable"].append(f"{d}:report_coinapi_fillable_false")
 
 
 # ----------------------------------------------------------- sections + cost summary + assembly
