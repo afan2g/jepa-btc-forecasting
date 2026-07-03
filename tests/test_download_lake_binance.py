@@ -6,13 +6,12 @@ raw store and appends a resume-ledger manifest record per unit. The `book` SEED_
 1) is exercised with a 20-level snapshot fixture so a downloader that estimates the seed bytes but
 drops the seed product FAILS here (otherwise Stage-2 recon silently cold-starts every day).
 
-pyarrow is a real dependency here (it writes the parquet), but it must be imported LAZILY by the
-downloader — `test_import_is_vendor_safe` asserts importing the module pulls in no boto3/lakeapi.
+These tests all need pyarrow (they write/read parquet), so the module importorskips it below. The
+pyarrow-FREE downloader coverage (error taxonomy, exit-code contract, dry-run, import-safety, pure
+helpers) lives in test_download_lake_binance_pure.py, which runs in the lightweight default-CI path.
 """
 import json
 import pathlib
-import subprocess
-import sys
 
 import pytest
 
@@ -25,7 +24,6 @@ pq = pytest.importorskip("pyarrow.parquet")
 from ingest import download_lake_binance as dl  # noqa: E402
 from ingest import lake_binance as lb  # noqa: E402
 
-_ROOT = pathlib.Path(__file__).resolve().parents[1]
 PERP = ("BINANCE_FUTURES", "BTC-USDT-PERP")
 SPOT = ("BINANCE", "BTC-USDT")
 
@@ -108,6 +106,33 @@ def test_process_unit_writes_parquet_and_ok_manifest(tmp_path):
     assert r["schema_version"] == lb.RAW_SCHEMA_VERSION
     assert len(r["sha256"]) == 64
     assert r["sha256"] == dl._sha256_file(str(final))            # digest is of the PUBLISHED bytes
+
+
+def test_process_unit_rejects_partition_missing_engine_time(tmp_path):
+    # a drifted partition with no engine-time column must fail loud (status error), NOT be copied and
+    # stamped ok — so vendor drift surfaces at download time, not later in Stage-2 after quota spent.
+    bad = pa.record_batch({"px": pa.array([1.0, 2.0], pa.float64())})   # no origin/received/timestamp
+    res = dl.process_unit(FakeReader({"trades": [bad]}), str(tmp_path), "trades", *PERP,
+                          "2026-04-01", sleep=lambda *_: None)
+    assert res.status == "error" and "error" in res.record
+    assert not pathlib.Path(lb.raw_parquet_path(str(tmp_path), "trades", *PERP, "2026-04-01")).exists()
+
+
+def test_process_unit_ok_records_schema_fingerprint_and_cols(tmp_path):
+    res = dl.process_unit(FakeReader(), str(tmp_path), "trades", *PERP, "2026-04-01",
+                          sleep=lambda *_: None)
+    assert res.status == "ok"
+    assert len(res.record["schema_fingerprint"]) == 16          # drift-detectable fingerprint recorded
+    assert "origin_time" in res.record["schema_cols"]
+
+
+def test_schema_fingerprint_changes_on_drift():
+    a = pa.schema([("origin_time", pa.int64()), ("price", pa.float64())])
+    b = pa.schema([("origin_time", pa.int64()), ("price", pa.int64())])     # dtype drift
+    c = pa.schema([("origin_time", pa.int64()), ("px", pa.float64())])      # renamed column
+    assert dl.schema_fingerprint(a) == dl.schema_fingerprint(a)
+    assert dl.schema_fingerprint(a) != dl.schema_fingerprint(b)
+    assert dl.schema_fingerprint(a) != dl.schema_fingerprint(c)
 
 
 def test_parquet_kv_metadata_carries_schema_version_not_hash(tmp_path):
@@ -215,17 +240,6 @@ def test_run_empty_required_feed_exits_3(tmp_path):
     assert code == 3
 
 
-def test_feed_miss_is_fatal_policy():
-    # only sparse/event feeds (liquidations) may go missing without failing the run; the `book` seed
-    # and every other feed are required.
-    assert dl.feed_miss_is_fatal("book_delta_v2") is True
-    assert dl.feed_miss_is_fatal("trades") is True
-    assert dl.feed_miss_is_fatal("funding") is True
-    assert dl.feed_miss_is_fatal("open_interest") is True
-    assert dl.feed_miss_is_fatal(lb.SEED_PRODUCT) is True                # `book` seed is required
-    assert dl.feed_miss_is_fatal("liquidations") is False               # sparse, Risk Q2
-
-
 # --------------------------------------------------------------------------- SEED_PRODUCT (book)
 def test_process_unit_writes_book_seed_snapshot(tmp_path):
     # The 20-level `book` seed product must be downloaded (it seeds Stage-2 recon), written to its own
@@ -282,13 +296,6 @@ def test_process_unit_backoff_sleeps_between_retries(tmp_path):
     assert all(0 < s <= dl.DEFAULT_BACKOFF_CAP_S for s in slept)
 
 
-def test_backoff_seconds_grows_and_is_capped():
-    grow = [dl._backoff_seconds(a, 1.0, 60.0, lambda: 1.0) for a in range(1, 12)]
-    assert grow[:3] == [1.0, 2.0, 4.0]                      # exponential
-    assert all(s <= 60.0 for s in grow)                     # capped at 60 s
-    assert dl._backoff_seconds(1, 1.0, 60.0, lambda: 0.0) == 0.5   # jitter halves at rng=0
-
-
 def test_process_unit_quota_error_is_hard_stop(tmp_path):
     root = str(tmp_path)
     reader = FakeReader({"book_delta_v2": dl.QuotaError("download quota exceeded")})
@@ -336,37 +343,6 @@ def test_process_unit_no_partial_parquet_on_midstream_failure(tmp_path):
     part = pathlib.Path(lb.raw_partition_dir(root, "book_delta_v2", *PERP, "2026-04-01"))
     assert not (part / "data.parquet").exists()
     assert not (part / "data.parquet.tmp").exists()
-
-
-# --------------------------------------------------------------------------- error classification
-def test_classify_error():
-    assert dl.classify_error(dl.QuotaError("x")) == "quota"
-    assert dl.classify_error(dl.AuthError("x")) == "auth"
-    assert dl.classify_error(dl.TransientError("x")) == "transient"
-    assert dl.classify_error(RuntimeError("QuotaExceeded: over cap")) == "quota"
-    assert dl.classify_error(RuntimeError("SlowDown, please retry")) == "transient"
-    assert dl.classify_error(RuntimeError("RequestTimeout")) == "transient"
-    assert dl.classify_error(RuntimeError("503 Service Unavailable")) == "transient"
-    assert dl.classify_error(ValueError("schema drift: unknown column")) == "fatal"
-
-
-def test_classify_error_auth_failures_are_hard_stops():
-    # wrong subscriber keys / wrong AWS account → a run-fatal setup error, not a per-unit fatal.
-    assert dl.classify_error(RuntimeError("AccessDenied: not authorized")) == "auth"
-    assert dl.classify_error(RuntimeError("InvalidAccessKeyId")) == "auth"
-    assert dl.classify_error(RuntimeError("SignatureDoesNotMatch")) == "auth"
-    assert dl.classify_error(RuntimeError("The security token has expired")) == "auth"
-    assert dl.classify_error(RuntimeError("403 malformed row 4037")) == "fatal"   # bare 403 not auth
-    assert issubclass(dl.AuthError, dl.HardStop) and issubclass(dl.QuotaError, dl.HardStop)
-
-
-def test_classify_error_markers_are_not_over_broad():
-    # bare digit markers must NOT swallow ordinary messages that merely contain '500'/'502'/… —
-    # those are genuine fatals, not transient (would otherwise burn retries re-downloading the day).
-    assert dl.classify_error(ValueError("expected 500 columns, got 12")) == "fatal"
-    assert dl.classify_error(ValueError("malformed row 5040")) == "fatal"
-    # a throttle worded 'reduce your request rate' is transient, NOT a quota hard stop.
-    assert dl.classify_error(RuntimeError("Please reduce your request rate")) == "transient"
 
 
 # --------------------------------------------------------------------------- run() end to end
@@ -459,36 +435,6 @@ def test_run_quota_error_exits_2(tmp_path):
     assert code == 2
 
 
-def test_run_broad_gate_blocks_before_any_read(tmp_path):
-    reader = _perp_reader()
-    with pytest.raises(SystemExit) as e:
-        dl.main(["--instrument", "binance-perp", "--start", "2026-01-01", "--end", "2026-12-31",
-                 "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
-                reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
-    assert e.value.code == lb.BROAD_GATE_EXIT == 4
-    assert reader.calls == []                              # gate runs BEFORE any vendor read
-
-
-def test_run_allow_broad_still_blocked_over_quota_headroom(tmp_path):
-    # even --allow-broad cannot breach the 300 GB/month headroom (used_data lags ~60 min)
-    reader = _perp_reader()
-    with pytest.raises(SystemExit) as e:
-        dl.main(["--instrument", "binance-perp,binance-spot", "--start", "2026-01-01",
-                 "--end", "2026-12-31", "--allow-broad", "--out", str(tmp_path / "raw"),
-                 "--report-dir", str(tmp_path / "rep")],
-                reader=reader, used_data_fn=lambda: 295.0, sleep=lambda *_: None)
-    assert e.value.code == 4
-
-
-def test_run_unreadable_used_data_fails_safe_exit_2(tmp_path):
-    def _boom():
-        raise RuntimeError("used_data unreadable")
-    code = dl.main(["--instrument", "binance-perp", "--start", "2026-04-01", "--end", "2026-04-01",
-                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
-                   reader=_perp_reader(), used_data_fn=_boom, sleep=lambda *_: None)
-    assert code == 2
-
-
 def test_run_resume_skips_already_done_units(tmp_path):
     raw = tmp_path / "raw"
     # pre-create the trades partition so resume skips it and only re-reads the rest
@@ -502,21 +448,6 @@ def test_run_resume_skips_already_done_units(tmp_path):
             reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
     assert "trades" not in {c[0] for c in reader.calls}   # already-done unit not re-read
     assert "book_delta_v2" in {c[0] for c in reader.calls}
-
-
-def test_sparse_accepted_reads_manifest(tmp_path):
-    root = str(tmp_path)
-    lb.manifest_append(root, {"feed": "liquidations", "exchange": PERP[0], "symbol": PERP[1],
-                              "dt": "2026-04-01", "status": "missing", "sparse_ok": True})
-    lb.manifest_append(root, {"feed": "trades", "exchange": PERP[0], "symbol": PERP[1],
-                              "dt": "2026-04-01", "status": "missing", "sparse_ok": False})
-    acc = dl.sparse_accepted(root)
-    assert ("liquidations", *PERP, "2026-04-01") in acc          # sparse-ok miss is accepted (done)
-    assert ("trades", *PERP, "2026-04-01") not in acc            # required miss stays pending
-    # a later ok record (parquet written) supersedes the earlier sparse acceptance
-    lb.manifest_append(root, {"feed": "liquidations", "exchange": PERP[0], "symbol": PERP[1],
-                              "dt": "2026-04-01", "status": "ok", "rows": 5})
-    assert ("liquidations", *PERP, "2026-04-01") not in dl.sparse_accepted(root)
 
 
 def test_run_resume_skips_sparse_accepted_liquidations(tmp_path):
@@ -566,14 +497,6 @@ def test_run_resume_retries_required_missing(tmp_path):
     assert _count_calls(r2, "trades") == 1                       # required miss retried, not skipped
 
 
-def test_run_invalid_instrument_feed_pair_exits_2(tmp_path):
-    code = dl.main(["--instrument", "binance-spot", "--feeds", "funding",
-                    "--start", "2026-04-01", "--end", "2026-04-01",
-                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
-                   reader=_perp_reader(), used_data_fn=lambda: 0.0, sleep=lambda *_: None)
-    assert code == 2                                       # funding is perp-only
-
-
 def test_run_days_file_source(tmp_path):
     days_file = tmp_path / "days.txt"
     days_file.write_text("2026-04-01\n2026-04-02\n")
@@ -600,34 +523,6 @@ def test_run_overwrite_flag_rereads_existing_partition(tmp_path):
                    reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
     assert code == 0
     assert "trades" in {c[0] for c in reader.calls}       # --overwrite re-reads the done partition
-
-
-def test_run_reversed_date_range_exits_2(tmp_path):
-    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",
-                    "--start", "2026-04-02", "--end", "2026-04-01", "--out", str(tmp_path / "raw"),
-                    "--report-dir", str(tmp_path / "rep")],
-                   reader=_perp_reader(), used_data_fn=lambda: 0.0)
-    assert code == 2
-
-
-def test_run_live_setup_failure_exits_2(tmp_path, monkeypatch):
-    # with no injected reader/used_data_fn, main() builds the live session; a setup failure (missing
-    # AWS keys, or boto3 absent) must return the documented exit 2, not raise / exit 1.
-    def _boom(*a, **k):
-        raise RuntimeError("Crypto Lake AWS key 'aws_access_key_id' not found")
-    monkeypatch.setattr(dl, "lake_session", _boom)
-    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",
-                    "--start", "2026-04-01", "--end", "2026-04-01",
-                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
-                   sleep=lambda *_: None)               # no reader, no used_data_fn → forces session
-    assert code == 2
-
-
-def test_run_no_day_source_exits_2(tmp_path):
-    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",
-                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
-                   reader=_perp_reader(), used_data_fn=lambda: 0.0)
-    assert code == 2
 
 
 # --------------------------------------------------------------------------- parallel (--jobs) path
@@ -664,73 +559,7 @@ def test_run_jobs_quota_hard_stop_cancels_pending_units(tmp_path):
     assert len(reader.calls) < 15                         # pending units were cancelled, not drained
 
 
-# --------------------------------------------------------------------------- dry-run (fake lister)
-def test_dry_run_uses_lister_and_writes_no_parquet(tmp_path):
-    seen = []
-
-    def fake_lister(feed, exchange, symbol):
-        seen.append(feed)
-        return ["2026-04-01"]                              # present days for this feed
-
-    raw = tmp_path / "raw"
-    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades", "--dry-run",
-                    "--start", "2026-04-01", "--end", "2026-04-01", "--out", str(raw),
-                    "--report-dir", str(tmp_path / "rep")],
-                   lister=fake_lister, used_data_fn=lambda: 0.0)
-    assert code == 0
-    assert seen == ["trades"]
-    assert not any(raw.rglob("*.parquet"))                # dry-run transfers zero parquet
-    rep = json.loads(next((tmp_path / "rep").glob("*.json")).read_text())
-    assert rep["dry_run"] is True and rep["transferred_gb"] == 0
-
-
-def test_dry_run_auth_error_exits_2(tmp_path):
-    # --dry-run's list_data is a LIVE Lake call; an auth wall must return the documented exit 2,
-    # not escape as a traceback / exit 1.
-    def bad_lister(feed, exchange, symbol):
-        raise RuntimeError("AccessDenied: not authorized for this bucket")
-    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades", "--dry-run",
-                    "--start", "2026-04-01", "--end", "2026-04-01", "--out", str(tmp_path / "raw"),
-                    "--report-dir", str(tmp_path / "rep")],
-                   lister=bad_lister, used_data_fn=lambda: 0.0)
-    assert code == 2
-
-
-def test_pyproject_declares_lake_downloader_extra():
-    # the downloader imports pyarrow/lakeapi/boto3 in its live path — they must be declared as an
-    # installable extra so a base install running the CLI does not ModuleNotFoundError.
-    import tomllib
-    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
-    lake = data["project"]["optional-dependencies"]["lake"]
-    for dep in ("pyarrow", "lakeapi", "boto3"):
-        assert any(dep in d for d in lake), f"{dep} missing from the `lake` extra"
-
-
 # --------------------------------------------------------------------------- live-path helpers (offline)
-def test_present_days_from_list_records_reads_dt_key():
-    # lakeapi.list_data returns dicts keyed by `dt` — read that key, never stringify the whole dict
-    # (which would make every requested day compare as missing on a live --dry-run).
-    recs = [{"table": "trades", "exchange": "BINANCE", "symbol": "BTC-USDT",
-             "dt": "2026-04-02", "filename": "b.parquet"},
-            {"table": "trades", "exchange": "BINANCE", "symbol": "BTC-USDT",
-             "dt": "2026-04-01", "filename": "a.parquet"}]
-    assert dl.present_days_from_list_records(recs) == ["2026-04-01", "2026-04-02"]
-    assert dl.present_days_from_list_records([{"no": "dt"}]) == []   # missing dt skipped, not bogus
-    assert dl.present_days_from_list_records([]) == []
-    assert dl.present_days_from_list_records(None) == []
-
-
-def test_used_gb_from_response_reads_downloaded_gb():
-    # lakeapi.used_data returns a dict ALREADY in GB — read downloaded_gb, no bytes conversion.
-    assert dl.used_gb_from_response({"downloaded_gb": 151.35, "timeframe_days": 31}) \
-        == pytest.approx(151.35)
-    assert dl.used_gb_from_response({"downloaded_gb": 0}) == 0.0
-    # a bare number (the old `float(used_data(...))` bug) or a missing key must FAIL, so main() exits
-    # 2 fail-safe rather than gating against a wrong 0 usage.
-    with pytest.raises((KeyError, TypeError)):
-        dl.used_gb_from_response(151.35)
-    with pytest.raises(KeyError):
-        dl.used_gb_from_response({"timeframe_days": 31})
 
 
 def test_stream_parquet_batches_streams_row_groups(tmp_path):
@@ -772,23 +601,3 @@ def test_process_unit_consumes_streaming_reader(tmp_path):
     assert res.status == "ok" and res.rows == 2500
     assert pq.read_table(lb.raw_parquet_path(str(tmp_path / "raw"), "book_delta_v2", *PERP,
                                              "2026-04-01")).num_rows == 2500
-
-
-# --------------------------------------------------------------------------- import safety
-def test_import_is_vendor_safe():
-    # Requirement 1: the module must import with NO boto3/lakeapi AND no pyarrow at module top. We
-    # cannot assert `'pyarrow' not in sys.modules` (pandas pulls it in transitively via recon.ingest),
-    # so we BLOCK pyarrow (sys.modules['pyarrow']=None → any `import pyarrow` raises) and assert the
-    # import still succeeds — proving every pyarrow touch is lazy, inside a live function. A hoisted
-    # top-level `import pyarrow` would raise here and fail the test (the likeliest Req-1 regression).
-    prog = (
-        "import sys\n"
-        "sys.modules['pyarrow'] = None\n"           # subsequent `import pyarrow` raises ImportError
-        "import ingest.download_lake_binance\n"
-        "assert 'boto3' not in sys.modules, 'boto3 imported at module load'\n"
-        "assert 'lakeapi' not in sys.modules, 'lakeapi imported at module load'\n"
-        "print('ok')\n")
-    out = subprocess.run([sys.executable, "-c", prog], cwd=str(_ROOT),
-                         capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == "ok"

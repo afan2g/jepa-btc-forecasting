@@ -223,6 +223,37 @@ def _stream_to_parquet(stream, dest_tmp: str, *, schema_version: str, feed: str,
     return rows
 
 
+# ----------------------------------------------------------------------------- schema validation (Req 6)
+# Engine-time is the ONE column every feed must carry — recon/passthrough aligns on it and
+# recon.ingest.ENGINE_TIME_CANDIDATES only understands these names (raw vendor `timestamp`/
+# `receipt_timestamp` OR lakeapi-normalized `origin_time`/`received_time`). Requiring its PRESENCE is
+# safe even where the exact per-feed schema is unmeasured (funding/OI/liquidations, Risk Q6/Q9): a
+# partition missing all four cannot be reconstructed at all, so it is real drift worth failing on.
+_ENGINE_TIME_ALIASES = ("origin_time", "received_time", "timestamp", "receipt_timestamp")
+
+
+def schema_fingerprint(schema) -> str:
+    """Stable 16-hex fingerprint of a pyarrow schema (sha256 over sorted `name:type`). Recorded per
+    partition so an audit/monitor can detect vendor schema drift day-over-day even for the feeds whose
+    exact schema is not yet pinned — the fixed `lake_binance/1` alone cannot signal drift."""
+    parts = sorted(f"{field.name}:{field.type}" for field in schema)
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
+def validate_raw_schema(feed: str, columns) -> None:
+    """Fail loud BEFORE a partition is stamped `ok` if it lacks the universal engine-time column, so
+    gross vendor drift surfaces at download time (status error → exit 3) instead of being copied,
+    stamped as if it met the raw-store contract, marked done by resume, and only discovered in Stage-2
+    after quota is spent (plan Requirement 6). Finer per-feed column/dtype checks land with the Task-3
+    normalizers once the funding/OI/liquidations schemas are measured (Risk Q6); until then the
+    recorded schema_fingerprint carries the rest for the Phase-1 probe."""
+    cols = set(columns)
+    if not any(c in cols for c in _ENGINE_TIME_ALIASES):
+        raise ValueError(f"{feed} raw partition missing an engine-time column (need one of "
+                         f"{_ENGINE_TIME_ALIASES}); saw {sorted(cols)} — vendor schema drift, "
+                         "refusing to stamp the raw-store contract")
+
+
 # ----------------------------------------------------------------------------- per-unit worker
 @dataclass
 class UnitResult:
@@ -294,11 +325,15 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
                        "empty": True, "ts": now_iso()}
                 _append(rec)
                 return UnitResult("missing", 0, None, rec)
+            import pyarrow.parquet as pq
+            schema = pq.read_schema(tmp)             # cheap local footer read
+            validate_raw_schema(feed, schema.names)  # fail loud on drift BEFORE publishing `ok`
             out_bytes = os.path.getsize(tmp)
             sha = _sha256_file(tmp)
             os.replace(tmp, final)                   # atomic publish
             rec = {**base, "status": "ok", "rows": rows, "sha256": sha, "out_bytes": out_bytes,
-                   "schema_version": schema_version, "secs": round(time.monotonic() - t0, 3),
+                   "schema_version": schema_version, "schema_fingerprint": schema_fingerprint(schema),
+                   "schema_cols": list(schema.names), "secs": round(time.monotonic() - t0, 3),
                    "ts": now_iso()}
             _append(rec)
             return UnitResult("ok", rows, final, rec)
