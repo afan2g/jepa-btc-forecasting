@@ -1048,8 +1048,13 @@ Other open items:
       `ingest/lake_binance.py` (feed/instrument registry, Hive partition paths, manifest/resume
       state, joint `origin_time`→`received_time` engine-time resolver, quota estimate + broad-pull
       gate) and `scripts/plan_lake_binance_batches.py` (deterministic quota-window batch planner).
-      The vendor download/recon stages, live metadata/schema probes, and Binance tick-scale
-      verification remain unbuilt.
+      *Stage-1 vendor CLI landed 2026-07-02 (`ingest/download_lake_binance.py`, **no live Lake pull
+      run**):* streaming/atomic/resumable per-`(feed,exchange,symbol,day)` download to the normalized
+      ZSTD Parquet raw store (incl. the `book` seed product), retry/backoff, quota gate before any
+      transfer, and the 0/2/3/4 exit-code contract — fully unit-tested with injected fake
+      readers/listers (`tests/test_download_lake_binance.py`). Still open: live metadata/schema probes
+      + one-day Phase-2 validation, the Stage-2 recon runner (`scripts/run_binance_recon.py`),
+      Binance tick-scale verification, and the staged historical archive pull.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
 
 ---

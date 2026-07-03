@@ -14,6 +14,11 @@ dependencies = ["pandas", "numpy"]
 # CLI (scripts/run_baseline.py) reads the ModelMatrix parquet (needs a pyarrow engine). Kept
 # as an extra so a plain `recon` install stays light; install with `pip install -e .[baseline]`.
 baseline = ["scikit-learn", "lightgbm", "pyarrow"]
+# Stage-1 Binance Crypto Lake downloader (ingest/download_lake_binance.py): the vendor-facing CLI
+# streams partitions via pyarrow over an S3FileSystem and lists/loads via lakeapi + an explicit
+# boto3 session. Kept as an extra so a plain `recon` install stays light (the pure helpers in
+# ingest/lake_binance.py need none of these); install with `pip install -e .[lake]`.
+lake = ["pyarrow", "lakeapi", "boto3"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
