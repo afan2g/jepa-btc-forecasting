@@ -731,17 +731,18 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
 
     # ---- dry-run: metadata + plan only, zero parquet transfer -----------------------------------
     if args.dry_run:
-        if lister is None:
-            lister = _live_lister(session)
-        # list_data is itself a LIVE Lake call, so an auth/permission wall (wrong keys/account) or any
-        # vendor failure here must return the documented setup exit 2 (fail-safe) — never a bare
-        # traceback / exit 1 — the same hard-stop contract as the download path.
-        # Bound the metadata probe to the REQUESTED window [first_day, last_day+1) — list_data's end
-        # is exclusive — so a one-day dry-run is a one-day probe, not a full-history scan.
+        # Building the lister AND list_data itself are LIVE Lake calls, so a reader/lister setup
+        # failure (missing lakeapi) or an auth/permission wall (wrong keys/account) or any vendor
+        # failure must return the documented setup exit 2 (fail-safe) — never a bare traceback / exit
+        # 1 — the same hard-stop contract as the download path. Bound the metadata probe to the
+        # REQUESTED window [first_day, last_day+1) (list_data end exclusive) so a one-day dry-run is a
+        # one-day probe, not a full-history scan.
         probe_start = dt.datetime.fromisoformat(days[0])
         probe_end = dt.datetime.fromisoformat(days[-1]) + dt.timedelta(days=1)
         want = set(days)
         try:
+            if lister is None:
+                lister = _live_lister(session)
             presence = {}
             for key in instrument_keys:
                 inst = lb.INSTRUMENTS[key]
@@ -761,8 +762,13 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         return 0
 
     # ---- live download (only the pending units — done + sparse-accepted are skipped) -------------
-    if reader is None:
-        reader = _live_reader(session)
+    try:
+        if reader is None:
+            reader = _live_reader(session)         # imports pyarrow/lakeapi, resolves bucket + S3 fs
+    except Exception as e:                          # noqa: BLE001 — fail safe: setup exit 2, not exit 1
+        print(f"ERROR: could not build the live Lake reader (fail-safe, exit 2; is `.[lake]` "
+              f"installed?): {e}", file=sys.stderr)
+        return SETUP_ERROR_EXIT
     lb.cleanup_tmp(args.out)
 
     counts = {"ok": 0, "skip": 0, "missing": 0, "error": 0, "missing_required": 0}

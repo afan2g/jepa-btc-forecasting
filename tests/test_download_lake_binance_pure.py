@@ -197,6 +197,30 @@ def test_plan_units_dedups_repeated_instruments_and_feeds():
     assert sorted(u.feed for u in c) == ["book", "book_delta_v2"]
 
 
+def test_run_live_reader_setup_failure_exits_2(tmp_path, monkeypatch):
+    # building the live reader (imports pyarrow/lakeapi, resolves the bucket) can fail on an
+    # incomplete `.[lake]` install — that must return the documented setup exit 2, not a traceback.
+    monkeypatch.setattr(dl, "lake_session", lambda *a, **k: object())     # dummy session
+    monkeypatch.setattr(dl, "_live_reader",
+                        lambda *a, **k: (_ for _ in ()).throw(ImportError("no pyarrow")))
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",
+                    "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   used_data_fn=lambda: 0.0, sleep=lambda *_: None)     # no reader → builds _live_reader
+    assert code == 2
+
+
+def test_run_dry_run_lister_setup_failure_exits_2(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "lake_session", lambda *a, **k: object())
+    monkeypatch.setattr(dl, "_live_lister",
+                        lambda *a, **k: (_ for _ in ()).throw(ImportError("no lakeapi")))
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades", "--dry-run",
+                    "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   used_data_fn=lambda: 0.0)                            # no lister → builds _live_lister
+    assert code == 2
+
+
 def test_run_broad_gate_blocks_before_any_read(tmp_path):
     reader = _NullReader()
     with pytest.raises(SystemExit) as e:
