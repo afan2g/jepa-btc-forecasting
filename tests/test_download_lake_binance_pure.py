@@ -10,6 +10,7 @@ import pathlib
 import subprocess
 import sys
 import tomllib
+import types
 
 import pytest
 
@@ -195,6 +196,18 @@ def test_plan_units_dedups_repeated_instruments_and_feeds():
     # book_delta_v2 (+book seed) repeated → 2 unique units (book_delta_v2, book), not 4
     c = dl.plan_units(["binance-perp"], "book_delta_v2,book_delta_v2", ["2026-04-01"])
     assert sorted(u.feed for u in c) == ["book", "book_delta_v2"]
+
+
+def test_lake_bucket_missing_raises_normal_exception(monkeypatch):
+    # if lakeapi's default_bucket lookup is missing/changed, _lake_bucket must raise a NORMAL
+    # exception (not SystemExit, which is BaseException and would bypass main's `except Exception`
+    # setup guard → exit 1). pytest.raises(RuntimeError) would not catch a SystemExit, so it proves it.
+    fake = types.ModuleType("lakeapi")
+    fake.load_data = types.SimpleNamespace()
+    fake.load_data.__globals__ = {}                       # no 'default_bucket'
+    monkeypatch.setitem(sys.modules, "lakeapi", fake)
+    with pytest.raises(RuntimeError):
+        dl._lake_bucket()
 
 
 def test_run_live_reader_setup_failure_exits_2(tmp_path, monkeypatch):

@@ -545,7 +545,10 @@ def _lake_bucket() -> str:
     import lakeapi
     bucket = lakeapi.load_data.__globals__.get("default_bucket")
     if not bucket:
-        raise SystemExit("could not resolve the Crypto Lake bucket from lakeapi (default_bucket).")
+        # A normal exception (NOT SystemExit, which is BaseException and would bypass main's
+        # `except Exception` reader-setup guard → exit 1) so it maps to the documented setup exit 2.
+        raise RuntimeError("could not resolve the Crypto Lake bucket from lakeapi (default_bucket "
+                           "missing/changed — check the lakeapi version).")
     return bucket
 
 
