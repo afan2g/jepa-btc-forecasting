@@ -354,8 +354,11 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    so an **early-resolving barrier** (`t_barrier < t_event + horizon` — a TP/SL hit) is dropped
    for a seam that falls *after* its actual `t_barrier`, needlessly zeroing/undersizing the 60 s
    rung (#5) and contradicting the `[t_event, t_barrier]` actual-span rule above.
-   (`feature_valid_mask`/`label_valid_mask` remain the *regular-grid* form and are fine when fed
-   the actual per-row span — `t_barrier`, not `horizon`.) For the **vendor-coverage** test use
+   (`feature_valid_mask`/`label_valid_mask` take a **scalar** `horizon_ns`/`lookback_ns` and check
+   `[t, t±window]` — they **cannot** accept a per-row `t_barrier` absolute span, Codex #A; the
+   per-row actual-span path must stay on `window_crosses_seam`/`window_vendor_sources` as above, or
+   a **new vectorized start/end guard helper** — do not pass `t_barrier` as a duration.) For the
+   **vendor-coverage** test use
    **`window_vendor_sources(start, end, segments)` (`recon/stitch_policy.py:430`)** — the row
    is kept only when *both* its feature window
    `[t_feature_start, t_event]` and label window **`[t_event, t_barrier]`** return a singleton
@@ -496,9 +499,13 @@ the columns CPCV consumes and to pin `embargo_ns` correctly:
   raw `.max()` lets a single late-received **old-origin straggler** (admitted by the
   `received_time ≤ t_event` gate) inflate `max_lookback_ns → embargo_ns →` CPCV purging across all
   704 days — and the §E `t_feature_start` invariant is *circular* (the outlier both sets and
-  satisfies the bound). Size the look-back with a **robust/capped** estimator (high percentile +
-  **clip/flag** beyond-tail stragglers), not a raw max, and drop/flag rows whose look-back exceeds
-  the cap. (Pairs with #7 — both reduce embargo bloat.)
+  satisfies the bound). Size the look-back with a **robust cap** (high percentile), not a raw max,
+  and **DROP** any row whose observed look-back exceeds the cap from the labeled matrix (Codex #B).
+  *Flagging* a beyond-cap row while keeping it does **not** work — `validate_frame`/`run_study`
+  recompute `max(t_event − t_feature_start)` from the emitted rows and reject a manifest whose
+  `max_lookback_ns` is below that observed max; and *clipping* `t_feature_start` understates the
+  true feature window → under-embargo. So: drop, or declare the true max and accept the larger
+  purge. (Pairs with #7 — both reduce embargo bloat.)
 - **Embargo (E0.4): `embargo_ns = max_lookback_ns` (Codex #7).** `_cpcv_iter` applies the embargo
   from `hi` = the merged test interval's **upper** bound = max `t_barrier` over test rows
   (`data/cv.py:61-63`), which **already includes the label horizon**. So — exactly as the
@@ -965,6 +972,13 @@ schema change.
   bar decided on membership unknowable at its claimed time. Clamping to `t_event(N−1)` orders the
   decision times (required by CPCV time-groups, PBO blocking, uniqueness, the stable `t_event`
   sort). §C.2/§E/§J/T1/T4.
+- Review round 14 (Codex on `4b1314c`) incorporated — 2 findings: **#A (P2):** `label_valid_mask`/
+  `feature_valid_mask` take a **scalar** `horizon_ns`/`lookback_ns` and cannot accept a per-row
+  `t_barrier` actual span — the actual-span path stays on `window_crosses_seam`/
+  `window_vendor_sources` (or a new vectorized start/end guard helper), never routes `t_barrier`
+  through `label_valid_mask` (§C.3); **#B (P2):** beyond-cap look-back stragglers must be **dropped**
+  from the labeled matrix, not flagged (the consumer recomputes `max(t_event − t_feature_start)`
+  and rejects/inflates) nor clipped (understates the window → under-embargo) — §F/#13.
 
 ## Risks & assumptions
 
