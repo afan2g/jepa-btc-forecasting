@@ -107,7 +107,8 @@ def _day(day, classification, coinapi_fill, *, trusted=(None, None),
 
 def _report(days, **meta_overrides) -> dict:
     meta = {"k": 10, "grid_ms": 1000, "exchange": "COINBASE", "symbol": "BTC-USD",
-            "engine": "native", "thresholds": {"crossed_usable_max": 0.01,
+            "engine": "native", "policy": {"reseed": True, "cold_ab": False},
+            "thresholds": {"crossed_usable_max": 0.01,
             "missing_usable_max": 0.02, "thin_usable_max": 0.1, "seed_crossed_frac_max": 0.05},
             "quota": {"ok": True, "reason": "ok", "used_gb_before": 0.26, "used_gb_after": 0.26},
             "generated_utc": "2026-07-01T00:00:00Z"}
@@ -288,6 +289,14 @@ def test_measured_mb_rejects_boolean():
                                                 "trades": None, "error": False, "reason": "", "ok": True}})
     assert rv.measured_mb(cal, "2025-01-10", "book") is None
     # so the cost model falls back to the conservative estimate, not 0.001 GB
+    assert rv.day_book_gb(cal, "2025-01-10") == (rv.EST_BOOK_GB_PER_DAY, "estimated")
+
+
+def test_measured_mb_rejects_negative():
+    # a negative mb must not lower the apparent cost — fall back to the conservative estimate
+    cal = _calendar(fill_status={"2025-01-10": {"book": {"present": True, "mb": -500.0, "ok": True},
+                                                "trades": None, "error": False, "reason": "", "ok": True}})
+    assert rv.measured_mb(cal, "2025-01-10", "book") is None
     assert rv.day_book_gb(cal, "2025-01-10") == (rv.EST_BOOK_GB_PER_DAY, "estimated")
 
 
@@ -884,6 +893,18 @@ def test_check_reports_validation_and_meta_drift(tmp_path):
     blockers = rv.new_blockers()
     rv.check_report_consistency(reps, blockers)
     assert any("symbol" in x for x in blockers["inconsistencies"])
+
+
+def test_missing_pinned_meta_blocks(tmp_path):
+    # a pinned run-parameter omitted from every report defeats the drift pin → block, don't pass
+    rep = _report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])
+    del rep["meta"]["engine"]
+    plan_path, cal_path = _write_tree(tmp_path, reports=[rep])
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    reps, _ = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_report_consistency(reps, blockers)
+    assert any("missing_meta:engine" in x for x in blockers["inconsistencies"])
 
 
 def test_meta_drift_pins_run_parameters(tmp_path):

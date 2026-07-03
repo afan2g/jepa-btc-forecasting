@@ -186,9 +186,11 @@ def measured_mb(cal: dict, day: str, product: str):
     p = fs.get(product)
     if isinstance(p, dict) and p.get("present"):
         mb = p.get("mb")
-        # exclude bool (subclasses int): a JSON true/false mb must not price a fill at 1.0/0.0 GB —
-        # fall back to None so the cost model uses the conservative per-day estimate instead.
-        return float(mb) if isinstance(mb, (int, float)) and not isinstance(mb, bool) else None
+        # exclude bool (subclasses int) and reject a negative size: a JSON true/false or negative mb
+        # must not price a fill at 1.0/0.0/negative GB — fall back to None so the cost model uses the
+        # conservative per-day estimate instead.
+        if isinstance(mb, (int, float)) and not isinstance(mb, bool) and mb >= 0:
+            return float(mb)
     return None
 
 
@@ -758,6 +760,11 @@ def check_report_consistency(reports: list, blockers: dict) -> None:
         for issue in summary_count_issues(report):
             blockers["inconsistencies"].append(f"{r['report_dir']}: {issue}")
         meta = _as_dict(report.get("meta"))
+        # a pinned field missing from EVERY report would make all pins equal (None==None) and pass
+        # drift silently — require each to be present, else the compatibility pin is defeated.
+        for f in _META_PIN_FIELDS:
+            if meta.get(f) is None:
+                blockers["inconsistencies"].append(f"{r['report_dir']}: missing_meta:{f}")
         pin = {f: meta.get(f) for f in _META_PIN_FIELDS}
         if ref_meta is None:
             ref_meta = pin
