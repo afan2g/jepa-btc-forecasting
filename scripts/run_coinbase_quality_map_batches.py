@@ -162,16 +162,47 @@ def read_report(path: pathlib.Path) -> dict | None:
     return report
 
 
-def report_matches_batch(report: dict, batch: dict) -> bool:
+def _planned_days(batch: dict, base_dir: str) -> set[str] | None:
+    """The batch's planned day set, read from the days file its command points at (`--days-file`,
+    resolved under base_dir the same way the runner reads it). None when the file is absent/
+    unreadable — data/tmp is ephemeral — so the caller falls back to the endpoint check."""
+    try:
+        argv = shlex.split(batch.get("command", ""))
+    except ValueError:
+        return None
+    if "--days-file" not in argv:
+        return None
+    i = argv.index("--days-file")
+    if i + 1 >= len(argv):
+        return None
+    try:
+        text = (pathlib.Path(base_dir) / argv[i + 1]).read_text()
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return None
+    days = {tok.strip() for line in text.splitlines() for tok in line.split(",")}
+    days.discard("")
+    return days or None
+
+
+def report_matches_batch(report: dict, batch: dict, *, base_dir: str) -> bool:
     """True iff a present report actually covers this batch's PLANNED day set. Guards against a stale
-    report left under the index-derived report_dir (e.g. `batch_003/`) by an EARLIER plan whose
-    batch boundaries differed — accepting it as complete would be a silent coverage gap in the very
-    full-window map that gates the backfill. Cross-checks the always-present n_days and, when the
-    report carries a day list, its first/last day (`days` are {"day": ...} dicts)."""
+    report left under the index-derived report_dir (e.g. `batch_003/`) by an EARLIER plan whose day
+    set differed — accepting it as complete would be a silent coverage gap in the very full-window
+    map that gates the backfill.
+
+    Primary check: the report's day set equals the batch's planned days (from the days file the
+    command points at). This catches an interior-day swap that leaves n_days/first/last unchanged.
+    Fallback (days file absent, or the report carries no per-day rows): the always-present n_days and,
+    when present, the first/last day (`days` are {"day": ...} dicts)."""
+    days = report.get("days") or []
+    report_days = {(r.get("day") if isinstance(r, dict) else r) for r in days}
+    report_days.discard(None)
+    planned = _planned_days(batch, base_dir)
+    if planned is not None and report_days:
+        return report_days == planned
     summary = report.get("summary") or {}
     if batch.get("n_days") is not None and summary.get("n_days") != batch.get("n_days"):
         return False
-    days = report.get("days") or []
     if days:
         first = days[0].get("day") if isinstance(days[0], dict) else days[0]
         last = days[-1].get("day") if isinstance(days[-1], dict) else days[-1]
@@ -189,7 +220,7 @@ def batch_status(batch: dict, *, base_dir: str, ledger_index: dict) -> str:
     failed, else pending."""
     report = read_report(report_path(batch, base_dir))
     if report is not None:
-        return COMPLETE if report_matches_batch(report, batch) else STALE
+        return COMPLETE if report_matches_batch(report, batch, base_dir=base_dir) else STALE
     last = ledger_index.get(batch["file"])
     if last is not None:
         code = last.get("exit_code")
@@ -331,7 +362,7 @@ def aggregate_quality(batches: list[dict], *, base_dir: str) -> dict | None:
     silently pads the coverage). Returns None when no batch has a matching local report yet."""
     reports = [r for b in batches
                if (r := read_report(report_path(b, base_dir))) is not None
-               and report_matches_batch(r, b)]
+               and report_matches_batch(r, b, base_dir=base_dir)]
     if not reports:
         return None
     n_days = 0

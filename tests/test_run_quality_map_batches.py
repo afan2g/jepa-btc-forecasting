@@ -274,6 +274,30 @@ def test_stale_report_is_excluded_from_the_aggregate(tmp_path):
     assert s["quality_map"]["n_batches_complete"] == 1  # only the matching report contributes
 
 
+def test_stale_report_with_swapped_interior_day_is_detected(tmp_path):
+    # Codex P2: a re-plan can swap an INTERIOR day while keeping n_days/first_day/last_day identical.
+    # The endpoint check alone would miss it, so the FULL planned day set (from the batch days file
+    # the command points at) must be compared against the report's per-day rows.
+    days_file = tmp_path / "batch_001_days.txt"
+    days_file.write_text("2025-01-01\n2025-01-02\n2025-01-03\n")  # current plan
+    report_dir = tmp_path / "reports" / "batch_001"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    batch = {"file": "batch_001_days.txt", "report_dir": str(report_dir),
+             "n_days": 3, "first_day": "2025-01-01", "last_day": "2025-01-03",
+             "command": (".venv/bin/python scripts/run_coinbase_quality_map.py --engine native "
+                         f"--no-cold-ab --days-file {days_file} --usable-calendar c "
+                         f"--out-dir {report_dir} --allow-broad")}
+    report = {"meta": {}, "summary": {"n_days": 3, "counts": {}, "coinapi_fill": {}},
+              # same count + endpoints, but the interior day is 01-09 (an OLD plan), not 01-02
+              "days": [{"day": "2025-01-01"}, {"day": "2025-01-09"}, {"day": "2025-01-03"}]}
+    (report_dir / REPORT_NAME).write_text(json.dumps(report))
+    assert qmb.batch_status(batch, base_dir=".", ledger_index={}) == qmb.STALE
+    # correcting the interior day to match the current days file → complete
+    report["days"][1]["day"] = "2025-01-02"
+    (report_dir / REPORT_NAME).write_text(json.dumps(report))
+    assert qmb.batch_status(batch, base_dir=".", ledger_index={}) == qmb.COMPLETE
+
+
 def test_report_matching_day_boundaries_is_complete(tmp_path):
     # a report whose day list boundaries match the plan row is accepted (days are {day: ...} dicts)
     m = _manifest_dict(tmp_path)
