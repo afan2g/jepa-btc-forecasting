@@ -973,8 +973,13 @@ Other open items:
       (engine-clock/`received_time` fallback + stable sort, monotonicity, dup-ts/dup-id, price/size
       sanity, sparse/missing-hour coverage, inter-arrival, calendar routing + gate booleans, GB/quota
       gate, strict-JSON deterministic report) with synthetic tests `tests/test_trade_checks.py` — no
-      vendor calls. Still open: the Lake CLI wrapper (Phase 1b), the bounded live run (Phase 2), and
-      bar-builder enforcement (Phase 3/4).
+      vendor calls.
+      **Phase 1b landed:** the thin Lake CLI wrapper `ingest/validate_trade_feeds.py` over the pure
+      module unchanged (bounded day/venue selection §3, calendar fill/excluded routing, GB/quota gate
+      reusing the pure helpers with an injectable load seam, `--dry-run`/`--strict`, the exit-code
+      contract `0`/`5`/`7`) with synthetic tests `tests/test_validate_trade_feeds.py` — **no live
+      vendor calls run** (import + synthetic paths stay vendor-free). Still open: the bounded live
+      run (Phase 2, ask-first) and calendar/CoinAPI-fill/bar-builder enforcement (Phase 3/3b/4).
 - [x] **Within-timestamp ordering for CoinAPI** — resolved 2026-07-02: file/`seq` order is
       canonical, ties break by original row index, `order_id` is never an ordering key
       (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,
