@@ -7,6 +7,7 @@ Drives the tool end-to-end on SYNTHETIC plan/report/calendar JSON — no vendor 
 contract, calendar/cost helpers, validation, the per-day record builder, plan-driven
 completeness, consistency/drift/fill-availability checks, manifest assembly, and the CLI
 (readiness/inspection modes, fail-closed exit codes, deterministic output)."""
+import datetime as _dt
 import importlib.util as _ilu
 import json
 import os
@@ -70,6 +71,26 @@ def _fill_block(needs_fill, why, fill_profile=None, full_day_reason=None,
             "seams": seams, "seam_policy": seam_policy}
 
 
+def _seg_iso(ns):
+    secs, rem = divmod(ns, 1_000_000_000)
+    b = _dt.datetime.fromtimestamp(secs, tz=_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    return f"{b}.{rem:09d}Z" if rem else f"{b}Z"
+
+
+def _day_bounds(day):
+    d = _dt.date.fromisoformat(day)
+    o = int(_dt.datetime(d.year, d.month, d.day, tzinfo=_dt.timezone.utc).timestamp()) * 1_000_000_000
+    return o, o + 86_400 * 1_000_000_000
+
+
+def _full_day_seg(day, source="coinapi", reason="quality_over_usable_bar"):
+    """A single whole-day segment that genuinely partitions the day (independent of the module's
+    own bounds math — a divergence would surface as a validation failure in the ready tests)."""
+    o, e = _day_bounds(day)
+    return {"source": source, "start_ts": o, "start_iso": _seg_iso(o), "end_ts": e,
+            "end_iso": _seg_iso(e), "reason": reason}
+
+
 def _day(day, classification, coinapi_fill, *, trusted=(None, None),
          calendar=None, reasons=None) -> dict:
     return {
@@ -113,8 +134,7 @@ def _clean_reports():
         _day("2025-01-02", "lake_present_degraded",
              _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
                          full_day_reason="quality_over_usable_bar",
-                         fill_segments=[{"source": "coinapi", "start_ts": 1, "start_iso": "x",
-                                         "end_ts": 2, "end_iso": "y", "reason": "r"}],
+                         fill_segments=[_full_day_seg("2025-01-02")],
                          seams=[], seam_policy={"seam_guard_s": 60.0})),
         _day("2025-01-11", "lake_usable", _fill_block(False, "lake_usable"),
              calendar=_TRADE_ONLY_CTX),
@@ -171,6 +191,11 @@ def test_fill_profile_enum_aligned_with_stitch_policy():
 def test_default_seam_policy_aligned_with_stitch_policy():
     import recon.stitch_policy as sp
     assert rv.DEFAULT_SEAM_POLICY == sp.DEFAULT_SEAM_POLICY.as_dict()
+
+
+def test_segment_sources_aligned_with_stitch_policy():
+    import recon.stitch_policy as sp
+    assert rv.SEGMENT_SOURCES == sp.SOURCES
 
 
 def test_why_codes_cover_every_runner_fill_decision():
@@ -292,8 +317,7 @@ def test_day_record_issues_clean():
     rec = _day("2025-01-02", "lake_present_degraded",
                _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
                            full_day_reason="quality_over_usable_bar",
-                           fill_segments=[{"source": "coinapi", "start_ts": 1, "start_iso": "x",
-                                           "end_ts": 2, "end_iso": "y", "reason": "r"}],
+                           fill_segments=[_full_day_seg("2025-01-02")],
                            seams=[], seam_policy={"seam_guard_s": 60.0}))
     assert rv.day_record_issues(rec) == []
 
@@ -360,6 +384,30 @@ def test_day_record_issues_fill_day_requires_stitch_plan():
     assert not any(i.startswith("fill_day_missing_") for i in rv.day_record_issues(ok))
 
 
+def test_day_record_issues_malformed_fill_segments():
+    day = "2025-01-02"
+    o, e = _day_bounds(day)
+
+    def _seg(st, en, src="coinapi"):
+        return {"source": src, "start_ts": st, "start_iso": _seg_iso(st), "end_ts": en,
+                "end_iso": _seg_iso(en), "reason": "r"}
+
+    def _issues(segs, profile="full_day_fill", fdr="quality_over_usable_bar", seams=None):
+        rec = _day(day, "lake_present_degraded",
+                   _fill_block(True, "quality_over_usable_bar", fill_profile=profile,
+                               full_day_reason=fdr, fill_segments=segs,
+                               seams=seams if seams is not None else [],
+                               seam_policy={"seam_guard_s": 60.0}))
+        return rv.day_record_issues(rec)
+
+    assert "fill_segments_start_ne_day_open" in _issues([_seg(o + 1000, e)])
+    assert "fill_segments_end_ne_day_close" in _issues([_seg(o, e - 1000)])
+    assert any("gap_or_overlap" in i for i in
+               _issues([_seg(o, o + rv.DAY_NS // 2, "lake"), _seg(o + rv.DAY_NS // 2 + 5, e)],
+                       profile="mixed_partial_fill", fdr=None, seams=[o + rv.DAY_NS // 2]))
+    assert any("bad_source" in i for i in _issues([_seg(o, e, "binance")]))
+
+
 def test_day_record_issues_fill_decision_contradicts_classification():
     # stale report: a degraded/missing day mismarked as no-fill would silently DROP a required fill
     for cls in ("lake_present_degraded", "missing_needs_coinapi"):
@@ -410,8 +458,7 @@ def test_build_day_record_quality_map_full_day_fill():
     assert bf["needed"] is True and bf["kind"] == "full_day" and bf["source"] == "quality_map"
     assert bf["fill_profile"] == "full_day_fill"
     assert bf["gb_basis"] == "estimated" and bf["gb"] == rv.EST_BOOK_GB_PER_DAY
-    assert bf["fill_segments"] == [{"source": "coinapi", "start_ts": 1, "start_iso": "x",
-                                    "end_ts": 2, "end_iso": "y", "reason": "r"}]
+    assert bf["fill_segments"] == [_full_day_seg("2025-01-02")]   # preserved verbatim
     assert rec["trade_fill"]["needed"] is False
 
 
@@ -518,6 +565,32 @@ def test_completeness_batch_incomplete_on_refused_quota(tmp_path):
     blockers = rv.new_blockers()
     rv.check_completeness(plan, reps, day_index, cal, blockers)
     assert blockers["batch_incomplete"]
+
+
+def test_completeness_batch_incomplete_on_missing_quota_reason(tmp_path):
+    reports = _clean_reports()
+    reports[0]["meta"]["quota"] = {}   # quota dict present but no completion evidence (no reason)
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    cal = rv.load_json_object(cal_path, what="usable calendar")
+    reps, day_index = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_completeness(plan, reps, day_index, cal, blockers)
+    assert any("quota" in x for x in blockers["batch_incomplete"])
+
+
+def test_completeness_stale_report_vs_batch_file_blocks(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    # tamper the authoritative batch days-file so it no longer matches the report's day-set
+    bf = os.path.join(plan["meta"]["out_dir"], plan["batches"][0]["file"])
+    with open(bf, "w") as f:
+        f.write("2025-01-01\n2025-01-02\n2025-01-03\n")
+    cal = rv.load_json_object(cal_path, what="usable calendar")
+    reports, day_index = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_completeness(plan, reports, day_index, cal, blockers)
+    assert any(("batch file" in x or "stale" in x) for x in blockers["batch_incomplete"])
 
 
 def test_completeness_gap_day_unmapped_blocks(tmp_path):

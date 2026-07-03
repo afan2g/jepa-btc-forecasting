@@ -50,6 +50,8 @@ PARTIAL_FILL_PROFILES = ("leading_partial_fill", "trailing_partial_fill",
                          "internal_gap_fill", "mixed_partial_fill")
 FILL_PROFILES = (LAKE_ONLY, FULL_DAY_FILL, *PARTIAL_FILL_PROFILES)
 
+SEGMENT_SOURCES = ("lake", "coinapi", "excluded")   # pinned from recon.stitch_policy.SOURCES
+
 NS_PER_S = 1_000_000_000
 DAY_NS = 86_400 * NS_PER_S
 # Pinned copy of recon.stitch_policy.DEFAULT_SEAM_POLICY.as_dict() (contract-tested) — stamped on
@@ -228,6 +230,41 @@ def _fill_contract_issue(cls, needs_fill, why):
     return None
 
 
+def _fill_segments_issues(day, segments) -> list:
+    """A fill day's segments must PARTITION [day_open, day_close) as ordered, contiguous half-open
+    [start, end) spans with a known source (spec §9 #3) — a manifest is an executable stitch plan, so
+    a segment that starts after day-open, ends before day-close, overlaps/gaps a neighbour, or uses an
+    unexpected source must fail review. Structural checks always run; the day-open/close coverage
+    check runs only when `day` is a parseable ISO date."""
+    issues = []
+    try:
+        day_open, day_end = _day_bounds_ns(day)
+    except (TypeError, ValueError):
+        day_open = day_end = None
+    prev_end = None
+    for i, s in enumerate(segments):
+        if not isinstance(s, dict):
+            issues.append(f"fill_segment[{i}]_not_object")
+            continue
+        st, en, src = s.get("start_ts"), s.get("end_ts"), s.get("source")
+        if not isinstance(st, int) or not isinstance(en, int):
+            issues.append(f"fill_segment[{i}]_non_int_bounds")
+            continue
+        if en <= st:
+            issues.append(f"fill_segment[{i}]_non_positive_span")
+        if src not in SEGMENT_SOURCES:
+            issues.append(f"fill_segment[{i}]_bad_source:{src}")
+        if prev_end is not None:
+            if st != prev_end:
+                issues.append(f"fill_segments_gap_or_overlap_at[{i}]")
+        elif day_open is not None and st != day_open:
+            issues.append("fill_segments_start_ne_day_open")
+        prev_end = en
+    if day_end is not None and prev_end is not None and prev_end != day_end:
+        issues.append("fill_segments_end_ne_day_close")
+    return issues
+
+
 def day_record_issues(rec: dict) -> list:
     """Structural + enum + contradiction issues for ONE report-backed day record. Never applied
     to calendar-only days (they carry classification=None by construction)."""
@@ -273,8 +310,11 @@ def day_record_issues(rec: dict) -> list:
     # The runner always emits these for a needs_fill day; their absence is a corrupt report that
     # would otherwise pass an approved fill with no plan for the backfill runner to execute.
     if nf is True and prof not in (None, LAKE_ONLY):
-        if not isinstance(cf.get("fill_segments"), list) or not cf.get("fill_segments"):
+        segs = cf.get("fill_segments")
+        if not isinstance(segs, list) or not segs:
             issues.append("fill_day_missing_fill_segments")
+        else:
+            issues.extend(_fill_segments_issues(rec.get("day"), segs))  # segments must partition the day
         if not isinstance(cf.get("seams"), list):        # may be empty (full_day) but never null
             issues.append("fill_day_missing_seams")
         if not isinstance(cf.get("seam_policy"), dict):
@@ -455,26 +495,63 @@ def load_batch_reports(plan: dict) -> tuple:
 
 
 def _batch_ran(report: dict) -> list:
-    """Issues indicating the batch did NOT actually run to completion (spec §fix-5)."""
+    """Issues indicating the batch did NOT actually run to completion (spec §fix-5). Requires the
+    quota completion field `reason` to be present and prove the run happened — an empty `quota: {}`
+    or a missing/refusal `reason` fails closed rather than passing as a ran batch."""
     issues = []
     meta = report.get("meta")
     if not isinstance(meta, dict) or not isinstance(meta.get("quota"), dict):
         return ["missing meta.quota"]
     reason = meta["quota"].get("reason")
-    if reason in ("quota_headroom", "exceeds_auto_cap"):
-        issues.append(f"quota refused: {reason}")
+    if reason is None:
+        issues.append("missing meta.quota.reason")
+    elif reason not in ("ok", "no_days_to_load"):   # quota_headroom / exceeds_auto_cap / unknown
+        issues.append(f"quota not ok: {reason}")
     n_days = (report.get("summary") or {}).get("n_days")
     if n_days != len(report.get("days") or []):
         issues.append(f"summary.n_days {n_days} != len(days) {len(report.get('days') or [])}")
     return issues
 
 
+def _check_batch_matches_plan(r: dict, out_dir, blockers: dict) -> None:
+    """The report a batch points at must have been produced FOR that batch: its day-set must match
+    the batch's authoritative days-file (and the plan's n_days/first/last). A stale report whose
+    internal summary.n_days is self-consistent but was built for a different day-set would otherwise
+    slip past `_batch_ran` (spec §4 completeness)."""
+    b = r["batch"] or {}
+    rep_days = sorted(rec.get("day") for rec in r["report"].get("days") or [] if rec.get("day"))
+    if b.get("n_days") is not None and b["n_days"] != len(rep_days):
+        blockers["batch_incomplete"].append(
+            f"{r['report_dir']}: plan n_days {b['n_days']} != report days {len(rep_days)}")
+    if rep_days:
+        if b.get("first_day") is not None and b["first_day"] != rep_days[0]:
+            blockers["batch_incomplete"].append(
+                f"{r['report_dir']}: plan first_day {b['first_day']} != report {rep_days[0]}")
+        if b.get("last_day") is not None and b["last_day"] != rep_days[-1]:
+            blockers["batch_incomplete"].append(
+                f"{r['report_dir']}: plan last_day {b['last_day']} != report {rep_days[-1]}")
+    # authoritative check: the batch days-file the runner consumed must equal the report's day-set
+    bf = b.get("file")
+    if out_dir and bf:
+        path = os.path.join(out_dir, bf)
+        if not os.path.exists(path):
+            blockers["batch_incomplete"].append(f"{r['report_dir']}: batch file {bf} missing under {out_dir}")
+        else:
+            with open(path) as f:
+                planned = sorted(x.strip() for x in f.read().splitlines() if x.strip())
+            if planned != rep_days:
+                blockers["batch_incomplete"].append(
+                    f"{r['report_dir']}: report day-set != batch file {bf} (stale report?)")
+
+
 def check_completeness(plan: dict, reports: list, day_index: dict, cal: dict,
                        blockers: dict) -> None:
     """Plan-driven completeness (spec §4). Populates blockers in place."""
+    out_dir = (plan.get("meta") or {}).get("out_dir")
     for r in reports:
         for msg in _batch_ran(r["report"]):
             blockers["batch_incomplete"].append(f"{r['report_dir']}: {msg}")
+        _check_batch_matches_plan(r, out_dir, blockers)
 
     expected = set(calendar_batch_days(cal))
     mapped = set(day_index)
