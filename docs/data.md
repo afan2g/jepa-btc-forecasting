@@ -682,7 +682,7 @@ local lakeapi cache; vendor counter may lag ~60 min). Those two quality-map runs
   --days 2024-08-05 --out-dir data/reports/seam_day_validation_2024-08-05
 ```
 
-- **2025-01-07 (canonical leading seam day) — fill-decision PASS (overlap parity PASS, see below).** `lake_present_degraded`
+- **2025-01-07 (canonical leading seam day) — fill-decision PASS (overlap stitch VALIDATED, see below).** `lake_present_degraded`
   (`missing_book_fraction=0.6146>0.02`), seed accepted 14:45:00.846Z with all 22,169 `book` candidates
   clean (`snapshot_reason_codes={"ok":22169}` → trusted source, not crossed). `coinapi_fill.needs_fill
   =true`, `fill_profile=leading_partial_fill` — the **native coverage metrics produced the expected
@@ -748,6 +748,10 @@ local lakeapi cache; vendor counter may lag ~60 min). Those two quality-map runs
 ```bash
 # one bounded, gate-allowed single day (approved spend) — NOT a backfill
 .venv/bin/python ingest/download_coinapi.py --start 2025-01-07 --end 2025-01-07
+# Lake-side seam decision — produces the cited coinbase_quality_map.json (seam ts + fill_segments)
+.venv/bin/python scripts/run_coinbase_quality_map.py --engine native --no-cold-ab --days 2025-01-07 \
+  --out-dir data/reports/seam_overlap_2025-01-07_quality
+# CoinAPI-overlap parity gate — produces parity_coinbase_2025-01-07_k10.{json,csv}
 .venv/bin/python scripts/run_coinbase_parity.py --day 2025-01-07 --k 10 --size-policy decrement \
   --engine native --out-dir data/reports/seam_overlap_2025-01-07 --dump-grid
 ```
