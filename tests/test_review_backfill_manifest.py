@@ -333,6 +333,28 @@ def test_day_record_issues_missing_keys():
     assert "missing_key:coinapi_fill" in issues
 
 
+def test_day_record_issues_fill_decision_contradicts_classification():
+    # stale report: a degraded/missing day mismarked as no-fill would silently DROP a required fill
+    for cls in ("lake_present_degraded", "missing_needs_coinapi"):
+        rec = _day("d", cls, _fill_block(False, "lake_usable"))
+        assert any(i.startswith("fill_decision_contradicts_classification")
+                   for i in rv.day_record_issues(rec))
+    # a lake_usable day mismarked as needing a full-day fill is also a contradiction
+    rec2 = _day("d", "lake_usable",
+                _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                            full_day_reason="quality_over_usable_bar"))
+    assert any(i.startswith("fill_decision_contradicts_classification")
+               for i in rv.day_record_issues(rec2))
+    # both legitimate inconclusive outcomes pass
+    ok_unresolved = _day("d", "inconclusive", _fill_block(None, "no_verdict"))
+    ok_crossed = _day("d", "inconclusive",
+                      _fill_block(True, "crossed_seed_source_cross_validated_2026-07-01",
+                                  fill_profile="full_day_fill", full_day_reason="crossed_seed_source"))
+    for rec in (ok_unresolved, ok_crossed):
+        assert not any(i.startswith("fill_decision_contradicts_classification")
+                       for i in rv.day_record_issues(rec))
+
+
 # =========================================================================== Task 6: counts
 def test_recompute_class_counts():
     days = [_day("a", "lake_usable", _fill_block(False, "lake_usable")),
@@ -592,6 +614,17 @@ def test_malformed_report_day_missing_classification_fails_closed(tmp_path):
                                     report_only=False)
     assert m["meta"]["status"] == "blocking"
     assert any("classification" in x for x in m["blockers"]["missing_keys"])
+
+
+def test_readiness_blocks_fill_contradicting_classification(tmp_path):
+    # a degraded day corrupted to claim no fill must NOT silently drop the fill into a ready manifest
+    reports = _clean_reports()
+    reports[0]["days"][1]["coinapi_fill"] = _fill_block(False, "lake_usable")   # 2025-01-02 degraded
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    assert m["meta"]["status"] == "blocking"
+    assert any("contradicts_classification" in x for x in m["blockers"]["inconsistencies"])
 
 
 def test_build_manifest_inspection_report_only(tmp_path):

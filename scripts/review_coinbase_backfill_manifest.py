@@ -192,6 +192,34 @@ def report_missing_keys(report: dict) -> list:
     return [k for k in _REQUIRED_REPORT_KEYS if k not in report]
 
 
+# The runner's deterministic classification -> (needs_fill, why) contract
+# (run_coinbase_quality_map.coinapi_fill_decision). A report whose coinapi_fill disagrees with its
+# own classification is stale/corrupt — trusting it would silently DROP a required fill (a degraded
+# or missing day mismarked needs_fill=false) or invent one, so it must fail closed.
+_CLASS_FILL_CONTRACT = {
+    MISSING_NEEDS_COINAPI: (True, "lake_book_delta_v2_absent"),
+    LAKE_PRESENT_DEGRADED: (True, "quality_over_usable_bar"),
+    LAKE_USABLE: (False, "lake_usable"),
+    EXCLUDED: (None, "excluded_not_in_scope"),
+}
+# `inconclusive` has two legitimate outcomes (order-independent of reason prose): unresolved, or the
+# crossed-seed-source fill (the provisional 2026-07-01 cross-validation policy).
+_INCONCLUSIVE_VALID_FILL = {(None, "no_verdict"),
+                            (True, "crossed_seed_source_cross_validated_2026-07-01")}
+
+
+def _fill_contract_issue(cls, needs_fill, why):
+    """None if (needs_fill, why) matches the classification's runner contract, else an issue code."""
+    if cls in _CLASS_FILL_CONTRACT:
+        if (needs_fill, why) != _CLASS_FILL_CONTRACT[cls]:
+            return (f"fill_decision_contradicts_classification:{cls}:got=({needs_fill},{why}):"
+                    f"expected={_CLASS_FILL_CONTRACT[cls]}")
+    elif cls == INCONCLUSIVE:
+        if (needs_fill, why) not in _INCONCLUSIVE_VALID_FILL:
+            return f"fill_decision_contradicts_classification:{cls}:got=({needs_fill},{why})"
+    return None
+
+
 def day_record_issues(rec: dict) -> list:
     """Structural + enum + contradiction issues for ONE report-backed day record. Never applied
     to calendar-only days (they carry classification=None by construction)."""
@@ -233,6 +261,10 @@ def day_record_issues(rec: dict) -> list:
         q = rec.get("quality") or {}
         if q.get("trusted_lake_start_ts") is not None or q.get("trusted_lake_end_ts") is not None:
             issues.append("full_day_with_trusted_lake_span")
+    # the fill decision must match the classification it was derived from (never drop/invent a fill)
+    contract = _fill_contract_issue(cls, nf, why)
+    if contract is not None:
+        issues.append(contract)
     return issues
 
 
