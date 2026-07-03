@@ -273,6 +273,10 @@ def _validate_pairs(routed, *, sess, load_fn, load_calls: list) -> list[dict]:
             # no Lake load (the missing/deferred side is expected, §8).
             records.append(tc.validate_trade_frame(None, venue, day, calendar_state=cs))
             continue
+        # Count the vendor attempt BEFORE calling the seam: `lakeapi.load_data` is invoked for every
+        # required pair, so `lakeapi_calls` must include an attempt even when it raises a load_error
+        # or NoFilesFound (this report is the audit artifact for vendor access/quota evidence).
+        load_calls.append((venue, day))
         try:
             df = load_fn(sess, venue, day)
         except Exception as e:                       # noqa: BLE001 — surface, never crash the run
@@ -281,7 +285,6 @@ def _validate_pairs(routed, *, sess, load_fn, load_calls: list) -> list[dict]:
             else:
                 records.append(_load_error_record(venue, day, cs, e))
                 continue
-        load_calls.append((venue, day))
         records.append(tc.validate_trade_frame(df, venue, day, calendar_state=cs))
     return records
 

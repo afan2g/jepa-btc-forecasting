@@ -394,11 +394,15 @@ def test_unexpected_load_error_is_surfaced_as_a_fail(tmp_path):
     def boom(_s, _v, _d):
         raise RuntimeError("connection reset")
 
-    argv = ["--days", "2025-06-01", "--venues", "binance_spot", "--out-dir", str(out)]
+    argv = ["--days", "2025-06-01", "--venues", "binance_spot", "--out-dir", str(out),
+            "--calendar", str(tmp_path / "none.json")]
     rc = vf.run(vf.parse_args(argv), load_fn=boom, session_factory=_fake_session,
                 used_data_fn=_used(0.0), generated_utc=FIXED_UTC)
-    rec = json.loads((out / "trade_feed_validation.json").read_text())["days"][0]
+    rep = json.loads((out / "trade_feed_validation.json").read_text())
+    rec = rep["days"][0]
     assert rec["status"] == tc.FAIL and tc.LOAD_ERROR in rec["reason_codes"]
+    # the failed load still made a lakeapi.load_data attempt → it must be counted in the audit meta
+    assert rep["meta"]["vendor_api"]["lakeapi_calls"] == 1
     assert rc == 0
 
 
