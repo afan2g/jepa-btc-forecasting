@@ -183,17 +183,22 @@ def is_fillable(cal: dict, day: str, product: str) -> bool:
     return isinstance(p, dict) and p.get("present") is True and p.get("ok") is True
 
 
-def validate_calendar_fill_flags(cal: dict, path: str) -> None:
-    """coinbase_fill_days flags drive the book-gap vs trade-only split; a malformed non-bool flag
-    (e.g. "trades": "true") reads as False in book_gap_days/trade_fill_days yet the day stays a batch
-    day, so a matching report could pass ready while silently omitting the fill. Fail closed at load
-    like the planner (plan_coinbase_quality_map_batches.load_calendar) does."""
-    fill = cal.get("coinbase_fill_days")
-    if fill is None:
-        return
-    if not isinstance(fill, dict):
-        raise ReviewInputError(f"usable calendar {path}: 'coinbase_fill_days' must be an object")
-    for d, v in fill.items():
+_REQUIRED_CALENDAR_FIELDS = (("lake_all_days", list), ("coinbase_fill_days", dict),
+                             ("excluded_days_by_reason", dict))
+
+
+def validate_calendar(cal: dict, path: str) -> None:
+    """The review tool re-reads the usable calendar, so it must fail closed on the same shapes the
+    planner's load_calendar rejects. A MISSING coinbase_fill_days (or lake_all_days /
+    excluded_days_by_reason) would make the fill helpers treat the calendar as gap-free and silently
+    drop required CoinAPI book/trade fills (book-gap days are otherwise only in
+    plan.skipped.fill_days_book_gap); a malformed non-bool fill flag likewise reads as False while
+    the day stays a batch day."""
+    for field, typ in _REQUIRED_CALENDAR_FIELDS:
+        if not isinstance(cal.get(field), typ):
+            raise ReviewInputError(f"usable calendar {path}: missing or invalid required field "
+                                   f"'{field}' (expected {typ.__name__})")
+    for d, v in cal["coinbase_fill_days"].items():
         if not isinstance(v, dict) or not all(isinstance(v.get(k), bool) for k in ("book", "trades")):
             raise ReviewInputError(f"usable calendar {path}: coinbase_fill_days entry {d} must be a "
                                    "{'book': bool, 'trades': bool} object")
@@ -763,16 +768,21 @@ def check_fill_availability(cal: dict, blockers: dict) -> None:
             blockers["trade_fill_unavailable"].append(d)
 
 
-def check_report_fill_availability(day_index: dict, blockers: dict) -> None:
-    """Every REPORT-driven book fill (a mapped day with coinapi_fill.needs_fill True) must have the
-    report's own CoinAPI availability flag `coinapi.fillable` True. A present-but-degraded/crossed-
-    seed day is never a calendar book-gap, so `check_fill_availability` never sees it; without this
-    a degraded day whose CoinAPI replacement is unavailable would reach `ready` and authorize an
-    unfillable backfill."""
+def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -> None:
+    """Every REPORT-driven book fill (a mapped day with coinapi_fill.needs_fill True) must be
+    verifiably available. A present-but-degraded/crossed-seed day is never a calendar book-gap, so
+    `check_fill_availability` never sees it. Require the report's own `coinapi.fillable` True AND,
+    when the calendar carries measured status for the day, the stricter `is_fillable` (present AND
+    ok) — the report's `fillable` only checks `book.present`, so a `present=true, ok=false`
+    (unverifiable) flat file would otherwise reach `ready` and even be priced from the bad MB."""
     for d, rec in day_index.items():
         cf = _as_dict(rec.get("coinapi_fill"))
-        if cf.get("needs_fill") is True and _as_dict(rec.get("coinapi")).get("fillable") is not True:
+        if cf.get("needs_fill") is not True:
+            continue
+        if _as_dict(rec.get("coinapi")).get("fillable") is not True:
             blockers["book_fill_unavailable"].append(f"{d}:report_coinapi_fillable_not_true")
+        elif _fill_status(cal, d) is not None and not is_fillable(cal, d, "book"):
+            blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
 
 
 # ----------------------------------------------------------- sections + cost summary + assembly
@@ -904,7 +914,7 @@ def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only)
         raise ReviewInputError("no usable calendar: pass --usable-calendar or set "
                                "plan meta.input_calendar")
     cal = load_json_object(resolved_cal, what="usable calendar")
-    validate_calendar_fill_flags(cal, resolved_cal)
+    validate_calendar(cal, resolved_cal)
     reports, day_index = load_batch_reports(plan)
 
     blockers = new_blockers()
@@ -912,7 +922,7 @@ def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only)
     check_report_consistency(reports, blockers)
     check_calendar_drift(reports, cal, blockers)
     check_fill_availability(cal, blockers)
-    check_report_fill_availability(day_index, blockers)
+    check_report_fill_availability(day_index, cal, blockers)
 
     days = [build_day_record(d, day_index.get(d), cal) for d in _universe(reports, cal)]
     sections, cost = _sections(days), _cost_summary(days, cal)
@@ -944,7 +954,7 @@ def build_manifest_inspection(report_paths, cal_path, *, generated_utc) -> dict:
                         "report": load_json_object(p, what="quality-map report")})
     cal = load_json_object(cal_path, what="usable calendar") if cal_path else {}
     if cal_path:
-        validate_calendar_fill_flags(cal, cal_path)
+        validate_calendar(cal, cal_path)
     day_index = {}
     for r in reports:
         for rec in r["report"].get("days") or []:

@@ -308,11 +308,21 @@ def test_is_fillable_requires_strict_true():
     assert rv.is_fillable(cal, "2025-01-10", "trades") is True
 
 
-def test_validate_calendar_fill_flags():
-    rv.validate_calendar_fill_flags(_calendar(), "cal")   # clean: no raise
-    bad = _calendar(coinbase_fill_days={"2025-01-10": {"book": "true", "trades": True}})
+def test_validate_calendar():
+    rv.validate_calendar(_calendar(), "cal")   # clean: no raise
+    bad_flag = _calendar(coinbase_fill_days={"2025-01-10": {"book": "true", "trades": True}})
     with pytest.raises(rv.ReviewInputError, match="coinbase_fill_days"):
-        rv.validate_calendar_fill_flags(bad, "cal")
+        rv.validate_calendar(bad_flag, "cal")
+    # a MISSING fill-day registry must fail closed (else the calendar reads as gap-free and drops fills)
+    missing = _calendar()
+    del missing["coinbase_fill_days"]
+    with pytest.raises(rv.ReviewInputError, match="coinbase_fill_days"):
+        rv.validate_calendar(missing, "cal")
+    # a missing lake_all_days / excluded_days_by_reason likewise fails closed
+    no_lake = _calendar()
+    del no_lake["lake_all_days"]
+    with pytest.raises(rv.ReviewInputError, match="lake_all_days"):
+        rv.validate_calendar(no_lake, "cal")
 
 
 def test_readiness_rejects_malformed_calendar_fill_flag(tmp_path):
@@ -909,9 +919,21 @@ def test_check_report_fill_availability_blocks_unverified_report_fill():
         "d4": {"coinapi_fill": {"needs_fill": False}, "coinapi": {"fillable": None}},
     }
     blockers = rv.new_blockers()
-    rv.check_report_fill_availability(day_index, blockers)
+    rv.check_report_fill_availability(day_index, {}, blockers)
     assert set(blockers["book_fill_unavailable"]) == {
         "d1:report_coinapi_fillable_not_true", "d3:report_coinapi_fillable_not_true"}
+
+
+def test_check_report_fill_availability_rechecks_calendar_ok():
+    # report `coinapi.fillable` only reflects book.present; if the calendar says present=true but
+    # ok=false (unverifiable flat file), the stricter is_fillable cross-check must block.
+    cal = _calendar(fill_status={"2025-01-02": {"book": {"present": True, "mb": 100.0, "ok": False},
+                                                "trades": None, "error": False, "reason": "", "ok": True}})
+    day_index = {"2025-01-02": {"coinapi_fill": {"needs_fill": True},
+                                "coinapi": {"fillable": True}}}
+    blockers = rv.new_blockers()
+    rv.check_report_fill_availability(day_index, cal, blockers)
+    assert blockers["book_fill_unavailable"] == ["2025-01-02:calendar_book_not_ok"]
 
 
 def test_readiness_blocks_report_fill_without_availability(tmp_path):
