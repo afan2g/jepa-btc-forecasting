@@ -174,7 +174,8 @@ def calendar_batch_days(cal: dict) -> list:
 
 
 def _fill_status(cal: dict, day: str):
-    return (cal.get("fill_status") or {}).get(day)
+    fs = cal.get("fill_status")
+    return fs.get(day) if isinstance(fs, dict) else None   # a non-dict container has no records
 
 
 def measured_mb(cal: dict, day: str, product: str):
@@ -233,6 +234,8 @@ def validate_calendar(cal: dict, path: str) -> None:
         if not isinstance(v, dict) or not all(isinstance(v.get(k), bool) for k in ("book", "trades")):
             raise ReviewInputError(f"usable calendar {path}: coinbase_fill_days entry {d} must be a "
                                    "{'book': bool, 'trades': bool} object")
+    if "fill_status" in cal and not isinstance(cal["fill_status"], dict):
+        raise ReviewInputError(f"usable calendar {path}: 'fill_status' must be an object")
 
 
 # ----------------------------------------------------------- cost model
@@ -812,8 +815,11 @@ def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -
         if cf.get("needs_fill") is not True:
             continue
         coinapi = _as_dict(rec.get("coinapi"))
-        if coinapi.get("parquet_local") is True:
-            continue   # CoinAPI data already on disk for the day → the fill is available
+        pq = coinapi.get("parquet_path")
+        # re-verify the parquet on disk NOW: the report's parquet_local flag was computed at report
+        # time, so a stale/removed file must not count as evidence (local stat, not vendor I/O).
+        if coinapi.get("parquet_local") is True and isinstance(pq, str) and os.path.exists(pq):
+            continue   # local CoinAPI parquet re-verified on disk → the fill is available
         if _fill_status(cal, d) is not None:
             if not is_fillable(cal, d, "book"):
                 blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")

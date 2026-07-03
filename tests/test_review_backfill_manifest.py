@@ -963,14 +963,31 @@ def test_check_report_fill_availability_blocks_unverified_report_fill():
         "d1:report_coinapi_fillable_not_true", "d3:report_coinapi_fillable_not_true"}
 
 
-def test_report_fill_available_via_local_parquet():
-    # a report-driven fill with CoinAPI data already on disk (parquet_local) is available even
-    # though coinapi.fillable is None (not a calendar gap) — must NOT block
+def test_report_fill_available_via_local_parquet(tmp_path):
+    # a report-driven fill with CoinAPI data on disk is available (fillable None, not a calendar gap)
+    pq = tmp_path / "data.parquet"
+    pq.write_text("x")
     day_index = {"d1": {"coinapi_fill": {"needs_fill": True},
-                        "coinapi": {"fillable": None, "parquet_local": True}}}
+                        "coinapi": {"fillable": None, "parquet_local": True,
+                                    "parquet_path": str(pq)}}}
     blockers = rv.new_blockers()
     rv.check_report_fill_availability(day_index, {}, blockers)
     assert blockers["book_fill_unavailable"] == []
+    # if the parquet is gone, the stale report flag must NOT be trusted → blocked
+    pq.unlink()
+    blockers2 = rv.new_blockers()
+    rv.check_report_fill_availability(day_index, {}, blockers2)
+    assert blockers2["book_fill_unavailable"] == ["d1:report_coinapi_fillable_not_true"]
+
+
+def test_fill_status_container_non_dict():
+    # a top-level fill_status that is a truthy non-object must not crash _fill_status/is_fillable
+    cal = _calendar(fill_status=["not", "an", "object"])
+    assert rv.is_fillable(cal, "2025-01-10", "book") is False   # no crash
+    assert rv.measured_mb(cal, "2025-01-10", "book") is None
+    # and validate_calendar fails closed on it (exit 2)
+    with pytest.raises(rv.ReviewInputError, match="fill_status"):
+        rv.validate_calendar(cal, "cal")
 
 
 def test_check_report_fill_availability_rechecks_calendar_ok():
