@@ -334,15 +334,43 @@ def unit_gb(unit: Unit) -> float:
     return lb.LAKE_GB_PER_DAY[(unit.exchange, unit.symbol)][unit.feed]
 
 
-def pending_units(units: list[Unit], out_root: str, *, overwrite: bool) -> list[Unit]:
-    """Units that will actually transfer: all when --overwrite, else only those whose final
-    data.parquet does not yet exist. The quota/broad gate estimates from THESE (not the full range),
-    so a --resume of a mostly-complete batch gates only the remaining work — otherwise, once the
-    first run consumed quota, a resume of one leftover partition could spuriously exit 4."""
+def sparse_accepted(manifest_root: str) -> set[tuple[str, str, str, str]]:
+    """(feed,exchange,symbol,dt) units the manifest already ACCEPTED as a sparse-ok missing/empty
+    partition (a quiet-day gap with no `data.parquet`, e.g. liquidations). These are DONE for resume:
+    a later no-overwrite run must not re-hit Lake or re-charge the gate for them. Last record wins, so
+    a subsequent `ok` (parquet written) or a required-feed miss (`sparse_ok` false, still pending)
+    supersedes an earlier sparse acceptance. Malformed lines are skipped (mirrors manifest_index)."""
+    path = os.path.join(manifest_root, lb.MANIFEST_NAME)
+    if not os.path.exists(path):
+        return set()
+    latest: dict[tuple[str, str, str, str], bool] = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                key = (rec["feed"], rec["exchange"], rec["symbol"], rec["dt"])
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+            latest[key] = (rec.get("status") == "missing" and bool(rec.get("sparse_ok")))
+    return {k for k, accepted in latest.items() if accepted}
+
+
+def pending_units(units: list[Unit], out_root: str, *, overwrite: bool,
+                  manifest_root: str) -> list[Unit]:
+    """Units that will actually transfer: all when --overwrite, else those that are neither already
+    on disk (final data.parquet exists) NOR already accepted as a sparse-ok missing/empty partition
+    in the manifest. The quota/broad gate estimates from THESE (not the full range) and the download
+    loop iterates only THESE, so a --resume gates and re-hits Lake ONLY for the genuinely remaining
+    work — never re-charging the gate for a mostly-complete batch or re-probing accepted quiet days."""
     if overwrite:
         return list(units)
+    accepted = sparse_accepted(manifest_root)
     return [u for u in units
-            if not lb.is_done(out_root, u.feed, u.exchange, u.symbol, u.day)]
+            if not lb.is_done(out_root, u.feed, u.exchange, u.symbol, u.day)
+            and (u.feed, u.exchange, u.symbol, u.day) not in accepted]
 
 
 FEED_MISS_NONFATAL_KIND = "events"   # FEED_KIND class whose missing partitions are non-fatal (sparse)
@@ -560,7 +588,9 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         if not days:
             raise ValueError("day source resolved to zero days — nothing to download")
         units = plan_units(instrument_keys, args.feeds, days)       # also validates (instr,feed) pairs
-        pending = pending_units(units, args.out, overwrite=args.overwrite)
+        manifest_root = args.manifest or args.out
+        pending = pending_units(units, args.out, overwrite=args.overwrite,
+                                manifest_root=manifest_root)
         est_gb = sum(unit_gb(u) for u in pending)     # gate/estimate ONLY the not-yet-done units
     except (ValueError, KeyError, FileNotFoundError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -609,10 +639,9 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         print(f"[DRY RUN] {len(units)} unit(s), est {est_gb:.2f} GB, zero transfer. report: {path}")
         return 0
 
-    # ---- live download ---------------------------------------------------------------------------
+    # ---- live download (only the pending units — done + sparse-accepted are skipped) -------------
     if reader is None:
         reader = _live_reader(session)
-    manifest_root = args.manifest or args.out
     lb.cleanup_tmp(args.out)
 
     counts = {"ok": 0, "skip": 0, "missing": 0, "error": 0, "missing_required": 0}
@@ -642,7 +671,7 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
             # I/O-bound (bounded by S3 throughput, not RAM — plan Requirement 7). A per-thread session
             # is a follow-up if concurrent lakeapi client creation proves unsafe in the live pull.
             with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-                futures = {ex.submit(_do, u): u for u in units}
+                futures = {ex.submit(_do, u): u for u in pending}
                 try:
                     for fut in as_completed(futures):
                         _record(futures[fut], fut.result())   # QuotaError re-raised here
@@ -653,7 +682,7 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
                     ex.shutdown(wait=False, cancel_futures=True)
                     raise
         else:
-            for u in units:
+            for u in pending:
                 _record(u, _do(u))
     except QuotaError as e:
         print(f"*** Lake quota/credit hard stop: {e} — exiting 2 (fail-safe). ***", file=sys.stderr)

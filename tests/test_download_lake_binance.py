@@ -471,6 +471,50 @@ def test_run_resume_skips_already_done_units(tmp_path):
     assert "book_delta_v2" in {c[0] for c in reader.calls}
 
 
+def test_sparse_accepted_reads_manifest(tmp_path):
+    root = str(tmp_path)
+    lb.manifest_append(root, {"feed": "liquidations", "exchange": PERP[0], "symbol": PERP[1],
+                              "dt": "2026-04-01", "status": "missing", "sparse_ok": True})
+    lb.manifest_append(root, {"feed": "trades", "exchange": PERP[0], "symbol": PERP[1],
+                              "dt": "2026-04-01", "status": "missing", "sparse_ok": False})
+    acc = dl.sparse_accepted(root)
+    assert ("liquidations", *PERP, "2026-04-01") in acc          # sparse-ok miss is accepted (done)
+    assert ("trades", *PERP, "2026-04-01") not in acc            # required miss stays pending
+    # a later ok record (parquet written) supersedes the earlier sparse acceptance
+    lb.manifest_append(root, {"feed": "liquidations", "exchange": PERP[0], "symbol": PERP[1],
+                              "dt": "2026-04-01", "status": "ok", "rows": 5})
+    assert ("liquidations", *PERP, "2026-04-01") not in dl.sparse_accepted(root)
+
+
+def test_run_resume_skips_sparse_accepted_liquidations(tmp_path):
+    # a quiet-day liquidations miss (no parquet) is recorded sparse-ok; a later --resume of the same
+    # range must NOT re-hit Lake for it (idempotent resume, no gate re-charge).
+    raw = tmp_path / "raw"
+    argv = ["--instrument", "binance-perp", "--feeds", "liquidations",
+            "--start", "2026-04-01", "--end", "2026-04-01", "--out", str(raw),
+            "--report-dir", str(tmp_path / "rep")]
+    r1 = FakeReader({"liquidations": None})
+    assert dl.main(argv, reader=r1, used_data_fn=lambda: 0.0, sleep=lambda *_: None) == 0
+    assert _count_calls(r1, "liquidations") == 1                 # first run probed Lake
+    r2 = FakeReader({"liquidations": None})
+    assert dl.main(argv, reader=r2, used_data_fn=lambda: 0.0, sleep=lambda *_: None) == 0
+    assert r2.calls == []                                        # resume does NOT re-probe the accepted day
+
+
+def test_run_resume_retries_required_missing(tmp_path):
+    # a REQUIRED feed that was missing (exit 3) must be RE-ATTEMPTED on resume (the gap may fill) —
+    # unlike an accepted sparse miss, it is never treated as done.
+    raw = tmp_path / "raw"
+    argv = ["--instrument", "binance-spot", "--feeds", "trades",
+            "--start", "2026-04-01", "--end", "2026-04-01", "--out", str(raw),
+            "--report-dir", str(tmp_path / "rep")]
+    r1 = FakeReader({"trades": None})
+    assert dl.main(argv, reader=r1, used_data_fn=lambda: 0.0, sleep=lambda *_: None) == 3
+    r2 = FakeReader({"trades": [_batch(2)]})                     # data has since landed
+    assert dl.main(argv, reader=r2, used_data_fn=lambda: 0.0, sleep=lambda *_: None) == 0
+    assert _count_calls(r2, "trades") == 1                       # required miss retried, not skipped
+
+
 def test_run_invalid_instrument_feed_pair_exits_2(tmp_path):
     code = dl.main(["--instrument", "binance-spot", "--feeds", "funding",
                     "--start", "2026-04-01", "--end", "2026-04-01",
