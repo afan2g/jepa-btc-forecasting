@@ -736,6 +736,25 @@ def test_build_day_record_trade_only():
     assert rec["trade_fill"]["needed"] is True and rec["trade_fill"]["gb"] == 0.02
 
 
+def test_excluded_overlap_day_wins_over_fill():
+    # a day in BOTH coinbase_fill_days and excluded_days_by_reason: exclusion wins — no fill, no cost
+    cal = _calendar(
+        coinbase_fill_days={"2025-01-10": {"book": True, "trades": True},
+                            "2025-01-15": {"book": True, "trades": True}},
+        excluded_days_by_reason={"2025-01-20": ["missing:binF_book"],
+                                 "2025-01-15": ["missing:binF_book"]},   # overlaps a fill day
+        fill_status={"2025-01-15": {"book": {"present": True, "mb": 999.0, "ok": True},
+                                    "trades": {"present": True, "mb": 30.0, "ok": True},
+                                    "error": False, "reason": "", "ok": True}})
+    # exclusion removes it from the fill-day sets (availability/completeness/cost)
+    assert "2025-01-15" not in rv.book_gap_days(cal)
+    assert "2025-01-15" not in rv.trade_fill_days(cal)
+    # and the per-day record is excluded, not filled
+    rec = rv.build_day_record("2025-01-15", None, cal)
+    assert rec["book_fill"]["needed"] is False and rec["trade_fill"]["needed"] is False
+    assert rec["excluded"] == {"reason": ["missing:binF_book"]}
+
+
 def test_build_day_record_excluded():
     cal = _calendar()
     rec = rv.build_day_record("2025-01-20", None, cal)

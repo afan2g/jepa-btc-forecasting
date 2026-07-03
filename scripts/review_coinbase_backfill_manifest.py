@@ -157,13 +157,20 @@ def _fill_days(cal: dict) -> dict:
 
 
 def book_gap_days(cal: dict) -> set:
-    """Calendar days whose Lake `book_delta_v2` is absent (coinbase_fill_days[d].book==true)."""
-    return {d for d, v in _fill_days(cal).items() if (v or {}).get("book") is True}
+    """Calendar days whose Lake `book_delta_v2` is absent (coinbase_fill_days[d].book==true), MINUS
+    excluded days — exclusion wins over fill routing (planner), so an excluded-overlap day is not a
+    fill in availability/completeness/cost."""
+    excluded = set(cal.get("excluded_days_by_reason") or {})
+    return {d for d, v in _fill_days(cal).items()
+            if (v or {}).get("book") is True and d not in excluded}
 
 
 def trade_fill_days(cal: dict) -> set:
-    """Calendar days whose Coinbase trades are gapped (coinbase_fill_days[d].trades==true)."""
-    return {d for d, v in _fill_days(cal).items() if (v or {}).get("trades") is True}
+    """Calendar days whose Coinbase trades are gapped (coinbase_fill_days[d].trades==true), MINUS
+    excluded days (exclusion wins over fill routing)."""
+    excluded = set(cal.get("excluded_days_by_reason") or {})
+    return {d for d, v in _fill_days(cal).items()
+            if (v or {}).get("trades") is True and d not in excluded}
 
 
 def calendar_batch_days(cal: dict) -> list:
@@ -561,8 +568,13 @@ def build_day_record(day: str, report_rec: dict | None, cal: dict) -> dict:
     cf = _as_dict(_as_dict(report_rec).get("coinapi_fill"))
     q = _as_dict(_as_dict(report_rec).get("quality"))
 
+    # exclusion wins over every fill category (planner): an out-of-scope day (in
+    # excluded_days_by_reason, or classified excluded) must NOT be synthesized/dual-listed as a fill
+    # or costed — even a contradictory calendar with ok fill_status.
+    is_excluded = cctx["excluded_reason"] is not None or classification == EXCLUDED
+
     book = _empty_book_fill()
-    if cf.get("needs_fill") is True:
+    if not is_excluded and cf.get("needs_fill") is True:
         prof = cf.get("fill_profile")
         gb, basis = day_book_gb(cal, day)
         book.update(
@@ -575,7 +587,7 @@ def build_day_record(day: str, report_rec: dict | None, cal: dict) -> dict:
             trusted_lake_start_ts=q.get("trusted_lake_start_ts"),
             trusted_lake_end_ts=q.get("trusted_lake_end_ts"),
             gb=gb, gb_basis=basis, usd=book_usd(gb))
-    elif cctx["book_gap"]:
+    elif not is_excluded and cctx["book_gap"]:
         # calendar book-gap day not carried as a report fill → synthesize a full-day book fill WITH
         # an executable stitch plan (whole-day coinapi segment), never null plan fields.
         gb, basis = day_book_gb(cal, day)
@@ -586,7 +598,7 @@ def build_day_record(day: str, report_rec: dict | None, cal: dict) -> dict:
                     gb=gb, gb_basis=basis, usd=book_usd(gb))
 
     trade = _empty_trade_fill()
-    if cctx["trades_gap"]:
+    if not is_excluded and cctx["trades_gap"]:
         gb, basis = day_trades_gb(cal, day)
         trade.update(needed=True, source="calendar", measured_mb=measured_mb(cal, day, "trades"),
                      gb=gb, gb_basis=basis, usd=trades_usd(gb))
