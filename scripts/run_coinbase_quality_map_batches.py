@@ -222,6 +222,19 @@ def report_matches_batch(report: dict, batch: dict, *, base_dir: str) -> bool:
     return True
 
 
+def _current_plan_attempt(ledger_index: dict, batch: dict, plan_id: str | None) -> dict | None:
+    """The last ledger attempt for this batch, but only when it was recorded under the CURRENT plan
+    (plan_id = the manifest's generated_utc). Returns None for an entry from an older plan — the
+    append-only ledger persists across re-plans while batch_NNN names are reused — so neither the
+    status classification nor the displayed attempt shows a stale exit for a never-attempted batch."""
+    last = ledger_index.get(batch["file"])
+    if last is None:
+        return None
+    if plan_id is not None and last.get("plan_generated_utc") != plan_id:
+        return None
+    return last
+
+
 def batch_status(batch: dict, *, base_dir: str, ledger_index: dict, plan_id: str | None = None) -> str:
     """Authoritative per-batch status. A present report that MATCHES the plan row wins (disk is ground
     truth); a present report that does NOT match the row is `stale` (a re-run overwrites it); with no
@@ -235,8 +248,8 @@ def batch_status(batch: dict, *, base_dir: str, ledger_index: dict, plan_id: str
     report = read_report(report_path(batch, base_dir))
     if report is not None:
         return COMPLETE if report_matches_batch(report, batch, base_dir=base_dir) else STALE
-    last = ledger_index.get(batch["file"])
-    if last is not None and (plan_id is None or last.get("plan_generated_utc") == plan_id):
+    last = _current_plan_attempt(ledger_index, batch, plan_id)
+    if last is not None:
         code = last.get("exit_code")
         if code == QUOTA_REFUSED_EXIT:
             return BLOCKED_QUOTA
@@ -416,7 +429,7 @@ def build_summary(manifest: dict, *, base_dir: str, ledger_idx: dict, manifest_p
     for batch in batches:
         status = batch_status(batch, base_dir=base_dir, ledger_index=ledger_idx, plan_id=plan_id)
         by_status[status].append(batch["file"])
-        last = ledger_idx.get(batch["file"], {})
+        last = _current_plan_attempt(ledger_idx, batch, plan_id) or {}
         rows.append({"file": batch["file"], "report_dir": batch["report_dir"], "status": status,
                      "n_days": batch.get("n_days"), "first_day": batch.get("first_day"),
                      "last_day": batch.get("last_day"), "runner_est_gb": batch.get("runner_est_gb"),

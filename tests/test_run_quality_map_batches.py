@@ -528,6 +528,10 @@ def test_ledger_entry_from_a_different_plan_is_ignored(tmp_path):
     s = _read_summary(tmp_path)
     assert s["status"]["by_status"]["pending"] == ["batch_001_days.txt"]  # NOT blocked_quota
     assert s["status"]["counts"]["blocked_quota"] == 0
+    # the displayed attempt must also be scoped to the current plan (not the old exit 5)
+    row = next(r for r in s["status"]["batches"] if r["file"] == "batch_001_days.txt")
+    assert row["last_exit_code"] is None
+    assert row["last_attempt_utc"] is None
 
 
 def test_summary_aggregates_quality_over_complete_batches_only(tmp_path):
