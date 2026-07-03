@@ -58,6 +58,10 @@ import sys
 DEFAULT_MANIFEST = "data/tmp/coinbase_quality_map_batches/manifest.json"
 STATUS_ROOT = "data/reports/coinbase_quality_map_batches"   # == planner REPORT_ROOT
 RUNNER_SCRIPT = "scripts/run_coinbase_quality_map.py"
+# runner flags that WEAKEN the Lake quota gate — the planner never emits them, so their presence in a
+# manifest command means a stale/hand-edited plan that would run with the 300 GB/month safeguard
+# loosened; refuse them (the gate being preserved is this tool's core guarantee).
+QUOTA_OVERRIDE_FLAGS = frozenset({"--quota-gb", "--max-auto-gb", "--headroom-gb"})
 REPORT_NAME = "coinbase_quality_map.json"  # fixed filename the runner writes under its --out-dir
 STATUS_LEDGER_NAME = "_runner_status.jsonl"  # append-only attempt ledger (cf. ingest _manifest.jsonl)
 SUMMARY_NAME = "summary.json"
@@ -135,6 +139,13 @@ def _runner_argv(batch: dict) -> list[str]:
     if os.path.normpath(argv[1]) != os.path.normpath(RUNNER_SCRIPT):
         raise RunnerError(f"batch {batch.get('file')!r} command does not invoke {RUNNER_SCRIPT} "
                           f"(got program {argv[1]!r}); refusing to run an unexpected tool")
+    # a manifest must not weaken the runner's quota gate (--quota-gb/--headroom-gb/--max-auto-gb);
+    # match both `--flag value` and `--flag=value` forms
+    bad = sorted({tok.split("=", 1)[0] for tok in argv} & QUOTA_OVERRIDE_FLAGS)
+    if bad:
+        raise RunnerError(f"batch {batch.get('file')!r} command overrides the Lake quota gate "
+                          f"({', '.join(bad)}); refusing — these weaken the 300 GB/month safeguard "
+                          "and the planner never emits them")
     return argv
 
 

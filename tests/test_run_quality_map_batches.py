@@ -264,6 +264,23 @@ def test_runner_pin_rejects_same_basename_at_a_different_path():
         qmb.build_command(batch)
 
 
+def test_build_command_rejects_a_quota_override_flag():
+    # Codex P2: a command that keeps the pinned runner but weakens the quota gate must be refused,
+    # or the "runner quota gate preserved" guarantee is void. The planner never emits these flags.
+    batch = {"file": "b", "report_dir": "r",
+             "command": ("python scripts/run_coinbase_quality_map.py --allow-broad "
+                         "--quota-gb 100000 --out-dir r")}
+    with pytest.raises(ValueError, match="quota"):
+        qmb.build_command(batch)
+
+
+def test_build_command_rejects_a_headroom_override_equals_form():
+    batch = {"file": "b", "report_dir": "r",
+             "command": ("python scripts/run_coinbase_quality_map.py --headroom-gb=0 --out-dir r")}
+    with pytest.raises(ValueError, match="quota"):
+        qmb.build_command(batch)
+
+
 def test_build_command_rejects_malformed_shell_quoting():
     # Codex P3: shlex.split raises a bare ValueError on malformed quoting — it must become a clean
     # RunnerError ("unparseable"), not a raw traceback, so all bad manifest commands fail uniformly.
