@@ -118,9 +118,21 @@ def load_json_object(path: str, *, what: str) -> dict:
             raise ReviewInputError(f"{what} {path} contains a non-finite number ({s}); "
                                    "NaN/Infinity are not allowed")
         return v
+
+    def _bounded_int(s):
+        # a huge integer literal either exceeds the CPython str->int digit limit (ValueError) or
+        # overflows when later used as a float (OverflowError) — convert both to a clean input error.
+        try:
+            v = int(s)
+            float(v)
+        except (ValueError, OverflowError):
+            raise ReviewInputError(f"{what} {path} contains an out-of-range or unparseable "
+                                   f"integer ({s[:32]})") from None
+        return v
     try:
         with open(path) as f:
-            obj = json.load(f, parse_constant=_reject_nonfinite, parse_float=_finite_float)
+            obj = json.load(f, parse_constant=_reject_nonfinite, parse_float=_finite_float,
+                            parse_int=_bounded_int)
     except json.JSONDecodeError as e:
         raise ReviewInputError(f"{what} {path} is not valid JSON: {e}") from None
     if not isinstance(obj, dict):
@@ -173,7 +185,9 @@ def measured_mb(cal: dict, day: str, product: str):
     p = fs.get(product)
     if isinstance(p, dict) and p.get("present"):
         mb = p.get("mb")
-        return float(mb) if isinstance(mb, (int, float)) else None
+        # exclude bool (subclasses int): a JSON true/false mb must not price a fill at 1.0/0.0 GB —
+        # fall back to None so the cost model uses the conservative per-day estimate instead.
+        return float(mb) if isinstance(mb, (int, float)) and not isinstance(mb, bool) else None
     return None
 
 

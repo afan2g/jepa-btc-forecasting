@@ -274,6 +274,23 @@ def test_fill_status_helpers_tolerate_malformed_record():
     assert rv.measured_mb(cal, "2025-01-11", "trades") is None
 
 
+def test_load_json_object_rejects_oversized_integer(tmp_path):
+    # a huge integer literal (overflows float) must fail closed at load, not crash later
+    p = tmp_path / "x.json"
+    p.write_text('{"mb": %s}' % ("9" * 400))   # ~400-digit int -> OverflowError on float()
+    with pytest.raises(rv.ReviewInputError, match="out-of-range or unparseable"):
+        rv.load_json_object(str(p), what="thing")
+
+
+def test_measured_mb_rejects_boolean():
+    # a JSON true/false mb (bool subclasses int) must NOT price a fill at 1.0/0.0 GB
+    cal = _calendar(fill_status={"2025-01-10": {"book": {"present": True, "mb": True, "ok": True},
+                                                "trades": None, "error": False, "reason": "", "ok": True}})
+    assert rv.measured_mb(cal, "2025-01-10", "book") is None
+    # so the cost model falls back to the conservative estimate, not 0.001 GB
+    assert rv.day_book_gb(cal, "2025-01-10") == (rv.EST_BOOK_GB_PER_DAY, "estimated")
+
+
 # =========================================================================== Task 3: calendar
 def test_book_gap_and_trade_fill_days():
     cal = _calendar()
