@@ -596,6 +596,23 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
 
+    # ---- no-op fast path: a resume whose range is already complete (nothing pending, incl.
+    # sparse-accepted quiet days) needs NO Lake session, NO used_data probe, and NO gate. Short-circuit
+    # before any vendor touch so an idempotent resume never makes a live call or exits 2 on absent
+    # credentials (dry-run still previews presence, so it is intentionally not short-circuited). ----
+    if not pending and not args.dry_run:
+        report = {"args": {"instruments": instrument_keys, "feeds": args.feeds,
+                           "days": [days[0], days[-1]], "n_days": len(days), "out": args.out,
+                           "overwrite": args.overwrite, "jobs": args.jobs},
+                  "n_units": len(units), "n_pending": 0, "est_gb": 0.0, "dry_run": False,
+                  "transferred_gb": 0, "used_data_before": None, "used_data_after": None,
+                  "counts": {"ok": 0, "skip": 0, "missing": 0, "error": 0, "missing_required": 0},
+                  "total_rows": 0, "per_unit": [], "note": "nothing pending — range already complete"}
+        path = _write_report(args.report_dir, report)
+        print(f"Nothing to do: all {len(units)} unit(s) already complete (no vendor call). "
+              f"report: {path}")
+        return 0
+
     # ---- session + used_data telemetry (fail-safe → exit 2: missing keys/deps OR unreadable
     # used_data — never proceed blind; live session construction is inside the guard too so a
     # missing AWS key / boto3 returns the documented setup exit, not a traceback / exit 1) --------

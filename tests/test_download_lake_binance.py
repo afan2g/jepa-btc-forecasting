@@ -501,6 +501,24 @@ def test_run_resume_skips_sparse_accepted_liquidations(tmp_path):
     assert r2.calls == []                                        # resume does NOT re-probe the accepted day
 
 
+def test_run_noop_resume_makes_no_vendor_call(tmp_path, monkeypatch):
+    # a resume whose range is already complete must short-circuit BEFORE Lake setup: no session, no
+    # used_data probe, exit 0 — even with credentials unavailable (idempotent no-op resume).
+    raw = tmp_path / "raw"
+    argv = ["--instrument", "binance-spot", "--feeds", "trades", "--start", "2026-04-01",
+            "--end", "2026-04-01", "--out", str(raw), "--report-dir", str(tmp_path / "rep")]
+    assert dl.main(argv, reader=FakeReader({"trades": [_batch(2)]}), used_data_fn=lambda: 0.0,
+                   sleep=lambda *_: None) == 0                  # first run completes the range
+    # resume via the LIVE path (no injected reader/used_data_fn); make setup explode if reached.
+    monkeypatch.setattr(dl, "lake_session",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no creds")))
+    def _boom_used():
+        raise AssertionError("used_data must not be called on a no-op resume")
+    assert dl.main(argv, used_data_fn=_boom_used, sleep=lambda *_: None) == 0
+    rep = json.loads(sorted((tmp_path / "rep").glob("*.json"))[-1].read_text())
+    assert rep["n_pending"] == 0 and rep["used_data_before"] is None
+
+
 def test_run_resume_retries_required_missing(tmp_path):
     # a REQUIRED feed that was missing (exit 3) must be RE-ATTEMPTED on resume (the gap may fill) —
     # unlike an accepted sparse miss, it is never treated as done.
