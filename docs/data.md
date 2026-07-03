@@ -837,6 +837,44 @@ Python 3.12, rustc 1.94). The default two-day live quality-map smoke and the exp
 (see above) have run successfully with the native engine (2026-07-01), but the full-window production
 quality map is still quota-gated (§9); backfill stays locked until that broader map passes.
 
+#### Reviewed backfill manifest (gate before spend)
+
+`scripts/review_coinbase_backfill_manifest.py` is the **review / decision layer** between the
+quality map and any CoinAPI backfill. It joins three artifacts — the batch-plan `manifest.json`
+(authoritative batch registry from `plan_coinbase_quality_map_batches.py`), the per-batch
+quality-map reports it registers, and the usable calendar (measured `fill_status` sizes) — into a
+deterministic, human-auditable backfill manifest
+(`data/reports/backfill/coinbase_backfill_manifest.json`, git-ignored):
+
+```
+quality map (per-batch reports) + batch plan + usable calendar
+   -> reviewed backfill manifest   (this tool: no vendor I/O, no downloads)
+   -> human approval + CoinAPI Spend Management (§8)
+   -> CoinAPI backfill             (ingest/download_coinapi.py --allow-backfill)
+```
+
+The manifest separates full-day book fills, partial-day book fills (stitch segments preserved
+**verbatim** from each day's `coinapi_fill` block), trade fills (calendar-sourced, since the
+quality-map reports are `book_delta_v2`-only), Lake-usable days, Lake-present degraded days,
+calendar-excluded days, and unresolved/blocking days. Cost is a hybrid GB/$ estimate — measured
+`fill_status` MB where available (reproduces the §8 calendar-gap figure), the nominal §6 per-day
+rate for quality-map-added present days, $1/GB book and $3/GB trades, partial fills charged as a
+whole day-file — reported as a measured-vs-estimated band, with the calendar-gap baseline computed
+from `fill_status` and the docs §8 $92 carried only as `docs_reference_usd`. Each input's identity
+is pinned by sha256 in `meta.inputs`.
+
+It **fails closed** (`status=blocking`, exit 3): any missing/refused batch report, unmapped planned
+day, duplicate day across batches, unresolved `no_verdict` day, contradictory/unknown `coinapi_fill`,
+cross-batch meta drift, calendar drift, or unverifiable `fill_status` blocks a `ready` verdict.
+`--report-only` downgrades the exit but keeps the honest status; an inspection run (`--report …`,
+no plan) is always `report_only` and can never be `ready`. A degraded day that maps to a valid fill
+is a normal fill, not a blocker.
+
+**This tool does NOT unlock or run the backfill.** The §5a gate stays enforced in
+`ingest/download_coinapi.py` / `ingest/_common.py`; a multi-day pull still needs `--allow-backfill`
+with Spend Management on (§8). The manifest is the auditable spend/approval input a future backfill
+runner consumes.
+
 ---
 
 ## 6. Per-day sizes & storage budget (measured)
@@ -949,6 +987,7 @@ END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap str
 .venv/bin/python ingest/download_coinapi.py --start 2025-06-01 --end 2025-06-01   # CoinAPI → Parquet (ONE day)
 .venv/bin/python scripts/run_coinbase_quality_map.py    # multi-day Lake quality map (§5a-QualityMap; quota-aware, prints used_data, refuses broad pulls without --allow-broad) -> data/reports/
 .venv/bin/python scripts/plan_coinbase_quality_map_batches.py   # stage the broad quality map into quota-window day batches (§5a-QualityMap; planning only, NO vendor I/O; --dry-run prints without writing) -> data/tmp/
+.venv/bin/python scripts/review_coinbase_backfill_manifest.py --plan-manifest data/tmp/coinbase_quality_map_batches/manifest.json  # review completed batches into an auditable backfill manifest (§5a-QualityMap; gatekeeping, NO download, does not unlock backfill; fails closed) -> data/reports/backfill/
 # NOTE: multi-day BULK pulls are the backfill and are GATED — download_coinapi.py refuses a >1-day full
 # pull (exit 4) until the §5a parity + reseed gates pass. A single day, or a multi-day range with a small
 # --sample-mb smoke (≤64MB), is allowed; --allow-backfill overrides once the gate passes (Spend Mgmt on, §8).
