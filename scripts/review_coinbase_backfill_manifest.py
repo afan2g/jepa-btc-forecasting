@@ -109,6 +109,12 @@ def load_json_object(path: str, *, what: str) -> dict:
     return obj
 
 
+def _as_dict(v):
+    """A report-nested value read with .get() may be a malformed non-dict (scalar/list); normalize
+    it to {} so a corrupt report fails closed via its recorded blocker instead of crashing on .get."""
+    return v if isinstance(v, dict) else {}
+
+
 # ----------------------------------------------------------- calendar accessors
 def _fill_days(cal: dict) -> dict:
     return cal.get("coinbase_fill_days") or {}
@@ -325,7 +331,7 @@ def day_record_issues(rec: dict) -> list:
     if prof != FULL_DAY_FILL and fdr is not None:
         issues.append("full_day_reason_without_full_day_fill")
     if prof == FULL_DAY_FILL:
-        q = rec.get("quality") or {}
+        q = _as_dict(rec.get("quality"))
         if q.get("trusted_lake_start_ts") is not None or q.get("trusted_lake_end_ts") is not None:
             issues.append("full_day_with_trusted_lake_span")
     # a fill day must carry an EXECUTABLE stitch plan (segments partition the day; spec §9 #3).
@@ -365,7 +371,7 @@ def _recompute_fill_counts(days: list) -> dict:
     counts = {"needs_fill": 0, **{p: 0 for p in profiles},
               "crossed_source_full_day": 0, "no_verdict": 0, "no_fill": 0, "not_in_scope": 0}
     for r in days:
-        cf = r.get("coinapi_fill") or {}
+        cf = _as_dict(r.get("coinapi_fill"))
         nf = cf.get("needs_fill")
         if nf:
             counts["needs_fill"] += 1
@@ -385,13 +391,14 @@ def summary_count_issues(report: dict) -> list:
     """The report's summary.counts AND summary.coinapi_fill.fill_counts must each equal a
     recomputation over days[] (days[] is primary; both summary blocks are cross-checks)."""
     days = report.get("days") or []
-    got = (report.get("summary") or {}).get("counts") or {}
+    summary = _as_dict(report.get("summary"))
+    got = _as_dict(summary.get("counts"))
     want = recompute_class_counts(days)
     issues = []
     for c in CLASSES:
         if int(got.get(c, 0)) != want[c]:
             issues.append(f"summary_counts_mismatch:{c}:summary={got.get(c)}:recomputed={want[c]}")
-    fc_got = ((report.get("summary") or {}).get("coinapi_fill") or {}).get("fill_counts")
+    fc_got = _as_dict(summary.get("coinapi_fill")).get("fill_counts")
     if not isinstance(fc_got, dict):
         # a report without fill_counts (pre-extension/stale) can't be cross-checked → fail closed
         issues.append("summary_fill_counts_missing")
@@ -467,8 +474,8 @@ def build_day_record(day: str, report_rec: dict | None, cal: dict) -> dict:
     # (check_report_consistency), and readiness still builds records — a hard subscript here would
     # crash instead of failing closed with status=blocking / exit 3.
     classification = report_rec.get("classification") if report_rec else None
-    cf = (report_rec or {}).get("coinapi_fill") or {}
-    q = (report_rec or {}).get("quality") or {}
+    cf = _as_dict(_as_dict(report_rec).get("coinapi_fill"))
+    q = _as_dict(_as_dict(report_rec).get("quality"))
 
     book = _empty_book_fill()
     if cf.get("needs_fill") is True:
@@ -576,7 +583,7 @@ def _batch_ran(report: dict) -> list:
         issues.append("missing meta.quota.reason")
     elif reason not in ("ok", "no_days_to_load"):   # quota_headroom / exceeds_auto_cap / unknown
         issues.append(f"quota not ok: {reason}")
-    n_days = (report.get("summary") or {}).get("n_days")
+    n_days = _as_dict(report.get("summary")).get("n_days")
     if n_days != len(report.get("days") or []):
         issues.append(f"summary.n_days {n_days} != len(days) {len(report.get('days') or [])}")
     return issues
@@ -664,12 +671,12 @@ def check_report_consistency(reports: list, blockers: dict) -> None:
                     blockers["missing_keys"].append(f"{rec.get('day')}: {issue}")
                 else:
                     blockers["inconsistencies"].append(f"{rec.get('day')}: {issue}")
-            cf = rec.get("coinapi_fill") or {}
+            cf = _as_dict(rec.get("coinapi_fill"))
             if cf.get("needs_fill") is None and cf.get("why") == "no_verdict":
                 blockers["unresolved_days"].append(rec.get("day"))
         for issue in summary_count_issues(report):
             blockers["inconsistencies"].append(f"{r['report_dir']}: {issue}")
-        meta = report.get("meta") or {}
+        meta = _as_dict(report.get("meta"))
         pin = {"exchange": meta.get("exchange"), "symbol": meta.get("symbol"),
                "thresholds": meta.get("thresholds")}
         if ref_meta is None:
@@ -803,7 +810,7 @@ def _universe(reports: list, cal: dict) -> list:
 
 def _thresholds(reports: list):
     for r in reports:
-        t = (r["report"].get("meta") or {}).get("thresholds")
+        t = _as_dict(r["report"].get("meta")).get("thresholds")
         if t is not None:
             return t
     return None
@@ -866,7 +873,7 @@ def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only)
         "n_batches": len(reports),
         "plan_generated_utc": (plan.get("meta") or {}).get("generated_utc"),
     }
-    m0 = (reports[0]["report"].get("meta") if reports else {}) or {}
+    m0 = _as_dict(reports[0]["report"].get("meta")) if reports else {}
     return _assemble(days, sections, cost, blockers, status=status,
                      scope_complete=(not blocking), generated_utc=generated_utc, inputs=inputs,
                      thresholds=_thresholds(reports), exchange=m0.get("exchange"),
@@ -890,7 +897,7 @@ def build_manifest_inspection(report_paths, cal_path, *, generated_utc) -> dict:
                                 for r in reports],
               "usable_calendar": ({"path": cal_path, "sha256": sha256_file(cal_path)}
                                   if cal_path else None)}
-    m0 = reports[0]["report"].get("meta") or {}
+    m0 = _as_dict(reports[0]["report"].get("meta"))
     return _assemble(days, _sections(days), _cost_summary(days, cal), new_blockers(),
                      status="report_only", scope_complete=False, generated_utc=generated_utc,
                      inputs=inputs, thresholds=_thresholds(reports), exchange=m0.get("exchange"),

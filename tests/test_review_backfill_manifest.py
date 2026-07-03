@@ -751,6 +751,17 @@ def test_check_reports_validation_and_meta_drift(tmp_path):
     assert any("symbol" in x for x in blockers["inconsistencies"])
 
 
+def test_non_dict_coinapi_fill_fails_closed_no_crash(tmp_path):
+    # a truthy non-dict coinapi_fill (e.g. a scalar) previously crashed on .get; must fail closed
+    reports = _clean_reports()
+    reports[0]["days"][1]["coinapi_fill"] = 5
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)   # must not raise
+    assert m["meta"]["status"] == "blocking"
+    assert any("coinapi_fill" in x for x in m["blockers"]["missing_keys"])
+
+
 def test_check_unresolved_days_block(tmp_path):
     reports = [_report([_day("2025-01-01", "inconclusive", _fill_block(None, "no_verdict"),
                              reasons=["no_seed_snapshots"]),
