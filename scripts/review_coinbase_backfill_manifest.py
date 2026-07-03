@@ -730,8 +730,13 @@ def check_completeness(plan: dict, reports: list, day_index: dict, cal: dict,
     withheld = set((plan.get("skipped") or {}).get("fill_days_book_gap") or [])
     for d in sorted(bg):
         rec = day_index.get(d)
-        mapped_missing = rec is not None and rec.get("classification") == MISSING_NEEDS_COINAPI
-        if not mapped_missing and d not in withheld:
+        if rec is not None:
+            # a MAPPED book-gap day must classify missing_needs_coinapi (the calendar says its Lake
+            # book is absent) — a stale report classifying it lake_usable/excluded is a contradiction
+            # the unexpected_day/withheld carve-outs would otherwise let through.
+            if rec.get("classification") != MISSING_NEEDS_COINAPI:
+                blockers["coverage_gaps"].append(f"gap_day_misclassified:{d}")
+        elif d not in withheld:
             blockers["coverage_gaps"].append(f"gap_day_unmapped:{d}")
 
     dropped = (plan.get("skipped") or {}).get("days_dropped_as_excluded_or_book_gap") or []
@@ -880,11 +885,11 @@ def _cost_summary(days: list, cal: dict) -> dict:
     book_usd_total = book_usd(book_m + book_e)
     trades_usd_total = trades_usd(trades_m + trades_e)
     gross = round(book_usd_total + trades_usd_total, 4)
-    # calendar-gap baseline: measured fill_status over calendar book-gap + trade-fill days only
-    base_book_gb = sum((measured_mb(cal, d, "book") or 0.0) / MB_PER_GB
-                       for d in sorted(book_gap_days(cal)))
-    base_trade_gb = sum((measured_mb(cal, d, "trades") or 0.0) / MB_PER_GB
-                        for d in sorted(trade_fill_days(cal)))
+    # calendar-gap baseline over calendar book-gap + trade-fill days — use the SAME
+    # measured-or-estimated helpers as the fill rows, so a malformed/negative mb (measured_mb None)
+    # falls back to the conservative estimate rather than being zeroed (understating the baseline).
+    base_book_gb = sum(day_book_gb(cal, d)[0] for d in sorted(book_gap_days(cal)))
+    base_trade_gb = sum(day_trades_gb(cal, d)[0] for d in sorted(trade_fill_days(cal)))
     baseline = round(book_usd(base_book_gb) + trades_usd(base_trade_gb), 4)
     low = round(book_usd(book_m) + trades_usd(trades_m), 4)   # measured-only
     return {

@@ -300,6 +300,19 @@ def test_measured_mb_rejects_negative():
     assert rv.day_book_gb(cal, "2025-01-10") == (rv.EST_BOOK_GB_PER_DAY, "estimated")
 
 
+def test_cost_baseline_uses_estimate_for_invalid_mb(tmp_path):
+    # the calendar-gap baseline must also fall back to the estimate for an invalid mb, not zero it
+    cal = _calendar()
+    cal["fill_status"]["2025-01-10"]["book"]["mb"] = -1.0   # invalid book size for the gap day
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    c = m["cost_summary"]
+    # baseline book gb for 2025-01-10 is now the estimate (2.27), not 0.0
+    trades_gb = 0.03 + 0.02   # 2025-01-10 + 2025-01-11 trades, still measured
+    assert c["calendar_gap_baseline_usd"] == round(rv.EST_BOOK_GB_PER_DAY * 1.0 + trades_gb * 3.0, 4)
+
+
 # =========================================================================== Task 3: calendar
 def test_book_gap_and_trade_fill_days():
     cal = _calendar()
@@ -776,6 +789,29 @@ def test_completeness_day_not_mapped_blocks(tmp_path):
     blockers = rv.new_blockers()
     rv.check_completeness(plan, reports, day_index, cal, blockers)
     assert any("2025-01-03" in x for x in blockers["coverage_gaps"])
+
+
+def test_completeness_mapped_gap_day_must_classify_missing(tmp_path):
+    # a book-gap day mapped in a report must be missing_needs_coinapi, not lake_usable/excluded
+    reports = [_report([
+        _day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable")),
+        _day("2025-01-02", "lake_present_degraded",
+             _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                         full_day_reason="quality_over_usable_bar",
+                         fill_segments=[_full_day_seg("2025-01-02")], seams=[],
+                         seam_policy={"seam_guard_s": 60.0}), fillable=True),
+        _day("2025-01-11", "lake_usable", _fill_block(False, "lake_usable"), calendar=_TRADE_ONLY_CTX),
+        _day("2025-01-10", "lake_usable", _fill_block(False, "lake_usable"),   # gap day misclassified
+             calendar={"in_usable_days": False, "in_lake_all_days": False,
+                       "is_coinbase_fill_day": True, "excluded_reason": None}),
+    ])]
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    cal = rv.load_json_object(cal_path, what="usable calendar")
+    reps, day_index = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_completeness(plan, reps, day_index, cal, blockers)
+    assert any("gap_day_misclassified:2025-01-10" in x for x in blockers["coverage_gaps"])
 
 
 def test_completeness_batch_incomplete_on_refused_quota(tmp_path):
