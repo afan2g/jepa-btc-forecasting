@@ -66,8 +66,9 @@ def _write_manifest(tmp_path, manifest=None) -> str:
     return str(p)
 
 
-def _write_report(report_dir, *, n_days=2, counts=None, coinapi_fill=None) -> pathlib.Path:
-    """Write a minimal but SHAPE-VALID coinbase_quality_map.json (what the runner writes on exit 0)."""
+def _write_report(report_dir, *, n_days=2, counts=None, coinapi_fill=None, days=None) -> pathlib.Path:
+    """Write a minimal but SHAPE-VALID coinbase_quality_map.json (what the runner writes on exit 0),
+    with per-day rows consistent with n_days (the runner always emits len(days) == summary.n_days)."""
     rd = pathlib.Path(report_dir)
     rd.mkdir(parents=True, exist_ok=True)
     counts = counts or {"lake_usable": 2}
@@ -77,10 +78,12 @@ def _write_report(report_dir, *, n_days=2, counts=None, coinapi_fill=None) -> pa
         "fill_counts": {"needs_fill": 0, "full_day_fill": 0, "no_fill": 2, "no_verdict": 0,
                         "not_in_scope": 0},
         "full_day_reason_counts": {}}
+    if days is None:
+        days = [{"day": f"2025-01-{i + 1:02d}"} for i in range(n_days)]
     report = {"meta": {"engine": "native"},
               "summary": {"n_days": n_days, "counts": counts,
                           "by_class": {c: [] for c in counts}, "coinapi_fill": cf},
-              "days": []}
+              "days": days}
     (rd / REPORT_NAME).write_text(json.dumps(report))
     return rd / REPORT_NAME
 
@@ -261,6 +264,27 @@ def test_runner_pin_rejects_same_basename_at_a_different_path():
         qmb.build_command(batch)
 
 
+def test_build_command_rejects_malformed_shell_quoting():
+    # Codex P3: shlex.split raises a bare ValueError on malformed quoting — it must become a clean
+    # RunnerError ("unparseable"), not a raw traceback, so all bad manifest commands fail uniformly.
+    batch = {"file": "b", "report_dir": "r",
+             "command": 'python scripts/run_coinbase_quality_map.py --out-dir "unterminated'}
+    with pytest.raises(ValueError, match="unparseable"):
+        qmb.build_command(batch)
+
+
+def test_main_exits_2_on_malformed_command_quoting(tmp_path, capsys):
+    bad = _manifest_dict(tmp_path)
+    bad["batches"][0]["command"] = ('python scripts/run_coinbase_quality_map.py '
+                                    '--out-dir "unterminated')
+    mpath = tmp_path / "m.json"
+    mpath.write_text(json.dumps(bad))
+    rc = qmb.main(["--manifest", str(mpath), "--status-dir", _status_dir(tmp_path),
+                   "--base-dir", str(tmp_path), "--execute"], runner=_boom_runner)
+    assert rc == 2
+    assert "ERROR" in capsys.readouterr().err
+
+
 def test_stale_report_not_matching_the_plan_row_is_not_complete(tmp_path):
     # a report left under batch_001's report_dir by a PRIOR plan covering a DIFFERENT day set
     # (n_days differs) must NOT count as complete — silently skipping it is a coverage gap in the
@@ -305,6 +329,33 @@ def test_stale_report_with_swapped_interior_day_is_detected(tmp_path):
     report["days"][1]["day"] = "2025-01-02"
     (report_dir / REPORT_NAME).write_text(json.dumps(report))
     assert qmb.batch_status(batch, base_dir=".", ledger_index={}) == qmb.COMPLETE
+
+
+def test_report_with_matching_days_but_wrong_summary_count_is_not_complete(tmp_path):
+    # Codex P2: the day set matching the plan is not enough — a corrupt summary.n_days must not be
+    # trusted (aggregate_quality reads summary counts), so the count has to agree too.
+    days_file = tmp_path / "batch_001_days.txt"
+    days_file.write_text("2025-01-01\n2025-01-02\n")
+    report_dir = tmp_path / "reports" / "batch_001"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    batch = {"file": "batch_001_days.txt", "report_dir": str(report_dir),
+             "n_days": 2, "first_day": "2025-01-01", "last_day": "2025-01-02",
+             "command": ("python scripts/run_coinbase_quality_map.py "
+                         f"--days-file {days_file} --out-dir {report_dir}")}
+    report = {"meta": {}, "summary": {"n_days": 99, "counts": {}, "coinapi_fill": {}},  # corrupt count
+              "days": [{"day": "2025-01-01"}, {"day": "2025-01-02"}]}  # day set matches the plan
+    (report_dir / REPORT_NAME).write_text(json.dumps(report))
+    assert qmb.batch_status(batch, base_dir=".", ledger_index={}) != qmb.COMPLETE
+
+
+def test_report_with_no_day_rows_is_not_complete(tmp_path):
+    # Codex P2: an empty days[] with n_days>0 is an inconsistent/half-written report — not complete
+    m = _manifest_dict(tmp_path)  # batch_001 row claims n_days=2 (no days file written → fallback)
+    rd = pathlib.Path(m["batches"][0]["report_dir"])
+    rd.mkdir(parents=True, exist_ok=True)
+    report = {"meta": {}, "summary": {"n_days": 2, "counts": {}, "coinapi_fill": {}}, "days": []}
+    (rd / REPORT_NAME).write_text(json.dumps(report))
+    assert qmb.batch_status(m["batches"][0], base_dir=".", ledger_index={}) != qmb.COMPLETE
 
 
 def test_report_matching_day_boundaries_is_complete(tmp_path):

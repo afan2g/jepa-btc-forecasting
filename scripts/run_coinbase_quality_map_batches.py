@@ -124,7 +124,11 @@ def _runner_argv(batch: dict) -> list[str]:
     Lake quota gate — so the program path is pinned to the exact planner-emitted RUNNER_SCRIPT
     (the normalized relative path, NOT just its basename: a same-named script at another path, e.g.
     `/tmp/run_coinbase_quality_map.py`, is refused). Defense-in-depth."""
-    argv = shlex.split(batch["command"])
+    try:
+        argv = shlex.split(batch["command"])
+    except ValueError as e:  # malformed quoting ⇒ a clean manifest error, not a raw traceback
+        raise RunnerError(f"batch {batch.get('file')!r} has an unparseable command ({e}): "
+                          f"{batch['command']!r}") from None
     if len(argv) < 2:
         raise RunnerError(f"batch {batch.get('file')!r} has an unparseable command: "
                           f"{batch['command']!r}")
@@ -192,19 +196,22 @@ def report_matches_batch(report: dict, batch: dict, *, base_dir: str) -> bool:
     set differed — accepting it as complete would be a silent coverage gap in the very full-window
     map that gates the backfill.
 
-    Primary check: the report's day set equals the batch's planned days (from the days file the
-    command points at). This catches an interior-day swap that leaves n_days/first/last unchanged.
-    Fallback (days file absent, or the report carries no per-day rows): the always-present n_days and,
-    when present, the first/last day (`days` are {"day": ...} dicts)."""
+    Check order: (1) the report's day count must agree with the plan row AND with its own per-day
+    rows — this guards a corrupt `summary.n_days` (which aggregate_quality trusts) and an empty/
+    truncated day list masquerading as a finished run; (2) when the days file is readable, the
+    report's day set must EXACTLY equal the planned set (catches an interior-day swap that leaves
+    n_days/first/last unchanged); (3) otherwise fall back to the first/last day
+    (`days` are {"day": ...} dicts)."""
+    summary = report.get("summary") or {}
     days = report.get("days") or []
     report_days = {(r.get("day") if isinstance(r, dict) else r) for r in days}
     report_days.discard(None)
-    planned = _planned_days(batch, base_dir)
-    if planned is not None and report_days:
-        return report_days == planned
-    summary = report.get("summary") or {}
-    if batch.get("n_days") is not None and summary.get("n_days") != batch.get("n_days"):
+    n_days = batch.get("n_days")
+    if n_days is not None and (summary.get("n_days") != n_days or len(report_days) != n_days):
         return False
+    planned = _planned_days(batch, base_dir)
+    if planned is not None:
+        return report_days == planned
     if days:
         first = days[0].get("day") if isinstance(days[0], dict) else days[0]
         last = days[-1].get("day") if isinstance(days[-1], dict) else days[-1]
