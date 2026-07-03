@@ -211,8 +211,9 @@ def report_matches_batch(report: dict, batch: dict, *, base_dir: str) -> bool:
     rows — this guards a corrupt `summary.n_days` (which aggregate_quality trusts) and an empty/
     truncated day list masquerading as a finished run; (2) when the days file is readable, the
     report's day set must EXACTLY equal the planned set (catches an interior-day swap that leaves
-    n_days/first/last unchanged); (3) otherwise fall back to the first/last day
-    (`days` are {"day": ...} dicts)."""
+    n_days/first/last unchanged) AND the planned set must agree with the manifest row's first/last
+    bounds (catches a stale row still pointing at a regenerated days file with different endpoints);
+    (3) otherwise fall back to the row's first/last day (`days` are {"day": ...} dicts)."""
     summary = report.get("summary") or {}
     days = report.get("days") or []
     report_days = {(r.get("day") if isinstance(r, dict) else r) for r in days}
@@ -222,7 +223,14 @@ def report_matches_batch(report: dict, batch: dict, *, base_dir: str) -> bool:
         return False
     planned = _planned_days(batch, base_dir)
     if planned is not None:
-        return report_days == planned
+        if report_days != planned:
+            return False
+        # the days file must also agree with the row's declared window (ISO dates sort chronologically)
+        if batch.get("first_day") is not None and min(planned) != batch["first_day"]:
+            return False
+        if batch.get("last_day") is not None and max(planned) != batch["last_day"]:
+            return False
+        return True
     if days:
         first = days[0].get("day") if isinstance(days[0], dict) else days[0]
         last = days[-1].get("day") if isinstance(days[-1], dict) else days[-1]

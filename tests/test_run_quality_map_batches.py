@@ -365,6 +365,23 @@ def test_report_with_matching_days_but_wrong_summary_count_is_not_complete(tmp_p
     assert qmb.batch_status(batch, base_dir=".", ledger_index={}) != qmb.COMPLETE
 
 
+def test_days_file_disagreeing_with_row_bounds_is_not_complete(tmp_path):
+    # Codex P2: a stale manifest row + regenerated days file (same n_days, different endpoints) must
+    # not mark the wrong coverage window complete — the days file must also agree with the row bounds.
+    days_file = tmp_path / "batch_001_days.txt"
+    days_file.write_text("2025-02-01\n2025-02-02\n")  # days file endpoints are in February …
+    report_dir = tmp_path / "reports" / "batch_001"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    batch = {"file": "batch_001_days.txt", "report_dir": str(report_dir),
+             "n_days": 2, "first_day": "2025-01-01", "last_day": "2025-01-02",  # … row claims January
+             "command": ("python scripts/run_coinbase_quality_map.py "
+                         f"--days-file {days_file} --out-dir {report_dir}")}
+    report = {"meta": {}, "summary": {"n_days": 2, "counts": {}, "coinapi_fill": {}},
+              "days": [{"day": "2025-02-01"}, {"day": "2025-02-02"}]}  # matches days file, not the row
+    (report_dir / REPORT_NAME).write_text(json.dumps(report))
+    assert qmb.batch_status(batch, base_dir=".", ledger_index={}) != qmb.COMPLETE
+
+
 def test_report_with_no_day_rows_is_not_complete(tmp_path):
     # Codex P2: an empty days[] with n_days>0 is an inconsistent/half-written report — not complete
     m = _manifest_dict(tmp_path)  # batch_001 row claims n_days=2 (no days file written → fallback)
