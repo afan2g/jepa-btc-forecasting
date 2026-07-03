@@ -339,11 +339,18 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    feature window `[t_feature_start, t_event]` or label window `[t_event, t_barrier]`
    crosses a seam or touches its guard band, or whose windows are not backed by a single
    vendor** (`{LAKE}` or `{COINAPI}`). Use the built helpers directly. For the **seam +
-   guard-band** test use the guard-aware **`feature_valid_mask(...)` / `label_valid_mask(...)`**
-   (`recon/stitch_policy.py:391,406` — both take `guard_ns` and reject a window that crosses
-   a seam *or* touches its ±`guard_ns` band), **not** `window_crosses_seam` alone, which has
-   **no `guard_ns`** (`recon/stitch_policy.py:385`) and would let a window sitting inside the
-   60 s guard band survive (Codex P2). For the **vendor-coverage** test use
+   guard-band** test, run **`window_crosses_seam` over each window's *actual* per-row span
+   extended by `guard_ns` on both sides** — feature `window_crosses_seam(t_feature_start −
+   guard_ns, t_event + guard_ns, seams)`, label `window_crosses_seam(t_event − guard_ns,
+   t_barrier + guard_ns, seams)` — which is guard-aware (the ±`guard_ns` extension covers the
+   guard band that `window_crosses_seam` alone lacks, `recon/stitch_policy.py:385`) **and** uses
+   the true span. **Do not use `label_valid_mask(…, horizon_ns=…)` for the label window (Codex
+   #A):** it masks the *full* `[t_event, t_event + horizon]` (`recon/stitch_policy.py:391-403`),
+   so an **early-resolving barrier** (`t_barrier < t_event + horizon` — a TP/SL hit) is dropped
+   for a seam that falls *after* its actual `t_barrier`, needlessly zeroing/undersizing the 60 s
+   rung (#5) and contradicting the `[t_event, t_barrier]` actual-span rule above.
+   (`feature_valid_mask`/`label_valid_mask` remain the *regular-grid* form and are fine when fed
+   the actual per-row span — `t_barrier`, not `horizon`.) For the **vendor-coverage** test use
    **`window_vendor_sources(start, end, segments)` (`recon/stitch_policy.py:430`)** — the row
    is kept only when *both* its feature window
    `[t_feature_start, t_event]` and label window **`[t_event, t_barrier]`** return a singleton
@@ -681,15 +688,17 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   row is **dropped**, not NaN-emitted. A dead-Sunday window cannot wedge the build.
 - **Seam masking (P2a):** a synthetic day with a planted seam (two vendor segments +
   `SeamPolicy` guard) drops every bar whose feature/label window crosses the seam **or sits
-  inside the guard band** (guard-aware `feature_valid_mask`/`label_valid_mask`, **not**
-  `window_crosses_seam` alone), and every window whose `window_vendor_sources` is not a
-  singleton `{lake}`/`{coinapi}` — including the endpoint-clean-but-**`excluded`/`UNCOVERED`
-  span *inside* the window** case (the per-sample `vendor_source_at` would miss it). No
-  surviving row spans a seam or guard band
-  (`recon/stitch_policy.py:label_valid_mask`/`feature_valid_mask`/`window_vendor_sources`).
-  **Horizon survival (Codex #5):** the multi-horizon fixture is sized so masking leaves **≥
-  `n_groups` rows per declared horizon** — else the 60 s rung is masked out and
-  `run_from_manifest`/`cpcv_splits` crash instead of returning the per-horizon schema.
+  inside the guard band** — masked over each window's **actual per-row span extended by
+  `guard_ns`** (`window_crosses_seam(t_event − guard_ns, t_barrier + guard_ns, …)`, §C.3), and
+  every window whose `window_vendor_sources` is not a singleton `{lake}`/`{coinapi}` —
+  including the endpoint-clean-but-**`excluded`/`UNCOVERED` span *inside* the window** case (the
+  per-sample `vendor_source_at` would miss it). **Actual-span vs full-horizon (Codex #A):** plant
+  a 60 s row whose barrier resolves early (`t_barrier < t_event + 60 s`) with a seam in
+  `(t_barrier, t_event + 60 s]` — it must **survive** (its actual span clears the seam), which the
+  full-horizon `label_valid_mask` would wrongly drop. **Horizon survival (Codex #5):** the
+  multi-horizon fixture is sized so masking leaves **≥ `n_groups` rows per declared horizon** —
+  else the 60 s rung is masked out and `run_from_manifest`/`cpcv_splits` crash instead of
+  returning the per-horizon schema.
 - **Features:** hand-built L2+trade micro-fixture with a known OFI/CVD/microprice-dev →
   exact expected values. **Value-level no-lookahead (T3):** out-of-order replay ⇒
   byte-identical features (mirrors `tests/test_reconstruct_no_lookahead.py`).
@@ -738,8 +747,10 @@ exercises the **entire plumbing** through the built consumer without a byte of v
 **Requires the final backfilled dataset (post-backfill unlock) — T10:**
 the **final reviewed stitch plan / seam list** (the product of the §5a parity + reseed
 multi-day validation — the masking *code* is pre-backfill, the *seam list it consumes* is
-not); **threshold calibration** to hit the **E0.3 median-bar ≤ 2 s gate** (needs real
-Binance trade volume); **τ measurement** (E1.1) to set the real horizon ladder; the
+not); **threshold calibration** to hit the **E0.3 median-bar ≤ 2 s gate** on the **declared
+default clock's reference stream — real *Coinbase* trade volume** (Codex #B; Binance-volume
+calibration is scoped to the separate post-E2.5 Binance-clock path and must not size the
+Coinbase-default schedule); **τ measurement** (E1.1) to set the real horizon ladder; the
 **time-per-bar histogram** artifact; the **first real G1 run** over the usable calendar
 (704/730 d, OOS≈**April 2026** — data.md §5b) with real regime stratification, real DSR
 trial count, and PBO over ≥32 OOS samples. These are gated on backfill unlock and are
@@ -933,6 +944,14 @@ schema change.
   - **#12:** normalize the trailing threshold by covered fraction (§A).
   - **#13:** robust/capped `max_lookback_ns`, not a raw `.max()` a straggler inflates (§F).
   - **#14 (LOW):** §G wording — `g1_inconclusive` only *when the gate would otherwise pass* (§G).
+- Review round 12 (Codex resumed after its limit reset, on `34c3885`) incorporated — 2 findings:
+  **#A (P2):** the label seam/guard mask must run over the **actual `[t_event, t_barrier]` span**
+  (guard-extended, via `window_crosses_seam`), **not** `label_valid_mask(horizon_ns)` which masks
+  the full `[t_event, t_event+horizon]` and over-drops early-resolving (TP/SL) 60 s rows for a
+  post-`t_barrier` seam — worsening the #5 horizon-survival risk (§C.3/§J); **#B (P3):** post-backfill
+  **threshold calibration uses real *Coinbase* volume** (the pre-E2.5 default clock's reference
+  stream), not Binance — Binance-volume calibration is scoped to the post-E2.5 Binance-clock path
+  (§split) — traced to `recon/stitch_policy.py:391-403`.
 
 ## Risks & assumptions
 
