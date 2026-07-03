@@ -161,10 +161,11 @@ def _iter_record_batches(item):
 
 
 def _stream_to_parquet(stream, dest_tmp: str, *, schema_version: str, feed: str,
-                       exchange: str, symbol: str, day_iso: str) -> tuple[int, bool]:
-    """Consume an iterable of batches/frames → one ZSTD Parquet file. Returns (rows, wrote_file);
-    wrote_file is False when the stream yielded NO batches (a present-but-empty partition — no
-    schema to write), which the caller handles under the sparse/required policy rather than erroring.
+                       exchange: str, symbol: str, day_iso: str) -> int:
+    """Consume an iterable of batches/frames → one ZSTD Parquet file. Returns total rows written
+    (0 when the stream yields no batches OR only zero-row batches — a present-but-empty partition;
+    the caller treats rows==0 as empty/missing under the sparse/required policy rather than
+    publishing a 0-row parquet).
 
     schema_version + partition keys go in the parquet KV metadata (Requirement 6) — NOT the sha256
     (embedding the hash would change the very bytes being hashed; rows likewise stays in the manifest
@@ -191,10 +192,10 @@ def _stream_to_parquet(stream, dest_tmp: str, *, schema_version: str, feed: str,
     finally:
         if writer is not None:
             writer.close()
-    # writer is None ⇒ the stream yielded NO batches (a present-but-empty partition, no schema to
-    # write). Not an error here: the caller applies the sparse/required policy (an empty sparse
-    # liquidations day is a non-fatal quiet day; a required feed's emptiness is a real gap).
-    return rows, (writer is not None)
+    # No raise on an empty stream: rows==0 (no batches, OR only zero-row batches) means a
+    # present-but-empty partition, which the caller handles under the sparse/required policy (an
+    # empty sparse liquidations day is a non-fatal quiet day; a required feed's emptiness is a gap).
+    return rows
 
 
 # ----------------------------------------------------------------------------- per-unit worker
@@ -255,12 +256,15 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
                 _append(rec)
                 return UnitResult("missing", 0, None, rec)
             os.makedirs(os.path.dirname(final), exist_ok=True)   # partition dir must exist for the .tmp
-            rows, wrote = _stream_to_parquet(stream, tmp, schema_version=schema_version, feed=feed,
-                                             exchange=exchange, symbol=symbol, day_iso=day_iso)
-            if not wrote:
-                # present-but-empty partition (zero batches): treat like a missing one under the SAME
-                # sparse/required policy — a quiet-day liquidations file is non-fatal, a required
-                # feed's emptiness is a real gap (main → exit 3). No parquet is published.
+            rows = _stream_to_parquet(stream, tmp, schema_version=schema_version, feed=feed,
+                                      exchange=exchange, symbol=symbol, day_iso=day_iso)
+            if rows == 0:
+                # present-but-empty partition — whether the stream had no batches OR only zero-row
+                # batches (a schema-only empty parquet may sit in tmp; discard it, never publish a
+                # 0-row data.parquet). Treated like a missing one under the SAME sparse/required
+                # policy: a quiet-day liquidations file is non-fatal; a required feed's emptiness is
+                # a real gap (main → exit 3).
+                _rm(tmp)
                 rec = {**base, "status": "missing", "sparse_ok": bool(sparse_ok),
                        "empty": True, "ts": now_iso()}
                 _append(rec)

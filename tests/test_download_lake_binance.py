@@ -175,6 +175,28 @@ def test_process_unit_empty_partition_is_nonfatal_missing(tmp_path):
     assert not pathlib.Path(lb.raw_parquet_path(root, "liquidations", *PERP, "2026-04-01")).exists()
 
 
+def test_process_unit_zero_row_batch_is_empty_not_ok(tmp_path):
+    # a schema-bearing but ZERO-ROW batch must be treated as empty (missing), NOT published as an
+    # `ok` 0-row parquet — else an empty required feed would exit 0 and be considered done.
+    root = str(tmp_path)
+    empty_batch = pa.record_batch({"origin_time": pa.array([], pa.int64())})
+    res = dl.process_unit(FakeReader({"trades": [empty_batch]}), root, "trades", *PERP,
+                          "2026-04-01", sparse_ok=False, sleep=lambda *_: None)
+    assert res.status == "missing" and res.rows == 0
+    assert res.record.get("empty") is True
+    assert not pathlib.Path(lb.raw_parquet_path(root, "trades", *PERP, "2026-04-01")).exists()
+
+
+def test_run_zero_row_required_feed_exits_3(tmp_path):
+    # exact Codex scenario: a required feed exposed with a schema but zero rows must NOT exit 0.
+    reader = _perp_reader()
+    reader.plan["trades"] = [pa.record_batch({"origin_time": pa.array([], pa.int64())})]
+    code = dl.main(["--instrument", "binance-perp", "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 3
+
+
 def test_run_empty_liquidations_is_nonfatal(tmp_path):
     reader = _perp_reader()
     reader.plan["liquidations"] = []                      # present but zero-batch (quiet day)
