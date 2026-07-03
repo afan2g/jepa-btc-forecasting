@@ -156,6 +156,35 @@ def test_run_live_setup_failure_exits_2(tmp_path, monkeypatch):
     assert code == 2
 
 
+def test_run_empty_feeds_exits_2(tmp_path):
+    # `--feeds ,` (a wrapper expanding to only separators) must be rejected, not silently no-op to 0.
+    code = dl.main(["--instrument", "binance-spot", "--feeds", ",",
+                    "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=_NullReader(), used_data_fn=lambda: 0.0)
+    assert code == 2
+
+
+def test_run_empty_instrument_exits_2(tmp_path):
+    code = dl.main(["--instrument", " , ", "--feeds", "trades",
+                    "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=_NullReader(), used_data_fn=lambda: 0.0)
+    assert code == 2
+
+
+def test_plan_units_dedups_repeated_instruments_and_feeds():
+    # repeated instruments/feeds must NOT emit identical (feed,E,S,dt) units — they would race on the
+    # same data.parquet path under --jobs>1 and corrupt the partition.
+    a = dl.plan_units(["binance-perp", "binance-perp"], "trades", ["2026-04-01"])
+    assert len(a) == 1
+    b = dl.plan_units(["binance-perp"], "trades,trades", ["2026-04-01"])
+    assert len(b) == 1
+    # book_delta_v2 (+book seed) repeated → 2 unique units (book_delta_v2, book), not 4
+    c = dl.plan_units(["binance-perp"], "book_delta_v2,book_delta_v2", ["2026-04-01"])
+    assert sorted(u.feed for u in c) == ["book", "book_delta_v2"]
+
+
 def test_run_broad_gate_blocks_before_any_read(tmp_path):
     reader = _NullReader()
     with pytest.raises(SystemExit) as e:

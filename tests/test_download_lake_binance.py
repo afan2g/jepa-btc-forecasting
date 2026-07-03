@@ -544,6 +544,21 @@ def test_run_jobs_parallel_writes_all_units_with_valid_manifest(tmp_path):
     assert len({(r["feed"], r["dt"]) for r in ok}) == len(ok)   # no duplicate unit records
 
 
+def test_run_dedups_repeated_instrument_under_jobs(tmp_path):
+    # a repeated instrument under --jobs>1 must process the unit ONCE (deduped) — never race two
+    # writers on the same partition. Exactly one read, one ok record, one parquet.
+    raw = tmp_path / "raw"
+    reader = FakeReader({"trades": [_batch(2)]})
+    code = dl.main(["--instrument", "binance-spot,binance-spot", "--feeds", "trades", "--jobs", "2",
+                    "--start", "2026-04-01", "--end", "2026-04-01", "--out", str(raw),
+                    "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 0
+    assert _count_calls(reader, "trades") == 1
+    recs = [json.loads(x) for x in (raw / lb.MANIFEST_NAME).read_text().splitlines()]
+    assert len([r for r in recs if r["status"] == "ok" and r["feed"] == "trades"]) == 1
+
+
 def test_run_jobs_quota_hard_stop_cancels_pending_units(tmp_path):
     # a quota/credit wall under --jobs must exit 2 AND cancel the queued units (not drain them):
     # only the ≤jobs already-in-flight units may run, so far fewer than all units are ever read.

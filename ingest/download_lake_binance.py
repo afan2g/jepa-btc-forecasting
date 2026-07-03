@@ -365,18 +365,34 @@ class Unit:
 
 def resolve_feeds(instrument_key: str, feeds_arg: str | None) -> list[str]:
     """Selected feeds for an instrument. Default = all feeds valid for it; each pair validated
-    (an invalid pair like `funding` on spot raises ValueError before any vendor call)."""
+    (an invalid pair like `funding` on spot raises ValueError before any vendor call). A `--feeds`
+    that parses to nothing (e.g. `--feeds ,` from a wrapper) is REJECTED, not silently emptied —
+    otherwise the run would produce zero units and exit 0 as if it had downloaded the batch."""
     inst = lb.INSTRUMENTS[instrument_key]
-    feeds = list(inst.feeds) if not feeds_arg else [f.strip() for f in feeds_arg.split(",") if f.strip()]
+    if not feeds_arg:
+        return list(inst.feeds)
+    feeds, seen = [], set()
+    for f in feeds_arg.split(","):
+        f = f.strip()
+        if f and f not in seen:          # de-dup repeated feeds so they never race on one partition
+            seen.add(f)
+            feeds.append(f)
+    if not feeds:
+        raise ValueError(f"--feeds {feeds_arg!r} is empty after parsing (only separators/whitespace); "
+                         "provide at least one feed")
     for feed in feeds:
         lb.validate_feed(instrument_key, feed)
     return feeds
 
 
 def plan_units(instrument_keys: list[str], feeds_arg: str | None, days: list[str]) -> list[Unit]:
-    """The full (instrument, feed, day) work list. Whenever `book_delta_v2` is selected the `book`
-    SEED_PRODUCT is ALSO scheduled per day (it seeds Stage-2 recon, Requirement 1)."""
+    """The full (instrument, feed, day) work list, DE-DUPLICATED (order-preserving). Whenever
+    `book_delta_v2` is selected the `book` SEED_PRODUCT is ALSO scheduled per day (it seeds Stage-2
+    recon, Requirement 1). Dedup is load-bearing: a repeated instrument/feed (`--instrument
+    binance-perp,binance-perp`, `--feeds trades,trades`) would otherwise emit identical
+    (feed,E,S,dt) units that, under --jobs>1, race on the same data.parquet.tmp and corrupt it."""
     units: list[Unit] = []
+    seen: set[Unit] = set()
     for key in instrument_keys:
         inst = lb.INSTRUMENTS[key]
         feeds = resolve_feeds(key, feeds_arg)
@@ -385,7 +401,10 @@ def plan_units(instrument_keys: list[str], feeds_arg: str | None, days: list[str
             pull_feeds.append(lb.SEED_PRODUCT)   # `book` seed pulled alongside book_delta_v2
         for feed in pull_feeds:
             for day in days:
-                units.append(Unit(key, inst.exchange, inst.symbol, feed, day))
+                u = Unit(key, inst.exchange, inst.symbol, feed, day)
+                if u not in seen:
+                    seen.add(u)
+                    units.append(u)
     return units
 
 
@@ -637,7 +656,11 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
 
     # ---- resolve request (all setup errors → exit 2, before any vendor touch) -------------------
     try:
-        instrument_keys = [k.strip() for k in args.instrument.split(",") if k.strip()]
+        instrument_keys = list(dict.fromkeys(              # de-dup, order-preserving
+            k.strip() for k in args.instrument.split(",") if k.strip()))
+        if not instrument_keys:
+            raise ValueError(f"--instrument {args.instrument!r} is empty after parsing (only "
+                             "separators/whitespace); provide at least one instrument")
         for key in instrument_keys:
             if key not in lb.INSTRUMENTS:
                 raise ValueError(f"unknown instrument {key!r} (valid: {list(lb.INSTRUMENTS)})")
@@ -649,7 +672,9 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
             raise ValueError("provide --start and --end, or --days-file")
         if not days:
             raise ValueError("day source resolved to zero days — nothing to download")
-        units = plan_units(instrument_keys, args.feeds, days)       # also validates (instr,feed) pairs
+        units = plan_units(instrument_keys, args.feeds, days)       # validates + de-dups (instr,feed)
+        if not units:                                # catch-all: bad config must never no-op to exit 0
+            raise ValueError("resolved zero units to download — check --instrument/--feeds/day source")
         manifest_root = args.manifest or args.out
         pending = pending_units(units, args.out, overwrite=args.overwrite,
                                 manifest_root=manifest_root)
