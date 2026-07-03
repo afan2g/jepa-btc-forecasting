@@ -369,8 +369,8 @@ def resolve_feeds(instrument_key: str, feeds_arg: str | None) -> list[str]:
     that parses to nothing (e.g. `--feeds ,` from a wrapper) is REJECTED, not silently emptied —
     otherwise the run would produce zero units and exit 0 as if it had downloaded the batch."""
     inst = lb.INSTRUMENTS[instrument_key]
-    if not feeds_arg:
-        return list(inst.feeds)
+    if feeds_arg is None:                # OMITTED → default to all feeds (an explicit "" or "," is
+        return list(inst.feeds)          # NOT omitted: it falls through and is rejected as empty)
     feeds, seen = [], set()
     for f in feeds_arg.split(","):
         f = f.strip()

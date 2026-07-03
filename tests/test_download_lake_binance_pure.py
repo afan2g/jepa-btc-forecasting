@@ -165,6 +165,18 @@ def test_run_empty_feeds_exits_2(tmp_path):
     assert code == 2
 
 
+def test_run_explicitly_empty_feeds_string_exits_2(tmp_path):
+    # `--feeds ""` (an unset env var) is NOT the same as omitting --feeds: it must exit 2, not expand
+    # to every feed and start unexpected Lake reads.
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "",
+                    "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=_NullReader(), used_data_fn=lambda: 0.0)
+    assert code == 2
+    # sanity: OMITTING --feeds still defaults to all valid feeds (None, not "")
+    assert dl.resolve_feeds("binance-spot", None) == list(lb.INSTRUMENTS["binance-spot"].feeds)
+
+
 def test_run_empty_instrument_exits_2(tmp_path):
     code = dl.main(["--instrument", " , ", "--feeds", "trades",
                     "--start", "2026-04-01", "--end", "2026-04-01",
