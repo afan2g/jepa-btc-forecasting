@@ -469,6 +469,19 @@ def test_present_days_from_list_records_reads_dt_key():
     assert dl.present_days_from_list_records(None) == []
 
 
+def test_used_gb_from_response_reads_downloaded_gb():
+    # lakeapi.used_data returns a dict ALREADY in GB — read downloaded_gb, no bytes conversion.
+    assert dl.used_gb_from_response({"downloaded_gb": 151.35, "timeframe_days": 31}) \
+        == pytest.approx(151.35)
+    assert dl.used_gb_from_response({"downloaded_gb": 0}) == 0.0
+    # a bare number (the old `float(used_data(...))` bug) or a missing key must FAIL, so main() exits
+    # 2 fail-safe rather than gating against a wrong 0 usage.
+    with pytest.raises((KeyError, TypeError)):
+        dl.used_gb_from_response(151.35)
+    with pytest.raises(KeyError):
+        dl.used_gb_from_response({"timeframe_days": 31})
+
+
 def test_stream_parquet_batches_streams_row_groups(tmp_path):
     # the live reader must yield row-group batches, NEVER a whole (109 M-row) day as one object.
     import pyarrow as pa

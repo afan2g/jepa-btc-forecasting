@@ -343,11 +343,20 @@ def lake_session(env_path: str = ".env"):
                          "(need aws_access_key_id and aws_secret_access_key).") from None
 
 
+def used_gb_from_response(resp) -> float:
+    """GB used this window from a `lakeapi.used_data()` response — a dict ALREADY in GB
+    (`{"downloaded_gb": 151.35, "timeframe_days": 31, …}`; docstring 'Get used data in gigabytes',
+    mirrors run_coinbase_quality_map.py's `used.get("downloaded_gb")`). No bytes conversion. Raises
+    (KeyError/TypeError) on an unexpected shape ON PURPOSE, so main() exits 2 fail-safe rather than
+    gating against a bogus 0 usage (plan Requirement 4: unreadable used_data → fail safe)."""
+    return float(resp["downloaded_gb"])
+
+
 def _live_used_gb(session) -> float:
     """GB of Lake quota consumed this window (telemetry; the counter LAGS ~60 min so it is NOT the
-    gate — our own estimate is). lakeapi.used_data returns bytes; convert to GB."""
+    gate — our own estimate is)."""
     import lakeapi
-    return float(lakeapi.used_data(session)) / 1e9
+    return used_gb_from_response(lakeapi.used_data(session))
 
 
 def _lake_table(feed: str) -> str:
