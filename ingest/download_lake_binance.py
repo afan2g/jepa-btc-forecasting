@@ -350,25 +350,76 @@ def _live_used_gb(session) -> float:
     return float(lakeapi.used_data(session)) / 1e9
 
 
+def _lake_table(feed: str) -> str:
+    """Lake `table` name for a scoped feed or the `book` SEED_PRODUCT (they share the raw scheme)."""
+    return "book" if feed == lb.SEED_PRODUCT else feed
+
+
+READ_BATCH_ROWS = 1_000_000    # row-group batch size for the streaming vendor read (never a full day)
+
+
+def stream_parquet_batches(filesystem, paths, *, batch_size=READ_BATCH_ROWS):
+    """Yield pyarrow RecordBatches from parquet `paths` on `filesystem`, one row-group batch at a time.
+
+    This is the whole point of Stage 1's memory contract (Requirement 3 / repo perf rule): a
+    book_delta_v2 day is ~109 M rows, so we open each partition object and `iter_batches` it —
+    never materializing the day as a DataFrame/Table. Pulled out as a pure generator so it is
+    unit-testable offline against a LocalFileSystem, with no live Lake."""
+    import pyarrow.parquet as pq
+    for path in sorted(paths):
+        with filesystem.open_input_file(path) as handle:
+            for batch in pq.ParquetFile(handle).iter_batches(batch_size=batch_size):
+                yield batch
+
+
+def present_days_from_list_records(records) -> list[str]:
+    """Sorted ISO day list from `lakeapi.list_data` records — dicts keyed by `dt` (docstring:
+    'dicts containing keys table, exchange, symbol, dt, filename'; mirrors ingest/verify_lake.py's
+    `{o["dt"] for o in objs}`). Skips any record missing `dt` rather than stringifying the whole
+    dict (which would make every requested day read as missing)."""
+    return sorted({r["dt"] for r in (records or []) if isinstance(r, dict) and "dt" in r})
+
+
+def _lake_bucket() -> str:
+    """Crypto Lake's S3 bucket+root prefix, resolved from lakeapi's own configured default
+    ('qnt.data/market-data/cryptofeed') rather than hard-coded, so a lakeapi upgrade can't drift it."""
+    import lakeapi
+    bucket = lakeapi.load_data.__globals__.get("default_bucket")
+    if not bucket:
+        raise SystemExit("could not resolve the Crypto Lake bucket from lakeapi (default_bucket).")
+    return bucket
+
+
+def _s3_filesystem(session):
+    import pyarrow.fs as pafs
+    creds = session.get_credentials().get_frozen_credentials()
+    return pafs.S3FileSystem(access_key=creds.access_key, secret_key=creds.secret_key,
+                             session_token=creds.token,
+                             region=session.region_name or "eu-west-1")
+
+
 def _live_reader(session):
     """Build the live vendor reader: reader(feed, E, S, day) → iterable of pyarrow batches, or None.
 
-    Streams the vendor parquet as compressed row-group batches (never a whole day in RAM). NOT
-    exercised in CI — every unit test injects a fake reader. Runs only under an explicit,
-    approval-gated live pull."""
-    import lakeapi  # noqa: F401  (imported here to fail fast if the vendor dep is missing)
+    STREAMS the vendor parquet as compressed row-group batches over an S3FileSystem handle (plan
+    Requirement 3: `ParquetFile(...).iter_batches(...)`), never calling `lakeapi.load_data`, which
+    would return a whole ~109 M-row day as a DataFrame in RAM. Reads the raw vendor columns
+    (`timestamp`/`receipt_timestamp`/`side_is_bid`/…) — losslessly; `recon.ingest` aliases them.
+    NOT exercised in CI (tests inject a fake reader) and the exact bucket/layout is re-confirmed in
+    Phase-1 before the first approval-gated live pull."""
+    import pyarrow.fs as pafs
+    fs = _s3_filesystem(session)
+    bucket = _lake_bucket()
 
     def read(feed, exchange, symbol, day_iso):
-        import pyarrow as pa
-        start = dt.datetime.fromisoformat(day_iso)
-        end = start + dt.timedelta(days=1)
-        table = "book" if feed == lb.SEED_PRODUCT else feed
-        df = lakeapi.load_data(table=table, start=start, end=end, symbols=[symbol],
-                               exchanges=[exchange], boto3_session=session)
-        if df is None or len(df) == 0:
-            return None                              # no vendor file / empty day → missing
-        # Stream in row-group-sized batches rather than one giant table.
-        return pa.Table.from_pandas(df, preserve_index=False).to_batches(max_chunksize=1_000_000)
+        # Hive partition prefix, matching the Lake bucket layout (docs §Requirement 2).
+        prefix = f"{bucket}/{_lake_table(feed)}/exchange={exchange}/symbol={symbol}/dt={day_iso}"
+        entries = fs.get_file_info(pafs.FileSelector(prefix, recursive=True, allow_not_found=True))
+        paths = [e.path for e in entries
+                 if e.type == pafs.FileType.File and e.path.endswith(".parquet")]
+        if not paths:
+            return None                              # no vendor file for this partition → missing
+        return stream_parquet_batches(fs, paths)
 
     return read
 
@@ -378,11 +429,12 @@ def _live_lister(session):
     import lakeapi
 
     def list_days(feed, exchange, symbol):
-        table = "book" if feed == lb.SEED_PRODUCT else feed
-        meta = lakeapi.list_data(table=table, symbols=[symbol], exchanges=[exchange],
-                                 boto3_session=session)
-        days = sorted({str(getattr(row, "dt", row)) for row in (meta or [])})
-        return days
+        try:
+            meta = lakeapi.list_data(table=_lake_table(feed), symbols=[symbol],
+                                     exchanges=[exchange], boto3_session=session)
+        except lakeapi.exceptions.NoFilesFound:
+            return []                                # nothing present for this feed → no days
+        return present_days_from_list_records(meta)
 
     return list_days
 

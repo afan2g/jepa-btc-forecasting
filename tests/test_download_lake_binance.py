@@ -455,6 +455,61 @@ def test_dry_run_uses_lister_and_writes_no_parquet(tmp_path):
     assert rep["dry_run"] is True and rep["transferred_gb"] == 0
 
 
+# --------------------------------------------------------------------------- live-path helpers (offline)
+def test_present_days_from_list_records_reads_dt_key():
+    # lakeapi.list_data returns dicts keyed by `dt` — read that key, never stringify the whole dict
+    # (which would make every requested day compare as missing on a live --dry-run).
+    recs = [{"table": "trades", "exchange": "BINANCE", "symbol": "BTC-USDT",
+             "dt": "2026-04-02", "filename": "b.parquet"},
+            {"table": "trades", "exchange": "BINANCE", "symbol": "BTC-USDT",
+             "dt": "2026-04-01", "filename": "a.parquet"}]
+    assert dl.present_days_from_list_records(recs) == ["2026-04-01", "2026-04-02"]
+    assert dl.present_days_from_list_records([{"no": "dt"}]) == []   # missing dt skipped, not bogus
+    assert dl.present_days_from_list_records([]) == []
+    assert dl.present_days_from_list_records(None) == []
+
+
+def test_stream_parquet_batches_streams_row_groups(tmp_path):
+    # the live reader must yield row-group batches, NEVER a whole (109 M-row) day as one object.
+    import pyarrow as pa
+    import pyarrow.fs as pafs
+    p = tmp_path / "part.parquet"
+    pq.write_table(pa.table({"origin_time": pa.array(range(2500), pa.int64()),
+                             "price": pa.array([float(i) for i in range(2500)], pa.float64())}),
+                   p, row_group_size=1000)
+    fs = pafs.LocalFileSystem()
+    batches = list(dl.stream_parquet_batches(fs, [str(p)], batch_size=1000))
+    assert len(batches) >= 3                                  # streamed in batches, not one blob
+    assert all(isinstance(b, pa.RecordBatch) for b in batches)
+    assert sum(b.num_rows for b in batches) == 2500          # lossless
+    # multiple objects in a partition stream concatenated, in sorted path order
+    p2 = tmp_path / "part2.parquet"
+    pq.write_table(pa.table({"origin_time": pa.array([9000, 9001], pa.int64()),
+                             "price": pa.array([1.0, 2.0], pa.float64())}), p2)
+    two = list(dl.stream_parquet_batches(fs, [str(p2), str(p)], batch_size=1000))
+    assert sum(b.num_rows for b in two) == 2502
+
+
+def test_process_unit_consumes_streaming_reader(tmp_path):
+    # end-to-end proof the live-style streaming reader (row-group batches) flows through process_unit
+    # unchanged and writes a lossless parquet — the exact shape _live_reader produces, offline.
+    import pyarrow as pa
+    import pyarrow.fs as pafs
+    src = tmp_path / "src.parquet"
+    pq.write_table(pa.table({"origin_time": pa.array(range(2500), pa.int64())}),
+                   src, row_group_size=1000)
+    fs = pafs.LocalFileSystem()
+
+    def reader(feed, exchange, symbol, day_iso):
+        return dl.stream_parquet_batches(fs, [str(src)], batch_size=1000)
+
+    res = dl.process_unit(reader, str(tmp_path / "raw"), "book_delta_v2", *PERP, "2026-04-01",
+                          sleep=lambda *_: None)
+    assert res.status == "ok" and res.rows == 2500
+    assert pq.read_table(lb.raw_parquet_path(str(tmp_path / "raw"), "book_delta_v2", *PERP,
+                                             "2026-04-01")).num_rows == 2500
+
+
 # --------------------------------------------------------------------------- import safety
 def test_import_is_vendor_safe():
     # Requirement 1: the module must import with NO boto3/lakeapi AND no pyarrow at module top. We
