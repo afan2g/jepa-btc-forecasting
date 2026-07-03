@@ -222,10 +222,13 @@ def day_record_issues(rec: dict) -> list:
         issues.append("needs_fill_without_plan")
     if nf is not True and prof is not None:
         issues.append("plan_without_needs_fill")
+    # full_day_reason non-null IFF fill_profile == full_day_fill (spec §9 #5). Enforce BOTH
+    # directions: the second check covers partial profiles AND the null/lake_only no-plan shapes
+    # (a stale/corrupt report could otherwise carry full_day_reason with fill_profile=null).
     if prof == FULL_DAY_FILL and fdr is None:
         issues.append("full_day_without_reason")
-    if prof in PARTIAL_FILL_PROFILES and fdr is not None:
-        issues.append("partial_with_full_day_reason")
+    if prof != FULL_DAY_FILL and fdr is not None:
+        issues.append("full_day_reason_without_full_day_fill")
     if prof == FULL_DAY_FILL:
         q = rec.get("quality") or {}
         if q.get("trusted_lake_start_ts") is not None or q.get("trusted_lake_end_ts") is not None:
@@ -290,7 +293,10 @@ def build_day_record(day: str, report_rec: dict | None, cal: dict) -> dict:
     if cctx["excluded_reason"] is not None:
         sources.append("calendar_excluded")
 
-    classification = report_rec["classification"] if report_rec else None
+    # .get, not [...]: a report day missing `classification` is a missing_keys blocker
+    # (check_report_consistency), and readiness still builds records — a hard subscript here would
+    # crash instead of failing closed with status=blocking / exit 3.
+    classification = report_rec.get("classification") if report_rec else None
     cf = (report_rec or {}).get("coinapi_fill") or {}
     q = (report_rec or {}).get("quality") or {}
 

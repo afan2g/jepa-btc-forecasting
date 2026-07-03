@@ -312,7 +312,12 @@ def test_day_record_issues_contradictions():
     r4 = _day("d", "lake_present_degraded",
               _fill_block(True, "quality_over_usable_bar", fill_profile="leading_partial_fill",
                           full_day_reason="quality_over_usable_bar"))
-    assert "partial_with_full_day_reason" in rv.day_record_issues(r4)
+    assert "full_day_reason_without_full_day_fill" in rv.day_record_issues(r4)
+    # the Codex gap: fill_profile=null (the no-plan shape) but full_day_reason set — must be caught
+    r4b = _day("d", "lake_usable",
+               _fill_block(False, "lake_usable", fill_profile=None,
+                           full_day_reason="quality_over_usable_bar"))
+    assert "full_day_reason_without_full_day_fill" in rv.day_record_issues(r4b)
     r5 = _day("d", "missing_needs_coinapi",
               _fill_block(True, "lake_book_delta_v2_absent", fill_profile="full_day_fill",
                           full_day_reason="lake_book_delta_v2_absent"), trusted=(10, 20))
@@ -575,6 +580,18 @@ def test_build_manifest_blocking_unresolved(tmp_path):
     assert m["meta"]["scope_complete"] is False
     assert m["blockers"]["unresolved_days"] == ["2025-01-01"]
     assert m["sections"]["unresolved_days"] == ["2025-01-01"]
+
+
+def test_malformed_report_day_missing_classification_fails_closed(tmp_path):
+    # a report day missing `classification` must fail closed (status=blocking, missing_keys),
+    # NOT crash build_day_record with a KeyError (Codex P2).
+    reports = _clean_reports()
+    del reports[0]["days"][1]["classification"]   # 2025-01-02 now missing classification
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    assert m["meta"]["status"] == "blocking"
+    assert any("classification" in x for x in m["blockers"]["missing_keys"])
 
 
 def test_build_manifest_inspection_report_only(tmp_path):
