@@ -315,8 +315,11 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
 - **Ladder (default):** `{2s, 10s, 60s}` — the spec's band. E1.1 (`eval/tau.py`) measures
   τ on the real data and **adds a ~20–30 s rung near the decay knee**; 60 s stays as a
   decay/control arm. Horizons are a manifest field (`horizons: {"10s": 10_000_000_000,
-  …}`) and a per-row `horizon` tag — multi-horizon is native to the schema; adding the
-  τ-rung post-backfill is a manifest edit, not a code change.
+  …}`) and a per-row `horizon` tag — multi-horizon is native to the schema. **Adding the τ-rung
+  is not just a manifest edit (Codex P2):** the runner groups actual rows by `horizon` and
+  rejects a declared horizon missing from the matrix, so T10 must **rerun label/matrix
+  production** to emit the new bar×horizon rows (likely no code change, but the artifacts are
+  rebuilt).
 - **Vertical barrier = physical horizon** (§5.4 decoupling: input clock is notional, the
   *target* is fixed physical time). One matrix row per (bar, horizon) tag; the built
   runner groups by `horizon` and gates each rung independently
@@ -345,8 +348,9 @@ contract, restated as production rules:
 **Seam integrity (§C.3):** additionally, every emitted row's `[t_feature_start, t_event]`
 and `[t_event, t_barrier]` windows must be seam-/guard-clean and single-vendor-backed
 (`recon/stitch_policy.py`); rows failing the masks are dropped, never NaN-carried into the
-matrix (`validate_frame` rejects NaN features). This is the value-level complement to the
-timing invariants below.
+matrix (**`validate_matrix` rejects NaN/inf features** — §H; `validate_frame` covers only
+columns/timing/dtypes, Codex P2). This is the value-level complement to the timing invariants
+below.
 
 **Value-level no-lookahead is the producer's own gate.** The manifest validates
 *declared* timing and screens *names*; it does **not** prove feature *values* were
@@ -735,6 +739,11 @@ schema change.
 - Review round 7 (Codex on `756c817`) incorporated: the **top-level Architecture data-flow**
   and **T9** now show `validate_frame` **+** `validate_matrix` gating the write (the §H/T8 rule
   is now consistent in the summary a T9 implementer reads first; P2).
+- Review round 8 (Codex on `3629306`) incorporated: the §E seam note now attributes NaN/inf
+  rejection to **`validate_matrix`** (not `validate_frame`, which checks only columns/timing;
+  P2), and §D notes the τ-rung **requires rerunning label/matrix production** to emit the new
+  bar×horizon rows — the runner rejects a declared-but-missing horizon, so it is not a
+  manifest-only edit (P2, T10) — traced to `eval/matrix.py:validate_matrix`, `eval/runner.py:60`.
 
 ## Risks & assumptions
 
