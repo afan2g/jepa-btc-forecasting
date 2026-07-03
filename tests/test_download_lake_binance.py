@@ -163,6 +163,36 @@ def test_process_unit_missing_stamps_sparse_ok(tmp_path):
     assert r2.status == "missing" and r2.record["sparse_ok"] is False    # required-feed hole
 
 
+def test_process_unit_empty_partition_is_nonfatal_missing(tmp_path):
+    # a present-but-empty vendor object (reader yields zero batches) is handled like a missing
+    # partition under the sparse policy — NOT an error (a quiet-day liquidations file must not fail
+    # the batch), and no parquet is published.
+    root = str(tmp_path)
+    res = dl.process_unit(FakeReader({"liquidations": []}), root, "liquidations", *PERP,
+                          "2026-04-01", sparse_ok=True, sleep=lambda *_: None)
+    assert res.status == "missing"
+    assert res.record["sparse_ok"] is True and res.record.get("empty") is True
+    assert not pathlib.Path(lb.raw_parquet_path(root, "liquidations", *PERP, "2026-04-01")).exists()
+
+
+def test_run_empty_liquidations_is_nonfatal(tmp_path):
+    reader = _perp_reader()
+    reader.plan["liquidations"] = []                      # present but zero-batch (quiet day)
+    code = dl.main(["--instrument", "binance-perp", "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 0                                      # empty sparse feed does not fail the batch
+
+
+def test_run_empty_required_feed_exits_3(tmp_path):
+    reader = _perp_reader()
+    reader.plan["trades"] = []                            # a required feed present but empty → gap
+    code = dl.main(["--instrument", "binance-perp", "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 3
+
+
 def test_feed_miss_is_fatal_policy():
     # only sparse/event feeds (liquidations) may go missing without failing the run; the `book` seed
     # and every other feed are required.

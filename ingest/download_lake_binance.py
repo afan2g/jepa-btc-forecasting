@@ -161,8 +161,10 @@ def _iter_record_batches(item):
 
 
 def _stream_to_parquet(stream, dest_tmp: str, *, schema_version: str, feed: str,
-                       exchange: str, symbol: str, day_iso: str) -> int:
-    """Consume an iterable of batches/frames → one ZSTD Parquet file. Returns total rows written.
+                       exchange: str, symbol: str, day_iso: str) -> tuple[int, bool]:
+    """Consume an iterable of batches/frames → one ZSTD Parquet file. Returns (rows, wrote_file);
+    wrote_file is False when the stream yielded NO batches (a present-but-empty partition — no
+    schema to write), which the caller handles under the sparse/required policy rather than erroring.
 
     schema_version + partition keys go in the parquet KV metadata (Requirement 6) — NOT the sha256
     (embedding the hash would change the very bytes being hashed; rows likewise stays in the manifest
@@ -189,10 +191,10 @@ def _stream_to_parquet(stream, dest_tmp: str, *, schema_version: str, feed: str,
     finally:
         if writer is not None:
             writer.close()
-    if writer is None:
-        raise ValueError(f"reader yielded no batches for {feed} {day_iso} (present file must carry "
-                         "at least a schema-bearing batch)")
-    return rows
+    # writer is None ⇒ the stream yielded NO batches (a present-but-empty partition, no schema to
+    # write). Not an error here: the caller applies the sparse/required policy (an empty sparse
+    # liquidations day is a non-fatal quiet day; a required feed's emptiness is a real gap).
+    return rows, (writer is not None)
 
 
 # ----------------------------------------------------------------------------- per-unit worker
@@ -253,8 +255,16 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
                 _append(rec)
                 return UnitResult("missing", 0, None, rec)
             os.makedirs(os.path.dirname(final), exist_ok=True)   # partition dir must exist for the .tmp
-            rows = _stream_to_parquet(stream, tmp, schema_version=schema_version, feed=feed,
-                                      exchange=exchange, symbol=symbol, day_iso=day_iso)
+            rows, wrote = _stream_to_parquet(stream, tmp, schema_version=schema_version, feed=feed,
+                                             exchange=exchange, symbol=symbol, day_iso=day_iso)
+            if not wrote:
+                # present-but-empty partition (zero batches): treat like a missing one under the SAME
+                # sparse/required policy — a quiet-day liquidations file is non-fatal, a required
+                # feed's emptiness is a real gap (main → exit 3). No parquet is published.
+                rec = {**base, "status": "missing", "sparse_ok": bool(sparse_ok),
+                       "empty": True, "ts": now_iso()}
+                _append(rec)
+                return UnitResult("missing", 0, None, rec)
             out_bytes = os.path.getsize(tmp)
             sha = _sha256_file(tmp)
             os.replace(tmp, final)                   # atomic publish
