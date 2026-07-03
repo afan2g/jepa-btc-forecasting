@@ -758,12 +758,19 @@ def check_completeness(plan: dict, reports: list, day_index: dict, cal: dict,
         elif d not in withheld:
             blockers["coverage_gaps"].append(f"gap_day_unmapped:{d}")
 
-    # reciprocal: a report may only classify missing_needs_coinapi for a CURRENT book-gap day. A stale
-    # gap report on a day the current calendar now marks present-book (e.g. trade-only) would else
-    # reach ready and schedule a full-day book fill, skipping the real book-quality verdict.
-    for d in sorted(mapped - bg):
-        if day_index[d].get("classification") == MISSING_NEEDS_COINAPI:
+    # reciprocals: a report's out-of-scope classifications must match the CURRENT calendar, else a
+    # stale report silently drops the real verdict/fill for an in-scope day and reaches ready.
+    #  * missing_needs_coinapi is valid only for a current book-gap day (else a full-day book fill is
+    #    scheduled for a day whose Lake book is now present);
+    #  * excluded is valid only when the current calendar actually excludes the day (build_day_record
+    #    treats classification==excluded as is_excluded and drops the fill).
+    calendar_excluded = set(cal.get("excluded_days_by_reason") or {})
+    for d in sorted(mapped):
+        cls = day_index[d].get("classification")
+        if cls == MISSING_NEEDS_COINAPI and d not in bg:
             blockers["coverage_gaps"].append(f"missing_needs_coinapi_not_current_gap:{d}")
+        elif cls == EXCLUDED and d not in calendar_excluded:
+            blockers["coverage_gaps"].append(f"excluded_not_current_exclusion:{d}")
 
     dropped = (plan.get("skipped") or {}).get("days_dropped_as_excluded_or_book_gap") or []
     if dropped:

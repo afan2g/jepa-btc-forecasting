@@ -868,6 +868,28 @@ def test_completeness_stale_gap_report_on_present_day_blocks(tmp_path):
                for x in blockers["coverage_gaps"])
 
 
+def test_completeness_stale_excluded_report_on_in_scope_day_blocks(tmp_path):
+    # a report classifying an in-scope (trade-only) day as excluded, while the current calendar does
+    # NOT exclude it, would drop the required verdict/fill and reach ready → must block
+    reports = [_report([
+        _day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable")),
+        _day("2025-01-02", "lake_present_degraded",
+             _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                         full_day_reason="quality_over_usable_bar",
+                         fill_segments=[_full_day_seg("2025-01-02")], seams=[],
+                         seam_policy={"seam_guard_s": 60.0}), fillable=True),
+        _day("2025-01-11", "excluded", _fill_block(None, "excluded_not_in_scope"),
+             calendar=_TRADE_ONLY_CTX),
+    ])]
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    cal = rv.load_json_object(cal_path, what="usable calendar")
+    reps, day_index = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_completeness(plan, reps, day_index, cal, blockers)
+    assert any("excluded_not_current_exclusion:2025-01-11" in x for x in blockers["coverage_gaps"])
+
+
 def test_completeness_batch_incomplete_on_refused_quota(tmp_path):
     reports = _clean_reports()
     reports[0]["meta"]["quota"] = {"ok": False, "reason": "quota_headroom"}
