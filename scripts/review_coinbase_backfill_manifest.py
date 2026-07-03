@@ -50,6 +50,14 @@ PARTIAL_FILL_PROFILES = ("leading_partial_fill", "trailing_partial_fill",
                          "internal_gap_fill", "mixed_partial_fill")
 FILL_PROFILES = (LAKE_ONLY, FULL_DAY_FILL, *PARTIAL_FILL_PROFILES)
 
+NS_PER_S = 1_000_000_000
+DAY_NS = 86_400 * NS_PER_S
+# Pinned copy of recon.stitch_policy.DEFAULT_SEAM_POLICY.as_dict() (contract-tested) — stamped on
+# synthesized calendar-gap full-day fills so they carry the same seam policy as report-derived fills.
+DEFAULT_SEAM_POLICY = {"seam_guard_s": 60.0, "warmup_consecutive": 3, "fill_min_s": 300.0,
+                       "min_lake_segment_s": 3600.0, "span_invalid_max": 0.01,
+                       "exclude_labels_crossing_seam": True, "exclude_features_crossing_seam": True}
+
 # ----------------------------------------------------------- cost model (docs §2.2/§6/§8)
 BOOK_USD_PER_GB = 1.0
 TRADES_USD_PER_GB = 3.0
@@ -321,6 +329,30 @@ def _empty_trade_fill() -> dict:
             "gb": 0.0, "gb_basis": "measured", "usd": 0.0}
 
 
+def _iso_ns(ts_ns: int) -> str:
+    """UTC ISO stamp for an int-ns timestamp — mirrors recon.stitch_policy._iso_utc's format."""
+    secs, rem = divmod(int(ts_ns), NS_PER_S)
+    base = dt.datetime.fromtimestamp(secs, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    return f"{base}.{rem:09d}Z" if rem else f"{base}Z"
+
+
+def _day_bounds_ns(day: str) -> tuple:
+    """(day_open_ts, day_end_ts) in int ns for a YYYY-MM-DD partition day (midnight UTC bounds)."""
+    d = dt.date.fromisoformat(day)
+    day_open = int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp()) * NS_PER_S
+    return day_open, day_open + DAY_NS
+
+
+def _synth_full_day_plan(day: str, reason: str) -> tuple:
+    """Full-day CoinAPI stitch plan for a calendar-derived fill (no report grid available): one
+    whole-day coinapi segment, no seams, the default seam policy — so a calendar-gap fill carries
+    the same executable plan shape as a report-derived full_day_fill, not null plan fields."""
+    day_open, day_end = _day_bounds_ns(day)
+    seg = {"source": "coinapi", "start_ts": day_open, "start_iso": _iso_ns(day_open),
+           "end_ts": day_end, "end_iso": _iso_ns(day_end), "reason": reason}
+    return [seg], [], dict(DEFAULT_SEAM_POLICY)
+
+
 def build_day_record(day: str, report_rec: dict | None, cal: dict) -> dict:
     """Merge a report day record (or None for a calendar-only day) with the calendar into the
     canonical per-day manifest record. Stitch decisions are copied VERBATIM."""
@@ -357,10 +389,13 @@ def build_day_record(day: str, report_rec: dict | None, cal: dict) -> dict:
             trusted_lake_end_ts=q.get("trusted_lake_end_ts"),
             gb=gb, gb_basis=basis, usd=book_usd(gb))
     elif cctx["book_gap"]:
-        # calendar book-gap day not carried as a report fill → synthesize a full-day book fill
+        # calendar book-gap day not carried as a report fill → synthesize a full-day book fill WITH
+        # an executable stitch plan (whole-day coinapi segment), never null plan fields.
         gb, basis = day_book_gb(cal, day)
+        segs, seams_, policy = _synth_full_day_plan(day, "calendar_book_gap")
         book.update(needed=True, source="calendar_gap", kind="full_day", why="calendar_book_gap",
                     fill_profile=FULL_DAY_FILL, full_day_reason="calendar_book_gap",
+                    fill_segments=segs, seams=seams_, seam_policy=policy,
                     gb=gb, gb_basis=basis, usd=book_usd(gb))
 
     trade = _empty_trade_fill()

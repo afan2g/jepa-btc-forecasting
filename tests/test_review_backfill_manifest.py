@@ -168,6 +168,11 @@ def test_fill_profile_enum_aligned_with_stitch_policy():
     assert rv.PARTIAL_FILL_PROFILES == sp.PARTIAL_FILL_PROFILES
 
 
+def test_default_seam_policy_aligned_with_stitch_policy():
+    import recon.stitch_policy as sp
+    assert rv.DEFAULT_SEAM_POLICY == sp.DEFAULT_SEAM_POLICY.as_dict()
+
+
 def test_why_codes_cover_every_runner_fill_decision():
     qm = _load_runner()
     seen = {
@@ -418,6 +423,13 @@ def test_build_day_record_calendar_book_gap_measured():
     bf = rec["book_fill"]
     assert bf["needed"] is True and bf["kind"] == "full_day" and bf["source"] == "calendar_gap"
     assert bf["why"] == "calendar_book_gap" and bf["gb"] == 1.0 and bf["gb_basis"] == "measured"
+    # a calendar-gap fill must carry an executable full-day stitch plan (not null plan fields)
+    assert bf["fill_segments"] and bf["fill_segments"][0]["source"] == "coinapi"
+    assert bf["fill_segments"][0]["start_iso"] == "2025-01-10T00:00:00Z"
+    assert bf["fill_segments"][0]["end_iso"] == "2025-01-11T00:00:00Z"
+    assert bf["fill_segments"][0]["start_ts"] < bf["fill_segments"][0]["end_ts"]
+    assert bf["seams"] == []
+    assert isinstance(bf["seam_policy"], dict) and bf["seam_policy"]["seam_guard_s"] == 60.0
     tf = rec["trade_fill"]
     assert tf["needed"] is True and tf["gb"] == 0.03 and tf["gb_basis"] == "measured"
 
