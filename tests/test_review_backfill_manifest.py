@@ -604,6 +604,40 @@ def test_completeness_gap_day_unmapped_blocks(tmp_path):
     assert any("2025-01-10" in x for x in blockers["coverage_gaps"])
 
 
+def test_load_batch_reports_rejects_non_list_days(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    rpath = os.path.join(plan["batches"][0]["report_dir"], "coinbase_quality_map.json")
+    rep = json.loads(_pl.Path(rpath).read_text())
+    rep["days"] = ["2025-01-01", "2025-01-02"]   # list of non-objects → AttributeError previously
+    _pl.Path(rpath).write_text(json.dumps(rep))
+    with pytest.raises(rv.ReviewInputError, match="days"):
+        rv.load_batch_reports(plan)
+
+
+def test_cli_non_list_days_is_input_error(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    rpath = os.path.join(plan["batches"][0]["report_dir"], "coinbase_quality_map.json")
+    rep = json.loads(_pl.Path(rpath).read_text())
+    rep["days"] = {}                              # present but wrong type
+    _pl.Path(rpath).write_text(json.dumps(rep))
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(tmp_path / "m.json"),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.INPUT_ERROR_EXIT
+
+
+def test_completeness_missing_out_dir_fails_closed(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    del plan["meta"]["out_dir"]                   # cannot verify against the authoritative days-file
+    cal = rv.load_json_object(cal_path, what="usable calendar")
+    reports, day_index = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_completeness(plan, reports, day_index, cal, blockers)
+    assert any("days-file" in x for x in blockers["batch_incomplete"])
+
+
 def test_completeness_duplicate_day_across_batches_blocks(tmp_path):
     reports = [_report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))]),
                _report([_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])]

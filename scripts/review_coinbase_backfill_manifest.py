@@ -479,13 +479,26 @@ def load_batch_reports(plan: dict) -> tuple:
         raise ReviewInputError("plan manifest 'batches' must be a list")
     reports, day_index = [], {}
     for b in batches:
+        if not isinstance(b, dict):
+            raise ReviewInputError(f"plan 'batches' entries must be objects, got {type(b).__name__}")
         rdir = b.get("report_dir")
         if not rdir:
             raise ReviewInputError(f"plan batch {b.get('file')!r} has no report_dir")
         rpath = os.path.join(rdir, REPORT_NAME)
         report = load_json_object(rpath, what="quality-map report")
         reports.append({"path": rpath, "report_dir": rdir, "batch": b, "report": report})
-        for rec in report.get("days") or []:
+        days = report.get("days")
+        if not isinstance(days, list):
+            # An ABSENT 'days' key is a missing_keys blocker (report_missing_keys, exit 3); a
+            # present-but-wrong-type 'days' is a structural malformation — fail closed here (exit 2)
+            # rather than crash on rec.get(...) below.
+            if "days" in report:
+                raise ReviewInputError(f"{rpath}: report 'days' must be a list of objects")
+            continue
+        for rec in days:
+            if not isinstance(rec, dict):
+                raise ReviewInputError(f"{rpath}: report 'days' must contain objects, got "
+                                       f"{type(rec).__name__}")
             d = rec.get("day")
             if d in day_index:
                 raise ReviewInputError(f"day {d} appears in more than one batch report "
@@ -530,9 +543,15 @@ def _check_batch_matches_plan(r: dict, out_dir, blockers: dict) -> None:
         if b.get("last_day") is not None and b["last_day"] != rep_days[-1]:
             blockers["batch_incomplete"].append(
                 f"{r['report_dir']}: plan last_day {b['last_day']} != report {rep_days[-1]}")
-    # authoritative check: the batch days-file the runner consumed must equal the report's day-set
+    # authoritative check: the batch days-file the runner consumed must equal the report's day-set.
+    # n_days/first/last alone can't catch a stale report with the same count+endpoints but different
+    # middle days, so a missing out_dir/file must FAIL CLOSED rather than bypass this guard.
     bf = b.get("file")
-    if out_dir and bf:
+    if not out_dir or not bf:
+        blockers["batch_incomplete"].append(
+            f"{r['report_dir']}: cannot verify against the authoritative batch days-file "
+            "(plan meta.out_dir or batch 'file' missing)")
+    else:
         path = os.path.join(out_dir, bf)
         if not os.path.exists(path):
             blockers["batch_incomplete"].append(f"{r['report_dir']}: batch file {bf} missing under {out_dir}")
