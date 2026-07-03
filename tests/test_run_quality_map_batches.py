@@ -500,8 +500,10 @@ def test_summary_status_counts_across_disk_and_ledger(tmp_path):
     mpath = _write_manifest(tmp_path, m)
     sdir = pathlib.Path(_status_dir(tmp_path))
     sdir.mkdir(parents=True, exist_ok=True)
+    # ledger entry recorded under the CURRENT plan (its generated_utc) so it is honored
     (sdir / "_runner_status.jsonl").write_text(
-        json.dumps({"file": "batch_003_days.txt", "exit_code": 5, "status": qmb.BLOCKED_QUOTA}) + "\n")
+        json.dumps({"file": "batch_003_days.txt", "exit_code": 5,
+                    "plan_generated_utc": "2026-07-03T00:00:00+00:00"}) + "\n")
     qmb.main(["--manifest", mpath, "--status-dir", str(sdir), "--base-dir", str(tmp_path)],
              runner=_boom_runner)
     s = _read_summary(tmp_path)
@@ -509,6 +511,23 @@ def test_summary_status_counts_across_disk_and_ledger(tmp_path):
                                      "stale": 0}
     assert s["status"]["by_status"]["complete"] == ["batch_001_days.txt"]
     assert s["status"]["by_status"]["blocked_quota"] == ["batch_003_days.txt"]
+
+
+def test_ledger_entry_from_a_different_plan_is_ignored(tmp_path):
+    # Codex P2: reused batch_NNN names + a persistent ledger must not let an OLD plan's exit 5/6
+    # mark a never-attempted batch of the CURRENT plan as blocked/failed — scope by plan generation.
+    m = _manifest_dict(tmp_path, n_batches=1)  # meta.generated_utc = 2026-07-03T00:00:00+00:00
+    mpath = _write_manifest(tmp_path, m)
+    sdir = pathlib.Path(_status_dir(tmp_path))
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / "_runner_status.jsonl").write_text(json.dumps(
+        {"file": "batch_001_days.txt", "exit_code": 5,
+         "plan_generated_utc": "2020-01-01T00:00:00+00:00"}) + "\n")  # an OLDER plan
+    qmb.main(["--manifest", mpath, "--status-dir", str(sdir), "--base-dir", str(tmp_path)],
+             runner=_boom_runner)
+    s = _read_summary(tmp_path)
+    assert s["status"]["by_status"]["pending"] == ["batch_001_days.txt"]  # NOT blocked_quota
+    assert s["status"]["counts"]["blocked_quota"] == 0
 
 
 def test_summary_aggregates_quality_over_complete_batches_only(tmp_path):

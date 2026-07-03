@@ -222,16 +222,21 @@ def report_matches_batch(report: dict, batch: dict, *, base_dir: str) -> bool:
     return True
 
 
-def batch_status(batch: dict, *, base_dir: str, ledger_index: dict) -> str:
+def batch_status(batch: dict, *, base_dir: str, ledger_index: dict, plan_id: str | None = None) -> str:
     """Authoritative per-batch status. A present report that MATCHES the plan row wins (disk is ground
     truth); a present report that does NOT match the row is `stale` (a re-run overwrites it); with no
     report, fall back to the last recorded attempt: quota-refused ⇒ blocked_quota, any other nonzero ⇒
-    failed, else pending."""
+    failed, else pending.
+
+    The append-only ledger persists across re-plans while batch_NNN names are reused, so a ledger
+    entry is only honored when it was recorded under the CURRENT plan (`plan_id` = the manifest's
+    generated_utc). An entry from an older plan — or, when plan_id is given, one lacking that stamp —
+    is ignored so a never-attempted batch of the new plan is not mislabeled blocked/failed."""
     report = read_report(report_path(batch, base_dir))
     if report is not None:
         return COMPLETE if report_matches_batch(report, batch, base_dir=base_dir) else STALE
     last = ledger_index.get(batch["file"])
-    if last is not None:
+    if last is not None and (plan_id is None or last.get("plan_generated_utc") == plan_id):
         code = last.get("exit_code")
         if code == QUOTA_REFUSED_EXIT:
             return BLOCKED_QUOTA
@@ -293,16 +298,17 @@ def _run_status_from_exit(code: int) -> str:
 
 
 def execute(batches: list[dict], *, base_dir: str, status_dir: str, max_batches: int,
-            runner, ledger_idx: dict) -> dict:
+            runner, ledger_idx: dict, plan_id: str | None = None) -> dict:
     """Run pending batches (skipping completed ones) up to `max_batches`, appending each attempt to
     the status ledger. Stops immediately when a batch is quota-blocked (the monthly window is spent);
     a non-quota failure is recorded and the loop continues within the budget. `ledger_idx` is updated
-    in place so a follow-up summary reflects this run."""
+    in place so a follow-up summary reflects this run. Each record is stamped with `plan_id` (the
+    manifest's generated_utc) so a later run against a re-plan ignores it."""
     ledger_path = os.path.join(status_dir, STATUS_LEDGER_NAME)
     ran = 0
     outcomes: list[dict] = []
     for batch in batches:
-        status = batch_status(batch, base_dir=base_dir, ledger_index=ledger_idx)
+        status = batch_status(batch, base_dir=base_dir, ledger_index=ledger_idx, plan_id=plan_id)
         if status == COMPLETE:
             print(f"  {batch['file']}  skip (report exists)")
             continue
@@ -316,7 +322,7 @@ def execute(batches: list[dict], *, base_dir: str, status_dir: str, max_batches:
         code = int(runner(argv, base_dir))
         record = {"file": batch["file"], "report_dir": batch["report_dir"], "exit_code": code,
                   "status": _run_status_from_exit(code), "n_days": batch.get("n_days"),
-                  "runner_est_gb": batch.get("runner_est_gb"),
+                  "runner_est_gb": batch.get("runner_est_gb"), "plan_generated_utc": plan_id,
                   "started_utc": started, "finished_utc": _utcnow_iso()}
         append_ledger(ledger_path, record)
         ledger_idx[batch["file"]] = record
@@ -344,13 +350,13 @@ def execute_exit_code(result: dict) -> int:
 
 
 def preview_execute(batches: list[dict], *, base_dir: str, max_batches: int,
-                    ledger_idx: dict) -> None:
+                    ledger_idx: dict, plan_id: str | None = None) -> None:
     """DRY RUN: print the exact command `--execute` would run for the next pending batch(es). No
     vendor I/O, nothing written."""
     print("DRY RUN — no vendor I/O, no files written. Commands --execute WOULD run:")
     shown = 0
     for batch in batches:
-        status = batch_status(batch, base_dir=base_dir, ledger_index=ledger_idx)
+        status = batch_status(batch, base_dir=base_dir, ledger_index=ledger_idx, plan_id=plan_id)
         if status == COMPLETE:
             print(f"  {batch['file']}  skip (report exists)")
             continue
@@ -403,10 +409,12 @@ def build_summary(manifest: dict, *, base_dir: str, ledger_idx: dict, manifest_p
     """The single status/aggregate artifact: per-batch status + counts, and the quality-map roll-up
     over completed batches."""
     batches = manifest["batches"]
+    meta = manifest.get("meta") or {}
+    plan_id = meta.get("generated_utc")
     by_status: dict[str, list] = {s: [] for s in STATUSES}
     rows = []
     for batch in batches:
-        status = batch_status(batch, base_dir=base_dir, ledger_index=ledger_idx)
+        status = batch_status(batch, base_dir=base_dir, ledger_index=ledger_idx, plan_id=plan_id)
         by_status[status].append(batch["file"])
         last = ledger_idx.get(batch["file"], {})
         rows.append({"file": batch["file"], "report_dir": batch["report_dir"], "status": status,
@@ -414,7 +422,6 @@ def build_summary(manifest: dict, *, base_dir: str, ledger_idx: dict, manifest_p
                      "last_day": batch.get("last_day"), "runner_est_gb": batch.get("runner_est_gb"),
                      "last_exit_code": last.get("exit_code"),
                      "last_attempt_utc": last.get("finished_utc")})
-    meta = manifest.get("meta") or {}
     return {
         "meta": {"manifest": manifest_path, "generated_utc": _utcnow_iso(),
                  "n_batches": len(batches),
@@ -508,10 +515,11 @@ def main(argv=None, *, runner=None) -> int:
     status_dir = args.status_dir or os.path.join(args.base_dir, STATUS_ROOT)
     ledger_path = os.path.join(status_dir, STATUS_LEDGER_NAME)
     ledger_idx = ledger_index(load_ledger(ledger_path))
+    plan_id = (manifest.get("meta") or {}).get("generated_utc")
 
     if args.dry_run:
-        preview_execute(manifest["batches"], base_dir=args.base_dir,
-                        max_batches=args.max_batches, ledger_idx=ledger_idx)
+        preview_execute(manifest["batches"], base_dir=args.base_dir, max_batches=args.max_batches,
+                        ledger_idx=ledger_idx, plan_id=plan_id)
         return 0
 
     exit_code = 0
@@ -524,7 +532,7 @@ def main(argv=None, *, runner=None) -> int:
                   file=sys.stderr)
         result = execute(manifest["batches"], base_dir=args.base_dir, status_dir=status_dir,
                          max_batches=args.max_batches, runner=runner or _default_runner,
-                         ledger_idx=ledger_idx)
+                         ledger_idx=ledger_idx, plan_id=plan_id)
         exit_code = execute_exit_code(result)
 
     summary = build_summary(manifest, base_dir=args.base_dir, ledger_idx=ledger_idx,
