@@ -170,11 +170,13 @@ def resolve_venues(venues_arg: str | None) -> list[str]:
     return [v for v in CANONICAL_VENUES if v in requested]
 
 
-def estimate_plan_gb(venues, days) -> float:
-    """Conservative upper-bound Lake `trades` GB for `venues` × `days` — reuses the pure
-    `trade_checks.estimate_trades_gb` (over the full grid; fill/excluded days that won't be loaded
-    make this err high, which is what the quota gate wants)."""
-    return tc.estimate_trades_gb(venues, days)
+def estimate_plan_gb(load_pairs) -> float:
+    """Conservative Lake `trades` GB for the `(venue, day)` pairs that will actually LOAD (required
+    route only). Fill/excluded pairs route without a load and cost 0 GB, so estimating over the
+    required pairs is the honest quota figure — a calendar-only selection estimates 0 GB and needs no
+    Lake session/quota headroom. Reuses the pure module's per-day footprints
+    (`trade_checks.TRADES_GB_PER_DAY`, the same constants `estimate_trades_gb` sums)."""
+    return float(sum(tc.TRADES_GB_PER_DAY[v] for v, _ in load_pairs))
 
 
 # --------------------------------------------------------------------------- live seams (VENDOR only)
@@ -252,46 +254,52 @@ def _load_error_record(venue: str, day: str, cs: dict, err: BaseException) -> di
 
 
 # --------------------------------------------------------------------------- validation core
-def _validate_pairs(venues, days, cal, *, sess, load_fn, load_calls: list) -> list[dict]:
-    """Cross each `(venue, day)` with the calendar and validate it. Required days are LOADED
-    (via the injected `load_fn`) and metric-classified; fill/excluded days route via the calendar
-    WITHOUT a load (only required days spend quota). Every record is the pure module's
-    `validate_trade_frame` output (or the schema-identical `_load_error_record` on an unexpected
-    load exception). Per-day order is `days × venues` (canonical venue order) for determinism."""
+def _route_pairs(venues, days, cal) -> list[tuple[str, str, dict]]:
+    """Cross the full `days × venues` grid with the calendar → `(venue, day, calendar_state)` in a
+    deterministic `days × venues` (canonical venue) order. Computed ONCE so the quota estimate, the
+    plan print, and validation all agree on which pairs are required vs. routed."""
+    return [(venue, day, tc.calendar_state(cal, day, venue)) for day in days for venue in venues]
+
+
+def _validate_pairs(routed, *, sess, load_fn, load_calls: list) -> list[dict]:
+    """Validate each pre-routed `(venue, day, cs)`. Required pairs are LOADED (via the injected
+    `load_fn`) and metric-classified; fill/excluded pairs route via the calendar WITHOUT a load
+    (only required pairs spend quota). Every record is the pure module's `validate_trade_frame`
+    output (or the schema-identical `_load_error_record` on an unexpected load exception)."""
     records: list[dict] = []
-    for day in days:
-        for venue in venues:
-            cs = tc.calendar_state(cal, day, venue)
-            if cs.get("route") != tc.ROUTE_REQUIRED:
-                # Fill / excluded day: the pure module routes df=None to coinapi_fill / excluded —
-                # no Lake load (the missing/deferred side is expected, §8).
-                records.append(tc.validate_trade_frame(None, venue, day, calendar_state=cs))
+    for venue, day, cs in routed:
+        if cs.get("route") != tc.ROUTE_REQUIRED:
+            # Fill / excluded pair: the pure module routes df=None to coinapi_fill / excluded —
+            # no Lake load (the missing/deferred side is expected, §8).
+            records.append(tc.validate_trade_frame(None, venue, day, calendar_state=cs))
+            continue
+        try:
+            df = load_fn(sess, venue, day)
+        except Exception as e:                       # noqa: BLE001 — surface, never crash the run
+            if _is_no_files(e):
+                df = None                            # absent partition → missing_partition (§1)
+            else:
+                records.append(_load_error_record(venue, day, cs, e))
                 continue
-            try:
-                df = load_fn(sess, venue, day)
-            except Exception as e:                   # noqa: BLE001 — surface, never crash the run
-                if _is_no_files(e):
-                    df = None                        # absent partition → missing_partition (§1)
-                else:
-                    records.append(_load_error_record(venue, day, cs, e))
-                    continue
-            load_calls.append((venue, day))
-            records.append(tc.validate_trade_frame(df, venue, day, calendar_state=cs))
+        load_calls.append((venue, day))
+        records.append(tc.validate_trade_frame(df, venue, day, calendar_state=cs))
     return records
 
 
-def _print_plan(*, days, venues, mode, decision, cal_path, cal, dry_run) -> None:
+def _print_plan(*, days, venues, mode, decision, routed, cal_path, cal, dry_run) -> None:
     """Print the resolved plan (days × venues, est GB, quota decision, per-(venue,day) routes) —
     the shared preamble for both --dry-run and a live run."""
-    est = decision["est_gb"]
+    n_fill = sum(1 for _, _, cs in routed if cs.get("route") == tc.ROUTE_COINAPI_FILL)
+    n_excl = sum(1 for _, _, cs in routed if cs.get("route") == tc.ROUTE_EXCLUDED)
+    n_load = sum(1 for _, _, cs in routed if cs.get("route") == tc.ROUTE_REQUIRED)
     print("=" * 74)
     print(f"  TRADE FEED VALIDATION — {len(days)} day(s) × {len(venues)} venue(s)  "
           f"[{mode}]{'  (dry-run)' if dry_run else ''}")
     print("=" * 74)
     print(f"  venues: {', '.join(venues)}")
     print(f"  days:   {', '.join(days)}")
-    print(f"  est Crypto Lake trades download: ~{est:.2f} GB "
-          f"(conservative upper bound; fill/excluded days not loaded)")
+    print(f"  est Crypto Lake trades download: ~{decision['est_gb']:.2f} GB "
+          f"({n_load} required pair(s) load; fill/excluded routed without a load)")
     print(f"  quota decision: ok={decision['ok']} reason={decision['reason']} "
           f"(used {decision['used_gb']:.1f} GB, max_auto {decision['max_auto_gb']:.0f} GB, "
           f"allow_broad={decision['allow_broad']})")
@@ -299,12 +307,6 @@ def _print_plan(*, days, venues, mode, decision, cal_path, cal, dry_run) -> None
         print(f"  NOTE: usable calendar {cal_path} not found — fill/excluded routing OFF; every "
               "day treated as a required Lake day.", file=sys.stderr)
     else:
-        n_fill = n_excl = 0
-        for day in days:
-            for venue in venues:
-                route = tc.calendar_state(cal, day, venue).get("route")
-                n_fill += route == tc.ROUTE_COINAPI_FILL
-                n_excl += route == tc.ROUTE_EXCLUDED
         print(f"  calendar routes: {n_fill} coinapi_fill, {n_excl} excluded "
               "(routed without a Lake load)")
 
@@ -328,16 +330,23 @@ def run(args, *, load_fn=load_lake_trades, session_factory=lake_session,
         # "buildable"). Refuse loudly instead — main() maps the ValueError to exit 2.
         raise ValueError(f"empty selection: no (venue, day) pairs to validate "
                          f"(days={days}, venues={venues})")
-    est_gb = estimate_plan_gb(venues, days)
+
+    # Cross with the calendar ONCE. Only required-route pairs load (spend Lake quota); fill/excluded
+    # pairs route without a load, so the estimate is over the required pairs only.
+    routed = _route_pairs(venues, days, cal)
+    load_pairs = [(v, d) for (v, d, cs) in routed if cs.get("route") == tc.ROUTE_REQUIRED]
+    est_gb = estimate_plan_gb(load_pairs)
 
     # --- quota gate (§7) ------------------------------------------------------------------------
-    # --dry-run reads NO vendor usage, so it gates optimistically at used_gb=0 (the auto-cap arm is
-    # pure — a broad plan is still refused; the headroom arm can only trip live). A live run reads
-    # the real monthly usage; a failure to read it fail-safes to the cap so the gate refuses.
-    used_gb: float | None = 0.0
+    # A live run reads the real monthly usage — but ONLY when there is at least one required pair to
+    # load. A calendar-only selection (every pair fill/excluded → 0 GB) or --dry-run creates NO Lake
+    # session, needs no credentials, and gates at used_gb=0 (the pure auto-cap arm still refuses a
+    # broad plan). A failure to read live usage fail-safes to the cap so the gate refuses.
+    used_gb: float | None = None
     sess = None
     used_after = None
-    if not args.dry_run:
+    live_load = (not args.dry_run) and bool(load_pairs)
+    if live_load:
         sess = session_factory()
         try:
             used_gb = float(used_data_fn(sess).get("downloaded_gb", 0.0))
@@ -347,10 +356,10 @@ def run(args, *, load_fn=load_lake_trades, session_factory=lake_session,
                   "headroom). Re-run once used_data is readable.", file=sys.stderr)
             used_gb = float(args.quota_gb)
 
-    decision = tc.quota_decision(est_gb=est_gb, used_gb=used_gb, quota_gb=args.quota_gb,
+    decision = tc.quota_decision(est_gb=est_gb, used_gb=(used_gb or 0.0), quota_gb=args.quota_gb,
                                  max_auto_gb=args.max_auto_gb, allow_broad=args.allow_broad,
                                  headroom_gb=args.headroom_gb)
-    _print_plan(days=days, venues=venues, mode=mode, decision=decision,
+    _print_plan(days=days, venues=venues, mode=mode, decision=decision, routed=routed,
                 cal_path=args.calendar, cal=cal, dry_run=args.dry_run)
 
     if not decision["ok"]:
@@ -367,13 +376,14 @@ def run(args, *, load_fn=load_lake_trades, session_factory=lake_session,
         print("\n  --dry-run: plan only, no Crypto Lake session created, no report written.")
         return 0
 
-    # --- load + validate (required days only) ---------------------------------------------------
+    # --- load + validate (required pairs only; fill/excluded routed without a load) --------------
     load_calls: list = []
-    records = _validate_pairs(venues, days, cal, sess=sess, load_fn=load_fn, load_calls=load_calls)
-    try:
-        used_after = float(used_data_fn(sess).get("downloaded_gb", 0.0))
-    except Exception:                                # noqa: BLE001 — post-run usage is informational
-        used_after = None
+    records = _validate_pairs(routed, sess=sess, load_fn=load_fn, load_calls=load_calls)
+    if sess is not None:                             # calendar-only run created no session to re-read
+        try:
+            used_after = float(used_data_fn(sess).get("downloaded_gb", 0.0))
+        except Exception:                            # noqa: BLE001 — post-run usage is informational
+            used_after = None
 
     if generated_utc is None:
         generated_utc = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -393,8 +403,11 @@ def run(args, *, load_fn=load_lake_trades, session_factory=lake_session,
         "quota": {**decision, "used_gb_before": used_gb, "used_gb_after": used_after},
         "vendor_api": {"source": "crypto_lake", "region": "eu-west-1", "table": "trades",
                        "lakeapi_calls": len(load_calls), "dry_run": False, "coinapi_used": False},
+        # The calendar ARTIFACT's own anchor (its snapshot date) — NOT the run's --end range anchor
+        # (that is meta.anchor_end). Records which calendar snapshot produced the fill/excluded
+        # routing, for source-artifact reproducibility; None when no calendar was loaded.
         "source_artifacts": {"usable_calendar": args.calendar,
-                             "usable_calendar_anchor_end": args.end},
+                             "usable_calendar_anchor_end": (cal or {}).get("anchor_end")},
         "generated_utc": generated_utc,
         "note": "VALIDATION only (docs/data.md §5b / §10 trade-validation breadth). Reads Crypto "
                 "Lake trades; the CoinAPI backfill gate stays LOCKED and this tool does not unlock "

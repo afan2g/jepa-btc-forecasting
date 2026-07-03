@@ -255,15 +255,20 @@ def test_broad_plan_over_auto_cap_exits_5_with_no_vendor_calls(tmp_path):
     # The auto-cap decision is pure (no used_data read), so even --dry-run refuses with zero vendor
     # calls (the injected seams raise if touched).
     days = ",".join(f"2025-06-{d:02d}" for d in range(1, 16))
-    args = vf.parse_args(["--days", days, "--out-dir", str(tmp_path / "r"), "--dry-run"])
+    # nonexistent calendar → every pair is a required load (no fill/excluded routing), so the
+    # estimate is the full 15 × 3 grid regardless of the repo calendar's fill days.
+    args = vf.parse_args(["--days", days, "--out-dir", str(tmp_path / "r"), "--dry-run",
+                          "--calendar", str(tmp_path / "none.json")])
     rc = vf.run(args, load_fn=_raiser, session_factory=_raiser, used_data_fn=_raiser)
     assert rc == tc.QUOTA_REFUSED_EXIT == 5
 
 
 def test_quota_headroom_breach_exits_5_before_any_load(tmp_path):
-    # A small in-cap pull, but current usage is ~at the monthly cap → the headroom gate refuses
-    # regardless of --allow-broad, before any partition load (load seam raises if touched).
-    args = vf.parse_args(["--days", "2025-06-01", "--allow-broad", "--out-dir", str(tmp_path / "r")])
+    # A small in-cap pull (required load), but current usage is ~at the monthly cap → the headroom
+    # gate refuses regardless of --allow-broad, before any partition load (load seam raises if
+    # touched). Nonexistent calendar → the day is a required load, so the session/usage read happens.
+    args = vf.parse_args(["--days", "2025-06-01", "--allow-broad", "--out-dir", str(tmp_path / "r"),
+                          "--calendar", str(tmp_path / "none.json")])
     rc = vf.run(args, load_fn=_raiser, session_factory=_fake_session,
                 used_data_fn=_used(299.0), generated_utc=FIXED_UTC)
     assert rc == 5
@@ -272,7 +277,9 @@ def test_quota_headroom_breach_exits_5_before_any_load(tmp_path):
 # --------------------------------------------------------------------------- 6. fake loader → report
 def test_fake_loader_produces_a_deterministic_pass_report(tmp_path):
     out = tmp_path / "reports"
-    calp = _write_cal(tmp_path, {"usable_days": ["2025-06-01"]})
+    # calendar anchor (2026-06-20) is deliberately DIFFERENT from the run's --end default
+    # (2026-06-22) to pin that source_artifacts records the calendar snapshot, not the CLI end.
+    calp = _write_cal(tmp_path, {"usable_days": ["2025-06-01"], "anchor_end": "2026-06-20"})
 
     def fake_load(_s, _v, day):
         return _clean_full_day(start=f"{day}T00:00:00")
@@ -292,9 +299,11 @@ def test_fake_loader_produces_a_deterministic_pass_report(tmp_path):
     assert all(r["vendor_source"] == "lake" for r in rep["days"])
     assert rep["summary"]["gate"]["lake_required_pass"] is True
     assert rep["meta"]["selection_mode"] == "explicit_days"
-    # §6 meta schema: dry_run lives inside vendor_api; source_artifacts carries the calendar anchor.
+    # §6 meta schema: dry_run lives inside vendor_api; source_artifacts records the CALENDAR file's
+    # anchor (2026-06-20), distinct from the run's --end anchor (meta.anchor_end == 2026-06-22).
     assert rep["meta"]["vendor_api"]["dry_run"] is False
-    assert rep["meta"]["source_artifacts"]["usable_calendar_anchor_end"] == "2026-06-22"
+    assert rep["meta"]["anchor_end"] == "2026-06-22"
+    assert rep["meta"]["source_artifacts"]["usable_calendar_anchor_end"] == "2026-06-20"
 
     # byte-for-byte deterministic across a second identical run
     out2 = tmp_path / "reports2"
@@ -394,10 +403,31 @@ def test_unexpected_load_error_is_surfaced_as_a_fail(tmp_path):
 
 
 # --------------------------------------------------------------------------- 10. GB estimate reuse
-def test_gb_estimate_reuses_trade_checks():
-    # The wrapper estimates over the selected venues × days via the pure trade_checks helper.
-    venues = list(tc.VENUES)
-    assert vf.estimate_plan_gb(venues, ["2025-06-01"]) == \
-        tc.estimate_trades_gb(venues, ["2025-06-01"])
-    assert vf.estimate_plan_gb(venues, ["2025-06-01", "2024-08-05"]) == \
-        2 * vf.estimate_plan_gb(venues, ["2025-06-01"])
+def test_gb_estimate_is_over_loaded_pairs_using_trade_checks_footprints():
+    # The estimate is over the (venue, day) pairs that actually LOAD, using the pure per-day
+    # footprints; fill/excluded pairs (not passed here) cost 0 GB.
+    pairs = [("binance_perp", "2025-06-01"), ("coinbase", "2025-06-01")]
+    assert vf.estimate_plan_gb(pairs) == \
+        tc.TRADES_GB_PER_DAY["binance_perp"] + tc.TRADES_GB_PER_DAY["coinbase"]
+    assert vf.estimate_plan_gb([]) == 0.0            # a calendar-only selection loads nothing
+
+
+def test_calendar_only_selection_needs_no_lake_session(tmp_path):
+    # A selection whose pairs are ALL calendar-routed (coinapi_fill/excluded) loads zero Lake
+    # partitions, so no session/credentials/usage read may happen — the injected seams all raise if
+    # touched. The report is calendar-only (the fill record present, lakeapi_calls=0).
+    out = tmp_path / "reports"
+    calp = _write_cal(tmp_path, {
+        "usable_days": ["2025-06-01"],
+        "coinbase_fill_days": {"2024-08-06": {"book": True, "trades": True}},
+    })
+    args = vf.parse_args(["--days", "2024-08-06", "--venues", "coinbase",
+                          "--calendar", calp, "--out-dir", str(out)])
+    rc = vf.run(args, load_fn=_raiser, session_factory=_raiser, used_data_fn=_raiser,
+                generated_utc=FIXED_UTC)
+    assert rc == 0
+    rep = json.loads((out / "trade_feed_validation.json").read_text())
+    assert rep["days"][0]["status"] == tc.COINAPI_FILL
+    assert rep["meta"]["vendor_api"]["lakeapi_calls"] == 0
+    assert rep["summary"]["gate"]["coinapi_fill_deferred"] == \
+        [{"day": "2024-08-06", "venue": "coinbase"}]
