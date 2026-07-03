@@ -809,11 +809,41 @@ def test_completeness_clean(tmp_path):
 
 
 def test_completeness_missing_report_blocks(tmp_path):
+    # A planned batch with no report yet (staged workflow) is a BLOCKING coverage gap, not a
+    # structural exit-2 error: load_batch_reports skips it (no raise), missing_batch_reports records
+    # it, and check_completeness emits planned_but_no_report. Its own days-file days are NOT also
+    # double-reported as day_not_mapped.
+    plan_path, cal_path = _write_tree(tmp_path)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    cal = rv.load_json_object(cal_path, what="usable calendar")
+    os.remove(os.path.join(plan["batches"][0]["report_dir"], "coinbase_quality_map.json"))
+    reports, day_index = rv.load_batch_reports(plan)   # no raise
+    missing = rv.missing_batch_reports(plan)
+    assert missing and not reports
+    blockers = rv.new_blockers()
+    rv.check_completeness(plan, reports, day_index, cal, blockers, missing)
+    gaps = blockers["coverage_gaps"]
+    assert any("planned_but_no_report" in x for x in gaps)
+    assert not any(x.startswith("day_not_mapped:2025-01-01") for x in gaps)
+
+
+def test_missing_report_is_blocking_not_input_error(tmp_path):
+    # end-to-end: a not-yet-run batch still writes a manifest with status=blocking (exit 3, NOT the
+    # exit-2 structural path), and --report-only downgrades the exit for inspection.
     plan_path, cal_path = _write_tree(tmp_path)
     plan = rv.load_json_object(plan_path, what="plan manifest")
     os.remove(os.path.join(plan["batches"][0]["report_dir"], "coinbase_quality_map.json"))
-    with pytest.raises(rv.ReviewInputError, match="report"):
-        rv.load_batch_reports(plan)
+    out = tmp_path / "manifest.json"
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(out),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.BLOCKING_EXIT
+    m = json.loads(out.read_text())
+    assert m["meta"]["status"] == "blocking"
+    assert any("planned_but_no_report" in x for x in m["blockers"]["coverage_gaps"])
+    rc2 = rv.main(["--plan-manifest", plan_path, "--out", str(out), "--report-only",
+                   "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc2 == 0
+    assert json.loads(out.read_text())["meta"]["status"] == "blocking"
 
 
 def test_completeness_day_not_mapped_blocks(tmp_path):

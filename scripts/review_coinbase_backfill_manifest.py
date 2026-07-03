@@ -648,6 +648,14 @@ def load_batch_reports(plan: dict) -> tuple:
         if not rdir:
             raise ReviewInputError(f"plan batch {b.get('file')!r} has no report_dir")
         rpath = os.path.join(rdir, REPORT_NAME)
+        # A planned batch that has not produced its report yet (staged workflow: batches run one at a
+        # time) is a BLOCKING coverage gap (planned_but_no_report, exit 3), surfaced by
+        # missing_batch_reports() below and recorded in check_completeness() — NOT a structural exit-2
+        # error — so a manifest is still written showing which batches are outstanding and
+        # --report-only can downgrade it for inspection. A present-but-unreadable/invalid report is
+        # still a structural failure (load_json_object raises, exit 2).
+        if not os.path.exists(rpath):
+            continue
         report = load_json_object(rpath, what="quality-map report")
         reports.append({"path": rpath, "report_dir": rdir, "batch": b, "report": report})
         days = report.get("days")
@@ -672,6 +680,31 @@ def load_batch_reports(plan: dict) -> tuple:
                                        "(duplicate_across_batches); batch day-sets must be disjoint")
             day_index[d] = rec
     return reports, day_index
+
+
+def missing_batch_reports(plan: dict) -> list:
+    """Planned batches whose report file does not exist yet (spec §4 completeness). A not-yet-run
+    batch is a blocking coverage gap, not a structural error: load_batch_reports() skips it so a
+    manifest is still produced, and check_completeness() records planned_but_no_report for each."""
+    out = []
+    for b in plan.get("batches") or []:
+        if isinstance(b, dict):
+            rdir = b.get("report_dir")
+            if rdir and not os.path.exists(os.path.join(rdir, REPORT_NAME)):
+                out.append(b)
+    return out
+
+
+def _batch_file_days(out_dir, b: dict) -> set:
+    """Days listed in a batch's authoritative days-file (empty if it can't be located/read)."""
+    bf = (b or {}).get("file")
+    if not out_dir or not bf:
+        return set()
+    path = os.path.join(out_dir, bf)
+    if not os.path.exists(path):
+        return set()
+    with open(path) as f:
+        return {x.strip() for x in f.read().splitlines() if x.strip()}
 
 
 def _batch_ran(report: dict) -> list:
@@ -731,18 +764,27 @@ def _check_batch_matches_plan(r: dict, out_dir, blockers: dict) -> None:
 
 
 def check_completeness(plan: dict, reports: list, day_index: dict, cal: dict,
-                       blockers: dict) -> None:
-    """Plan-driven completeness (spec §4). Populates blockers in place."""
+                       blockers: dict, missing: list = ()) -> None:
+    """Plan-driven completeness (spec §4). Populates blockers in place. `missing` is the list of
+    planned batches that have not produced a report yet (from missing_batch_reports): each is a
+    blocking planned_but_no_report coverage gap, and its calendar days are excluded from the
+    day_not_mapped check (their non-mapping is explained by the outstanding report, not a stray gap
+    — otherwise a not-yet-run batch would double-report every one of its days)."""
     out_dir = (plan.get("meta") or {}).get("out_dir")
     for r in reports:
         for msg in _batch_ran(r["report"]):
             blockers["batch_incomplete"].append(f"{r['report_dir']}: {msg}")
         _check_batch_matches_plan(r, out_dir, blockers)
 
+    missing_days = set()
+    for b in missing or ():
+        blockers["coverage_gaps"].append(f"planned_but_no_report:{b.get('report_dir')}")
+        missing_days |= _batch_file_days(out_dir, b)
+
     expected = set(calendar_batch_days(cal))
     mapped = set(day_index)
     bg = book_gap_days(cal)
-    for d in sorted(expected - mapped):
+    for d in sorted(expected - mapped - missing_days):
         blockers["coverage_gaps"].append(f"day_not_mapped:{d}")
     # a mapped book-gap day (via --include-gap-days) is legitimate, not "unexpected"
     for d in sorted(mapped - expected - bg):
@@ -1016,9 +1058,10 @@ def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only)
     cal = load_json_object(resolved_cal, what="usable calendar")
     validate_calendar(cal, resolved_cal)
     reports, day_index = load_batch_reports(plan)
+    missing = missing_batch_reports(plan)
 
     blockers = new_blockers()
-    check_completeness(plan, reports, day_index, cal, blockers)
+    check_completeness(plan, reports, day_index, cal, blockers, missing)
     check_report_consistency(reports, blockers)
     check_calendar_drift(reports, cal, blockers)
     check_fill_availability(cal, blockers)
