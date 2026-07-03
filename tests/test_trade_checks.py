@@ -455,6 +455,18 @@ def test_nonpositive_notional_blocks_and_clean_notional_metric():
     assert res["status"] == tc.FAIL and tc.NOTIONAL_NONPOSITIVE in res["reason_codes"]
 
 
+def test_missing_side_column_is_surfaced():
+    # §2: `side` ∈ {buy,sell} is a required column; a normalized frame missing it is a loader/
+    # normalizer schema failure that must be surfaced (aggressor/CVD features depend on it), not
+    # silently pass as clean. Warn (not fail): `side` does not feed the notional bar clock (§8).
+    df = _clean_full_day().drop(columns=["side"])
+    res = tc.validate_trade_frame(df, "coinbase", "2025-06-01")
+    assert res["status"] == tc.WARN and tc.SIDE_COLUMN_MISSING in res["reason_codes"]
+    assert res["metrics"]["side_available"] is False
+    ok = tc.validate_trade_frame(_clean_full_day(), "coinbase", "2025-06-01")
+    assert ok["metrics"]["side_available"] is True and tc.SIDE_COLUMN_MISSING not in ok["reason_codes"]
+
+
 def test_unexpected_side_value_warns():
     df = _clean_full_day()
     df.loc[0, "side"] = "unknown"

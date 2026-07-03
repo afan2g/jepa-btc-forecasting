@@ -80,6 +80,7 @@ SPARSE_HOUR = "sparse_hour"
 MISSING_HOURS_EXCESS = "missing_hours_excess"
 LAG_NEGATIVE = "lag_negative"
 SIDE_VALUE_UNEXPECTED = "side_value_unexpected"
+SIDE_COLUMN_MISSING = "side_column_missing"
 ROW_COUNT_LOW = "row_count_low"
 COINAPI_FILL_DAY = "coinapi_fill_day"
 CALENDAR_EXCLUDED_DAY = "calendar_excluded_day"
@@ -391,11 +392,13 @@ def off_day_frac(df: pd.DataFrame, day: str | None) -> float | None:
 
 
 def side_values(df: pd.DataFrame) -> dict:
-    """`side` value counts (§4 row 15). A value ∉ {buy, sell} is surfaced (warn)."""
+    """`side` value counts (§4 row 15). A value ∉ {buy, sell} is surfaced (warn); an ENTIRELY absent
+    `side` column is a normalized-schema failure (§2) that is also surfaced (`side_available=False`),
+    never silently treated as clean — aggressor/CVD features depend on it."""
     if "side" not in df.columns:
-        return {"side_values": {}}
+        return {"side_available": False, "side_values": {}}
     vc = df["side"].value_counts(dropna=False)
-    return {"side_values": {str(k): int(v) for k, v in vc.items()}}
+    return {"side_available": True, "side_values": {str(k): int(v) for k, v in vc.items()}}
 
 
 # --------------------------------------------------------------------------- metric assembly
@@ -515,8 +518,10 @@ def classify(metrics: dict, thresholds: TradeThresholds = THRESHOLDS,
     if metrics["recv_origin_lag_neg_frac"] > thresholds.lag_neg_frac_max:
         fails.append(LAG_NEGATIVE)
 
-    # --- side values (§4 row 15) --------------------------------------------------------------
-    if any(v not in VALID_SIDES for v in metrics["side_values"]):
+    # --- side values (§4 row 15, §2 schema) ---------------------------------------------------
+    if not metrics.get("side_available", True):
+        warns.append(SIDE_COLUMN_MISSING)
+    elif any(v not in VALID_SIDES for v in metrics["side_values"]):
         warns.append(SIDE_VALUE_UNEXPECTED)
 
     # --- hour coverage (§4 row 13, §8) --------------------------------------------------------
@@ -559,7 +564,7 @@ def _empty_metrics() -> dict:
         "missing_hour_count": None, "sparse_hour_count": None,
         "missing_hours": None, "sparse_hours": None,
         "recv_origin_lag_median_ms": None, "recv_origin_lag_p95_ms": None,
-        "recv_origin_lag_neg_frac": None, "side_values": None,
+        "recv_origin_lag_neg_frac": None, "side_available": None, "side_values": None,
     }
 
 
