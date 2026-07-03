@@ -107,8 +107,9 @@ engine-time axis (§C.1; `recon.merge_sorted` is the bounded-fixture oracle **on
 the full-day path) → `bars.clock` (trailing-threshold schedule) emits bar boundaries →
 `bars.align` sets the received-time **decision `t_event`** and per-venue reads (§C.2) →
 `bars.snapshot` snapshots **both** books via `recon.reconstruct.sample_topk_as_of`
-(apply-before-read, strict `<`; Binance as-of `t_event − binance_recv_lag_ns`, Coinbase
-as-of `t_event − coinbase_recv_lag_ns`) → `bars.features` builds the per-bar stationarized
+(apply-before-read, strict `<`; each venue+feed read at `t_event − lag` — book at
+`t_event − book_lag_v`, trades at `t_event − trade_lag_v`, Coinbase target book at
+`t_event − coinbase_book_lag_ns`, §C.2) → `bars.features` builds the per-bar stationarized
 vector → `data.labels` + `data.uniqueness` attach `y_fwd_bps`/`label`/`t_barrier`/
 `uniqueness` (**per horizon**, off Coinbase mid) → `bars.cost` attaches `cost_bps`/
 `half_spread_bps` → **guard-aware `stitch_policy` masks + `window_vendor_sources` drop
@@ -127,13 +128,13 @@ BTC ranges 2×+; dollar bars are homoscedastic).
 
 - **Reference stream — pre-E2.5 default = Coinbase/target-venue-triggered notional**
   (`price × amount` over Coinbase `recon.events.Trade`). **Why not the spec's
-  Binance-perp clock yet:** a Binance-triggered close is only observable at the Coinbase
-  box after `binance_recv_lag_ns`, and until E2.5 pins that lag the decision-time relation
-  (§C.2) is unquantified — a wrong value injects sample-timing leakage. Coinbase-triggered's
-  close-observability depends only on the **measured** `coinbase_recv_lag_ns` (data.md §5b),
-  so `t_event = t_close + coinbase_recv_lag_ns` is fully quantified today (§C.2). **Post-E2.5
+  Binance-perp clock yet:** a Binance-triggered close (a Binance **trade**) is only observable
+  after `binance_trade_lag_ns`, and until E2.5 pins that lag the decision-time relation (§C.2)
+  is unquantified — a wrong value injects sample-timing leakage. Coinbase-triggered's
+  close-observability depends only on the **measured** `coinbase_trade_lag_ns` (data.md §5b),
+  so `t_event = t_close + coinbase_trade_lag_ns` is fully quantified today (§C.2). **Post-E2.5
   target (spec §5.1, the information-optimal clock):** Binance-perp notional (deepest venue's
-  aggression), **enabled once `binance_recv_lag_ns` is pinned** — then §C.2 uses it directly.
+  aggression), **enabled once the Binance trade/book lags are pinned** — then §C.2 uses them.
   *Ablation knob:* combined Binance+Coinbase notional (§5.1 open; E2.2 resolves on
   downstream PnL). The trigger venue is a manifest parameter, so the E2.5 switch is a
   config change, not a rebuild-forcing rewrite.
@@ -189,9 +190,11 @@ manifest-recorded label parameter, so the flip is a one-line change once parity 
 Both mid and microprice are emitted per bar regardless (cheap), so the ablation needs no
 rebuild.
 
-At each bar close the producer snapshots the Coinbase book **as of `t_event`** (§B/§E)
-and records both the target mid and microprice as the label anchor series; the forward
-label (§D) is computed from this anchor's future value.
+The producer snapshots the Coinbase target book at **`coinbase_read_ts = t_event −
+coinbase_book_lag_ns`** (§C.2), **never at `t_event`** — the target mid, microprice, **and**
+`half_spread_bps` (§G) all read at the lagged timestamp so labels and cost never use future
+Coinbase book state (Codex P1). It records both mid and microprice as the label anchor
+series; the forward label (§D) is computed from this anchor's future value.
 
 ---
 
@@ -212,35 +215,43 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    k-way merge (spec §3). Snapshot = book inclusive of all events with `ts_engine ≤` the read
    time, **strict `<` apply-before-read at the trade boundary**
    (`recon/reconstruct.py:sample_topk_as_of`, `order_key` deltas-before-trades).
+   **CoinAPI fill segments are the exception (Codex P2):** Coinbase gap days filled from
+   CoinAPI `limitbook_full` must replay in strict **`seq` (file) order via `recon.coinapi`**,
+   *not* a `ts_engine` merge — the opening SNAPSHOT block carries a **prior-day** `time_exchange`
+   (data.md:134-140; `recon/coinapi.py:13-29`) that a timestamp merge would sort to day-end,
+   corrupting the target book. T9 dispatches per fill segment by `vendor_source` (Lake →
+   `ts_engine` streaming merge; CoinAPI → `seq`-order replay) before sampling.
 
-2. **Decision time and per-venue feed lag — the sample-timing rule (§13 pitfall, load-bearing).**
-   Reconstruction runs on **exchange (origin) time**, but a trading box only *observes* a
-   venue-`v` event `recv_lag_v` after its origin timestamp and can act only once it has
-   observed the triggering event. So the **decision time `t_event` is on the box's
-   received-time axis**, and **each venue is read at `t_event − recv_lag_v`** — *no* venue is
-   zero-lag (data.md §5/§5b measures both):
-   - **`binance_read_ts = t_event − binance_recv_lag_ns`** — ~4.4 ms (Binance perp; Tokyo
-     colocation). Binance features + lagged Binance→Coinbase cross-features use only events
-     with `ts_engine ≤ binance_read_ts`.
-   - **`coinbase_read_ts = t_event − coinbase_recv_lag_ns`** — ~90 ms book / ~164 ms trades
-     (Coinbase, cross-region capture). **Correcting an earlier error (Codex P1):** the target
-     venue is **not** zero-lag; reading Coinbase as-of `t_event` would use ~90 ms of
-     not-yet-arrived book/trade data — ~5–8 % free look-ahead on the 2 s rung.
-   - **Label anchor:** the Coinbase mid actionable at the decision (origin ≤
-     `coinbase_read_ts`); `y_fwd_bps` (§D) runs forward from there over the physical horizon.
-   - **Bar close vs. decision:** a bar closes when its triggering trade is *observed*, so
-     `t_event = t_close + recv_lag_(trigger venue)` (`t_close` = the trigger's origin time).
-     Coinbase-triggered (pre-E2.5) ⇒ `t_event = t_close + coinbase_recv_lag_ns` and
-     `coinbase_read_ts = t_close` (the close itself). Binance-triggered (post-E2.5) ⇒
-     `t_event = t_close + binance_recv_lag_ns`, `binance_read_ts = t_close`, and Coinbase is
-     read earlier at `t_event − coinbase_recv_lag_ns` (it arrives slower).
+2. **Decision time and per-venue, per-feed lag — the sample-timing rule (§13 pitfall, load-bearing).**
+   Reconstruction runs on **exchange (origin) time**, but the box observes an event only
+   `lag` after its origin timestamp, and **each venue has a distinct book-feed and trade-feed
+   lag that must not be conflated** (data.md §5/§5b medians): Binance perp book
+   `binance_book_lag_ns` ≈ **4.4 ms** / trades `binance_trade_lag_ns` ≈ **57 ms**; Coinbase
+   book `coinbase_book_lag_ns` ≈ **90 ms** / trades `coinbase_trade_lag_ns` ≈ **164 ms**. The
+   **decision time `t_event` is on the box's received-time axis**; every input is read at
+   `t_event − lag` for its own venue **and feed**:
+   - **Trigger / bar close (Codex P1):** a bar closes on a **trade**, observed at
+     `t_event = t_close + trade_lag_(trigger venue)` (`t_close` = the trigger trade's origin) —
+     Coinbase-triggered ⇒ `+ coinbase_trade_lag_ns`, Binance-triggered ⇒ `+ binance_trade_lag_ns`.
+     Seeding the trigger with the ~4.4 ms *book* lag would place `t_event` **before** the
+     trigger trade is observed; the **trade** lag (57 ms Binance / 164 ms Coinbase) is correct.
+   - **Book snapshots** (both venues — incl. the Coinbase target mid/microprice **and**
+     `half_spread_bps`): read `ts_engine ≤ t_event − book_lag_v`. So the **Coinbase target
+     book is snapshotted at `coinbase_read_ts = t_event − coinbase_book_lag_ns`, not at
+     `t_event`** (Codex P1; §B) — else labels and cost reuse ~90 ms of future book state.
+   - **Trade-flow features** (CVD, aggressor imbalance, largest print): read
+     `ts_engine ≤ t_event − trade_lag_v`.
+   - **Label anchor:** the Coinbase mid/microprice from the book at `coinbase_read_ts`;
+     `y_fwd_bps` (§D) runs forward from there over the physical horizon.
+   - **Reductions:** Binance-triggered ⇒ Binance trade-read `= t_close` (the trigger itself),
+     Binance book-read `= t_close + (binance_trade_lag − binance_book_lag)` — later than the
+     close but observable, since Binance book arrives ~52 ms sooner than the trigger trade.
+     Coinbase-triggered ⇒ Coinbase trade-read `= t_close`, book-read `= t_event − coinbase_book_lag_ns`.
    - `t_available == t_event` is **correct by construction** — every input read at
-     `t_event − recv_lag_v` is box-observable by `t_event`; `availability_lag_ns` stays 0
-     (the consumer requires it; §E).
-   - `binance_recv_lag_ns` / `coinbase_recv_lag_ns` are **manifest parameters** seeded from
-     the data.md §5/§5b medians (both conservative-high — a larger read-lag only *removes*
-     information, never adds look-ahead); E2.5 pins the Binance value before the
-     Binance-triggered clock is enabled (§A, Q2).
+     `t_event − lag` is box-observable by `t_event`; `availability_lag_ns` stays 0 (§E).
+   - The four lags are **manifest parameters** seeded from the data.md §5/§5b medians
+     (conservative-high — a larger lag only *removes* information); E2.5 pins the Binance
+     values before the Binance-triggered clock is enabled (§A, Q2).
 
 3. **Vendor-seam exclusion — the partial-fill contract (E0.4, hard input).** Coinbase is
    stitched from Crypto Lake + CoinAPI at vendor **seams** (the 33-day hole and smaller
@@ -302,7 +313,7 @@ contract, restated as production rules:
 
 | Column | Definition (producer) | Enforced invariant |
 | --- | --- | --- |
-| `t_event` | **decision** time on the **received-time** axis = `t_close + recv_lag_(trigger)` (§C.2); each venue read at `t_event − recv_lag_v`; **not** the raw bar close | int64 ns, non-null |
+| `t_event` | **decision** time on the **received-time** axis = `t_close + trade_lag_(trigger)` (the close is a trade; §C.2); each venue+feed read at `t_event − lag`; **not** the raw bar close | int64 ns, non-null |
 | `t_feature_start` | engine time of the **oldest** per-venue read-window start | `t_feature_start ≤ t_event`; observed look-back ≤ `max_lookback_ns` |
 | `t_available` | when features become usable = **`t_event`** (synchronous) | `t_available == t_event` (per-venue feed lag baked into the reads per §C.2, `availability_lag_ns = 0`) |
 | `t_barrier` | first-barrier-hit time (TP/SL/time), forward from `t_event` | `t_event ≤ t_barrier ≤ t_event + horizons[tag]` |
@@ -339,10 +350,11 @@ the columns CPCV consumes and to pin `embargo_ns` correctly:
   `t_barrier` is the true resolution time.
 - **`max_lookback_ns` spans to the decision time, including feed lag (P3).** The producer
   sets `max_lookback_ns = max(t_event − t_feature_start)` over all rows, where
-  `t_feature_start` is the **earliest per-venue read-window start** — Binance's window ends
-  at `binance_read_ts = t_event − binance_recv_lag_ns`, Coinbase's at
-  `t_event − coinbase_recv_lag_ns` (§C.2). Measuring to `t_event` therefore **includes each
-  venue's feed lag** (and, under the Binance-triggered clock, the `t_close→t_event` gap); it
+  `t_feature_start` is the **earliest per-venue, per-feed read-window start** — each feed's
+  window ends at `t_event − lag`, and the slowest feed (e.g. Coinbase trades at
+  `t_event − coinbase_trade_lag_ns`) reaches back earliest (§C.2). Measuring to `t_event`
+  therefore **includes each feed's lag** (and, under the Binance-triggered clock, the
+  `t_close→t_event` trade-lag gap); it
   is **not** the raw feature-window length. Undersizing it would let a post-test train row's
   feature window reach into the test label span. The consumer cross-checks exactly this
   quantity (`eval/study.py:28` uses `(t_event − t_feature_start).max()`) and fails closed,
@@ -389,8 +401,10 @@ cross-cutting discipline).
   **pre-registered producer parameter**, recorded in the manifest `sources`/`bar_clock`
   block, not hidden in code. At realistic solo volume the cost wall is large — this is
   the G1 stakes (data.md/§10).
-- **`half_spread_bps`** (per row) = ½·(Coinbase best_ask − best_bid)/mid at `t_event`,
-  from the snapshot (§B). `validate_matrix` requires both cost columns ≥ 0.
+- **`half_spread_bps`** (per row) = ½·(Coinbase best_ask − best_bid)/mid from the target book
+  at **`coinbase_read_ts = t_event − coinbase_book_lag_ns`** (the lagged snapshot, §B/§C.2 —
+  not `t_event`, so cost never uses future book state). `validate_matrix` requires both cost
+  columns ≥ 0.
 - **Gate (G1):** `run_study` reports gross **and** net side-by-side, MCC, DSR (vs the trial
   dispersion, effective-N), and **PBO via CSCV** (needs ≥32 finite OOS samples else
   `g1_inconclusive`; `eval/study.py:62`). A real G1 pass needs enough traded samples
@@ -420,7 +434,7 @@ sorted keys.
   the identity of an otherwise-identical build — §I/P3), `time: {unit: "ns", timezone:
   "UTC"}`.
 - `bar_clock: {kind: "dollar", reference_stream, target_bars_per_day, time_cap_ns,
-  warmup_days, threshold_schedule_hash, binance_recv_lag_ns, coinbase_recv_lag_ns, seam_policy}` —
+  warmup_days, threshold_schedule_hash, binance_book_lag_ns, binance_trade_lag_ns, coinbase_book_lag_ns, coinbase_trade_lag_ns, seam_policy}` —
   the **per-day trailing threshold schedule is pinned by hash** (§A, not a scalar), and
   `seam_policy` is `recon/stitch_policy.py:SeamPolicy.as_dict()` (§C.3). `emitted_by_time_cap`
   is an opted-in diagnostic `extra_cols`, never a feature.
@@ -504,11 +518,11 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   change any bar boundary on day `d` or earlier (the trailing threshold sees only days
   `< d`); warm-up days use the seed threshold and are flagged/excluded.
 - **Decision-time / sample-timing (P1):** the label runs forward from `t_event` (received
-  time) and **each venue is read at `t_event − recv_lag_v`** — no Binance event after
-  `t_event − binance_recv_lag_ns`, no Coinbase event after `t_event − coinbase_recv_lag_ns`
-  (§C.2). Asserts a **nonzero Coinbase feed lag is applied** (regression guard against the
-  old "target venue is local" bug), the closing-trade reductions hold (Coinbase-triggered ⇒
-  `coinbase_read_ts == t_close`; Binance-triggered ⇒ `binance_read_ts == t_close`), and
+  time); **each venue+feed is read at `t_event − lag`** — no Binance book event after
+  `t_event − binance_book_lag_ns`, no Binance trade after `t_event − binance_trade_lag_ns`,
+  and likewise for Coinbase (§C.2). Asserts the **Coinbase target book is read at the lagged
+  `coinbase_read_ts`, not `t_event`** (regression guard vs. the old "target venue is local"
+  bug), the trigger uses the **trade** lag (`t_event − trade_lag_(trigger) == t_close`), and
   `t_available == t_event` holds *without* look-ahead.
 - **Seam masking (P2a):** a synthetic day with a planted seam (two vendor segments +
   `SeamPolicy` guard) drops every bar whose feature/label window crosses the seam **or sits
@@ -527,8 +541,11 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
 - **Leakage-control gate (E0.4):** random k-fold (no purge) shows inflated CV vs
   purged/embargoed on a synthetic overlapping-label series — the controls bite.
 - **Manifest round-trip:** producer emits matrix+manifest on a tiny fixture →
-  `validate_frame` passes → `run_from_manifest` runs (expect `g1_inconclusive` — <32 OOS
-  samples make PBO unavailable, which is correct plumbing, not a signal claim).
+  `validate_frame` passes → `run_from_manifest` runs and returns the per-horizon result
+  **schema** without crashing. Assert on **structure, not gate outcome** (Codex P3): a
+  tiny/weak fixture yields an ordinary G1 **fail**, not `g1_inconclusive` — that flag needs a
+  LightGBM rung to pass the solo gate with PBO unavailable (`eval/study.py:70-72`). Assert a
+  specific G1 outcome only with a deliberately-planted-signal fixture sized to pass solo.
 - **Determinism (P3):** two builds of the same fixture with **different injected
   `generated_at`** ⇒ **identical `model_matrix.parquet` bytes and identical `build_id`**
   (the timestamp is excluded from the hash); the manifests differ only in `generated_at`.
@@ -575,14 +592,14 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | Task | Scope | Builds on (file:line) | Deliverable | Pre/Post backfill |
 | --- | --- | --- | --- | --- |
 | **T1** `feat/bars-clock` | Dollar-notional clock + hybrid time cap + **trailing/as-of-only per-day threshold schedule + warm-up** (P2b) + `emitted_by_time_cap`; Coinbase-order sort | `recon/events.py:Trade`; streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle only, §C.1) | `bars/clock.py` + threshold-causality test | Pre (calibration Post) |
-| **T2** `feat/bars-snapshot` | Dual-book snapshot at bar close; Coinbase mid + microprice target extraction (both emitted) | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py` + tests | Pre |
+| **T2** `feat/bars-snapshot` | Dual-book snapshot at the **lagged read** (book `t_event − book_lag_v`; Coinbase target at `coinbase_read_ts`, P1); mid + microprice (both emitted) | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py` + lagged-read test | Pre |
 | **T3** `feat/bars-features` | Per-bar §6/E1.2 vector (OFI/CVD/microprice_dev/queue_imb/spread_tick/depth/slope/VWAP/intra-bar path); stationarization; **value-level no-lookahead test** | T2, `recon/orderbook.py:snapshot` | `bars/features.py` + no-lookahead test | Pre |
-| **T4** `feat/bars-xvenue` | **Received-time decision `t_event` + per-venue reads `binance_read_ts = t_event − binance_recv_lag_ns`, `coinbase_read_ts = t_event − coinbase_recv_lag_ns` (both nonzero)** (P1); basis; perp-state conditioners; **sample-timing test** | T3, data.md §5/§5b lags | `bars/align.py` + sample-timing test | Pre (Binance lag from E2.5 Post) |
+| **T4** `feat/bars-xvenue` | **Received-time decision `t_event = t_close + trade_lag_(trigger)`; per-venue, per-feed reads (book `t_event − book_lag_v`, trades `t_event − trade_lag_v`; 4 lags)** (P1); basis; perp-state conditioners; **sample-timing test** | T3, data.md §5/§5b lags | `bars/align.py` + sample-timing test | Pre (Binance lags from E2.5 Post) |
 | **T5** `feat/labels-triple-barrier` | Triple-barrier (vol-scaled EWMA barriers, vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon, forward from `t_event` | T2 target anchor | `data/labels.py` + tests | Pre |
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
-| **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker+slippage, fee-tier param) + `half_spread_bps` from Coinbase book | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
+| **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker+slippage, fee-tier param) + `half_spread_bps` from the Coinbase book at `coinbase_read_ts` (lagged, P1) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; `validate_frame` before write | `eval/manifest.py` schema | manifest writer + round-trip test | Pre |
-| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; byte-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
+| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge, CoinAPI→`seq` order — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; byte-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
 | **T10** `feat/producer-calibration` (Post) | Consume the **final reviewed seam list**; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; first real G1. **Acceptance: seam masking holds on the real stitch plan** | T9, backfilled data + reviewed stitch plan | E0.3/E0.5 artifacts + G1 result | **Post** (backfill unlock) |
 
 ---
@@ -593,17 +610,18 @@ Forks resolved from the docs. Each is a **manifest parameter**, so an ablation n
 schema change.
 
 1. **Clock trigger venue** = **Coinbase/target-venue-triggered pre-E2.5** — close-observability
-   depends only on the *measured* `coinbase_recv_lag_ns` (`t_event = t_close +
-   coinbase_recv_lag_ns`), with no dependence on the unpinned Binance lag; the spec §5.1
-   **Binance-perp notional clock is the post-E2.5 target**, enabled only once
-   `binance_recv_lag_ns` is pinned by E2.5. Combined B+C is an ablation knob (E2.2 decides).
+   depends only on the *measured* `coinbase_trade_lag_ns` (`t_event = t_close +
+   coinbase_trade_lag_ns`; the close is a trade), with no dependence on the unpinned Binance
+   lags; the spec §5.1 **Binance-perp notional clock is the post-E2.5 target**, enabled only
+   once the Binance trade/book lags are pinned by E2.5. Combined B+C is an ablation knob (E2.2 decides).
    Trigger venue is a manifest parameter, so the switch is config, not a rewrite.
 2. **Label anchor** = Coinbase **mid** (primary — the anchor the seam-parity gate
    validates, `recon/parity.py:68,243`), **microprice** as an ablation arm **gated on
    first adding a microprice-parity check** (P2c; §B).
 3. **Sample timing / feed lag (P1):** decision `t_event` on the **received-time** axis; each
-   venue read at `t_event − recv_lag_v` (Binance ~4.4 ms, Coinbase ~90–164 ms — *both*
-   nonzero; the target venue is **not** local), giving `t_available == t_event` by
+   venue **and feed** read at `t_event − lag` — book vs. trade lags are distinct (Binance
+   4.4 ms book / 57 ms trades, Coinbase 90 ms book / 164 ms trades; the target venue is
+   **not** zero-lag), giving `t_available == t_event` by
    construction — never `availability_lag_ns` (the consumer requires 0 — §C.2/§E).
 4. **Vendor seams (P2a):** the producer **consumes the reviewed stitch plan** and applies
    `recon/stitch_policy.py` seam/guard/vendor masks; no training row crosses a seam. Hard
@@ -629,8 +647,8 @@ schema change.
   `taker_fee_bps` (base ~120 bps vs. an assumed volume tier)? Sets the G1 cost wall.
 - **Q2 (T4/E2.5) — resolved for pre-E2.5, open for the switch:** the pre-E2.5 default is
   **Coinbase-triggered**, whose close-observability needs only the measured
-  `coinbase_recv_lag_ns` (§A/#1). The remaining question is the **post-E2.5 switch**: once
-  E2.5 pins `binance_recv_lag_ns`, is the Binance-triggered clock's information-content gain
+  `coinbase_trade_lag_ns` (§A/#1). The remaining question is the **post-E2.5 switch**: once
+  E2.5 pins the Binance trade/book lags, is the Binance-triggered clock's information-content gain
   (spec §5.1) worth the added lag-modeling risk (too-low ⇒ sample-timing leakage; too-high ⇒
   biases against the Binance-increment premise)? Gate the switch on E2.5 confidence + an E2.2
   downstream-PnL check.
@@ -663,6 +681,12 @@ schema change.
   uniqueness (P2, §F), **streaming k-way merge** for production with `merge_sorted` as the
   fixture oracle (P2, §C.1) — traced to `recon/merge.py:11-16`,
   `recon/stitch_policy.py:385,391,406`, `eval/runner.py:60`, data.md §5/§5b.
+- Review round 3 (Codex on `34b87e9`) incorporated: **book-feed vs trade-feed lag split**
+  (P1 — trigger uses the trade lag, snapshot the book lag; §C.2), **Coinbase target snapshot
+  + `half_spread_bps` at the lagged `coinbase_read_ts`** (P1, §B/§G), **CoinAPI fill segments
+  replay in `seq` order** not a `ts_engine` merge (P2, §C.1), and the tiny-fixture test
+  asserts **schema not `g1_inconclusive`** (P3, §J) — traced to data.md §5b/134-140,
+  `recon/coinapi.py:13-29`, `eval/study.py:70-72`.
 
 ## Risks & assumptions
 
@@ -674,11 +698,15 @@ schema change.
   stable; if it changes, T8/T9 must re-sync. Low risk — it is frozen and heavily tested.
 - **Risk:** threshold/latency/fee defaults (Q1–Q5) are seeds until real data; the plan
   isolates all as manifest parameters so calibration (T10) never forces a code change.
-- **Risk (sample timing, P1):** correctness hinges on the per-venue feed-lag estimates. The
-  Coinbase `recv_lag` is seeded from the data.md §5/§5b medians (~90 ms book / ~164 ms
-  trades) but measured on one day/symbol — validate multi-day; a too-small value re-opens the
-  ~5–8 % 2 s-label look-ahead. The Binance lag is deferred to E2.5 and gates enabling the
-  Binance-triggered clock (Q2). Both default conservative-high.
+- **Risk (sample timing, P1):** correctness hinges on the **four** per-venue, per-feed lags
+  (book vs. trade — the trade lag drives the trigger, the book lag the snapshot). Coinbase's
+  are seeded from the data.md §5/§5b medians (~90 ms book / ~164 ms trades) but measured on
+  one day/symbol — validate multi-day; a too-small value re-opens the ~5–8 % 2 s-label
+  look-ahead. The Binance lags are deferred to E2.5 and gate enabling the Binance-triggered
+  clock (Q2). All default conservative-high.
+- **Risk (CoinAPI order, P2):** Coinbase fill segments must replay in `seq` (file) order, not
+  a `ts_engine` merge (the opening snapshot carries a prior-day timestamp); T9 must dispatch
+  by `vendor_source` or the target book/labels corrupt (§C.1).
 - **Risk (seams, P2a):** the producer is only seam-safe if it consumes the **final
   reviewed** stitch plan; a stale/partial seam list would let a cross-vendor window train.
   T9 asserts on synthetic seams; T10 re-asserts on the real plan post-backfill.
