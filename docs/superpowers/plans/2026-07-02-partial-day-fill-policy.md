@@ -292,11 +292,16 @@ Live/integration (follow-up branches, before unlock):
     **Done 2026-07-02 (PR #22 + PR #28):** the real quality-map record yields the expected
     `leading_partial_fill` stitched plan on 2025-01-07 (native, PR #22), and the CoinAPI-overlap
     `compare_topk` parity in the Lake window was then run (PR #28 — one bounded gate-allowed CoinAPI day
-    + `run_coinbase_parity.py --engine native --size-policy decrement`) and **PASSED the 2025-06-01-class
-    bar**: post-seam overlap (33,287 pts, warmup-gated to `trusted_lake_start_ts`=14:45:03Z) median
-    |Δmid| $0.00, corr 0.99997, discontinuity-free seam handoff; the heavier absolute-$ tail is a
-    15:00–16:00Z volatility slide, not a seam artifact; seam-guard exclusions reported transparently
-    (`docs/data.md` §5a-QualityMap "Seam-day live validation"). Backfill still LOCKED.
+    + `run_coinbase_parity.py --engine native --size-policy decrement`) and the **stitch is VALIDATED**:
+    post-seam overlap (33,287 pts, warmup-gated to `trusted_lake_start_ts`=14:45:03Z) is 2025-06-01-recon-
+    class on **central tendency, depth, and the seam handoff** (median |Δmid| $0.00, corr 0.99997, top-10
+    depth 100% both-present, discontinuity-free handoff, 0 spikes >$50 in the first 5 min). Acceptance is
+    the *stitch* criterion (clean handoff + central/depth parity + a divergence tail that is provably NOT
+    a seam artifact), **not** tail-magnitude parity: the |Δmid| tail IS heavier than the recon reference
+    ($9.44/$30.37/$137.24 p95/p99/max vs $0.48/$4.35/$66.59), but that excess is a single 15:00–16:00Z
+    volatility hour (characterized, per the standing "spike population not assumed away" posture), not the
+    seam; seam-guard exclusions reported (`docs/data.md` §5a-QualityMap "Seam-day live validation").
+    Backfill still LOCKED.
 17. **2024-08-05 full-day verification**: confirm the crossed-source routing (needs_fill=true,
     full_day_fill) against its real record; no parity rehabilitation attempted. **Done 2026-07-02
     (PR #22):** confirmed against the real record — `needs_fill=true`, `full_day_fill` /
@@ -433,9 +438,12 @@ quality-map on both real seam days. **Item 17 done** — 2024-08-05 routes `full
 `crossed_seed_source` against its real record, no rehabilitation. **Item 16 done** — the real
 2025-01-07 record yields the expected `leading_partial_fill` stitched plan (native coverage metrics,
 PR #22), and the CoinAPI-overlap `compare_topk` parity in the Lake window was run (PR #28 — one bounded
-gate-allowed CoinAPI day) and **PASSED**: post-seam overlap median |Δmid| $0.00, corr 0.99997, clean
-14:45:03Z handoff, elevated $-tail = a 15:00–16:00Z volatility slide (not a seam artifact), seam-guard
-exclusions reported (`docs/data.md` §5a-QualityMap "Seam-day live validation"). Backfill still LOCKED.
+gate-allowed CoinAPI day): the **stitch is VALIDATED** — post-seam overlap median |Δmid| $0.00, corr
+0.99997, top-10 depth 100%, discontinuity-free 14:45:03Z handoff. Acceptance is the *stitch* criterion,
+**not** tail-magnitude parity: the |Δmid| tail is heavier than the recon reference (max $137.24 vs
+$66.59) but is a single 15:00–16:00Z volatility hour, not a seam artifact (characterized, not assumed
+away); seam-guard exclusions reported (`docs/data.md` §5a-QualityMap "Seam-day live validation").
+Backfill still LOCKED.
 
 ### Task 5 (with bar builder): masks + `vendor_source` in the dataset build and manifests
 
