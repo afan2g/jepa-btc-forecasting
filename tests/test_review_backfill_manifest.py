@@ -353,6 +353,15 @@ def test_is_fillable():
     assert rv.is_fillable(err, "2025-01-10", "book") is False
 
 
+def test_is_fillable_rejects_malformed_error():
+    # a malformed error ("true"/1/absent) must be treated as a probe error → unavailable
+    for bad_err in ("true", 1):
+        cal = _calendar(fill_status={"2025-01-10": {"book": {"present": True, "mb": 1.0, "ok": True},
+                                                    "trades": None, "error": bad_err, "reason": "",
+                                                    "ok": True}})
+        assert rv.is_fillable(cal, "2025-01-10", "book") is False
+
+
 def test_is_fillable_requires_strict_true():
     # truthy non-bool present/ok (e.g. "ok":"false", a truthy string) must NOT count as fillable
     cal = _calendar(fill_status={"2025-01-10": {"book": {"present": "yes", "ok": "false"},
@@ -831,6 +840,32 @@ def test_completeness_mapped_gap_day_must_classify_missing(tmp_path):
     blockers = rv.new_blockers()
     rv.check_completeness(plan, reps, day_index, cal, blockers)
     assert any("gap_day_misclassified:2025-01-10" in x for x in blockers["coverage_gaps"])
+
+
+def test_completeness_stale_gap_report_on_present_day_blocks(tmp_path):
+    # a report classifying a now-present (trade-only) day as missing_needs_coinapi is a stale gap
+    # report — the current calendar says the Lake book is present, so it must block
+    reports = [_report([
+        _day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable")),
+        _day("2025-01-02", "lake_present_degraded",
+             _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                         full_day_reason="quality_over_usable_bar",
+                         fill_segments=[_full_day_seg("2025-01-02")], seams=[],
+                         seam_policy={"seam_guard_s": 60.0}), fillable=True),
+        _day("2025-01-11", "missing_needs_coinapi",   # trade-only day, but report says book gap
+             _fill_block(True, "lake_book_delta_v2_absent", fill_profile="full_day_fill",
+                         full_day_reason="lake_book_delta_v2_absent",
+                         fill_segments=[_full_day_seg("2025-01-11")], seams=[],
+                         seam_policy={"seam_guard_s": 60.0}), calendar=_TRADE_ONLY_CTX, fillable=True),
+    ])]
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    plan = rv.load_json_object(plan_path, what="plan manifest")
+    cal = rv.load_json_object(cal_path, what="usable calendar")
+    reps, day_index = rv.load_batch_reports(plan)
+    blockers = rv.new_blockers()
+    rv.check_completeness(plan, reps, day_index, cal, blockers)
+    assert any("missing_needs_coinapi_not_current_gap:2025-01-11" in x
+               for x in blockers["coverage_gaps"])
 
 
 def test_completeness_batch_incomplete_on_refused_quota(tmp_path):
@@ -1312,6 +1347,19 @@ def test_cli_inspection_mode_report_only(tmp_path):
                   "--generated-utc", "2026-07-03T00:00:00Z"])
     assert rc == 0
     assert json.loads(out.read_text())["meta"]["status"] == "report_only"
+
+
+def test_cli_inspection_mode_rejects_malformed_days(tmp_path):
+    # inspection mode must fail closed (exit 2) on a malformed report, not crash on rec.get(...)
+    plan_path, cal_path = _write_tree(tmp_path)
+    rpath = os.path.join(rv.load_json_object(plan_path, what="p")["batches"][0]["report_dir"],
+                         "coinbase_quality_map.json")
+    rep = json.loads(_pl.Path(rpath).read_text())
+    rep["days"] = ["2025-01-01"]   # list of non-objects
+    _pl.Path(rpath).write_text(json.dumps(rep))
+    rc = rv.main(["--report", rpath, "--usable-calendar", cal_path, "--out", str(tmp_path / "m.json"),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.INPUT_ERROR_EXIT
 
 
 def test_cli_deterministic_bytes(tmp_path):

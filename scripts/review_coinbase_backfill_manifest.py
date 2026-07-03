@@ -210,7 +210,9 @@ def is_fillable(cal: dict, day: str, product: str) -> bool:
     """True iff CoinAPI `product` for `day` is verifiably available (present+ok, no error, not in
     the unfillable/probe-error lists) per the calendar verifier's fill_status."""
     fs = _fill_status(cal, day)
-    if not isinstance(fs, dict) or fs.get("error") is True:   # non-dict status record → unavailable
+    # error must be strictly False (a valid record sets it so). A non-dict record, or a malformed
+    # error such as "true"/1/absent, is treated as an unverified probe → unavailable (fail-closed).
+    if not isinstance(fs, dict) or fs.get("error") is not False:
         return False
     if day in set(cal.get("fill_days_unfillable") or []):
         return False
@@ -756,6 +758,13 @@ def check_completeness(plan: dict, reports: list, day_index: dict, cal: dict,
         elif d not in withheld:
             blockers["coverage_gaps"].append(f"gap_day_unmapped:{d}")
 
+    # reciprocal: a report may only classify missing_needs_coinapi for a CURRENT book-gap day. A stale
+    # gap report on a day the current calendar now marks present-book (e.g. trade-only) would else
+    # reach ready and schedule a full-day book fill, skipping the real book-quality verdict.
+    for d in sorted(mapped - bg):
+        if day_index[d].get("classification") == MISSING_NEEDS_COINAPI:
+            blockers["coverage_gaps"].append(f"missing_needs_coinapi_not_current_gap:{d}")
+
     dropped = (plan.get("skipped") or {}).get("days_dropped_as_excluded_or_book_gap") or []
     if dropped:
         blockers["coverage_gaps"].append(f"contradictory_calendar_dropped:{sorted(dropped)}")
@@ -1039,7 +1048,17 @@ def build_manifest_inspection(report_paths, cal_path, *, generated_utc) -> dict:
         validate_calendar(cal, cal_path)
     day_index = {}
     for r in reports:
-        for rec in r["report"].get("days") or []:
+        days = r["report"].get("days")
+        if not isinstance(days, list):
+            # inspection bypasses load_batch_reports' guards; apply the same shape checks so a
+            # malformed report fails closed (exit 2) instead of crashing on rec.get(...).
+            if "days" in r["report"]:
+                raise ReviewInputError(f"{r['path']}: report 'days' must be a list of objects")
+            continue
+        for rec in days:
+            if not isinstance(rec, dict):
+                raise ReviewInputError(f"{r['path']}: report 'days' must contain objects, got "
+                                       f"{type(rec).__name__}")
             day_index.setdefault(rec.get("day"), rec)
     days = [build_day_record(d, day_index.get(d), cal) for d in _universe(reports, cal)]
     inputs = {"batch_reports": [{"path": r["path"], "sha256": sha256_file(r["path"])}
