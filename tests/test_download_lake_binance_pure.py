@@ -220,8 +220,9 @@ def test_run_allow_broad_still_blocked_over_quota_headroom(tmp_path):
 def test_dry_run_uses_lister_and_writes_no_parquet(tmp_path):
     seen = []
 
-    def fake_lister(feed, exchange, symbol):
-        seen.append(feed)
+    def fake_lister(feed, exchange, symbol, start, end):
+        # list_data must be BOUNDED to the requested window (one day → one-day probe, not full history)
+        seen.append((feed, start.date().isoformat(), end.date().isoformat()))
         return ["2026-04-01"]
 
     raw = tmp_path / "raw"
@@ -230,14 +231,15 @@ def test_dry_run_uses_lister_and_writes_no_parquet(tmp_path):
                     "--report-dir", str(tmp_path / "rep")],
                    lister=fake_lister, used_data_fn=lambda: 0.0)
     assert code == 0
-    assert seen == ["trades"]
+    assert seen == [("trades", "2026-04-01", "2026-04-02")]   # bounded to [first, last+1) exclusive
     assert not any(raw.rglob("*.parquet"))                # dry-run transfers zero parquet
     rep = json.loads(next((tmp_path / "rep").glob("*.json")).read_text())
     assert rep["dry_run"] is True and rep["transferred_gb"] == 0
+    assert rep["presence"]["binance-spot:trades"]["n_present"] == 1
 
 
 def test_dry_run_auth_error_exits_2(tmp_path):
-    def bad_lister(feed, exchange, symbol):
+    def bad_lister(feed, exchange, symbol, start, end):
         raise RuntimeError("AccessDenied: not authorized for this bucket")
     code = dl.main(["--instrument", "binance-spot", "--feeds", "trades", "--dry-run",
                     "--start", "2026-04-01", "--end", "2026-04-01", "--out", str(tmp_path / "raw"),

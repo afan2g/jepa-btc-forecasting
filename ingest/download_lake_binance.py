@@ -584,12 +584,15 @@ def _live_reader(session):
 
 
 def _live_lister(session):
-    """Build the live metadata lister for --dry-run: lister(feed, E, S) → list of present ISO days."""
+    """Build the live metadata lister for --dry-run: lister(feed, E, S, start, end) → present ISO days
+    IN THE REQUESTED WINDOW. Passing start/end bounds list_data (mirrors
+    ingest/verify_trades_and_calendar.py:48) so a one-day dry-run is a one-day metadata probe, not an
+    unbounded full-history scan."""
     import lakeapi
 
-    def list_days(feed, exchange, symbol):
+    def list_days(feed, exchange, symbol, start, end):
         try:
-            meta = lakeapi.list_data(table=_lake_table(feed), symbols=[symbol],
+            meta = lakeapi.list_data(table=_lake_table(feed), start=start, end=end, symbols=[symbol],
                                      exchanges=[exchange], boto3_session=session)
         except lakeapi.exceptions.NoFilesFound:
             return []                                # nothing present for this feed → no days
@@ -733,14 +736,20 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         # list_data is itself a LIVE Lake call, so an auth/permission wall (wrong keys/account) or any
         # vendor failure here must return the documented setup exit 2 (fail-safe) — never a bare
         # traceback / exit 1 — the same hard-stop contract as the download path.
+        # Bound the metadata probe to the REQUESTED window [first_day, last_day+1) — list_data's end
+        # is exclusive — so a one-day dry-run is a one-day probe, not a full-history scan.
+        probe_start = dt.datetime.fromisoformat(days[0])
+        probe_end = dt.datetime.fromisoformat(days[-1]) + dt.timedelta(days=1)
+        want = set(days)
         try:
             presence = {}
             for key in instrument_keys:
                 inst = lb.INSTRUMENTS[key]
                 for feed in plan_feeds_for_presence(key, args.feeds):
-                    present = list(lister(feed, inst.exchange, inst.symbol))
+                    present = want & set(lister(feed, inst.exchange, inst.symbol,
+                                                probe_start, probe_end))
                     presence[f"{key}:{feed}"] = {"n_present": len(present),
-                                                 "missing": sorted(set(days) - set(present))}
+                                                 "missing": sorted(want - present)}
         except Exception as e:                                      # noqa: BLE001 — fail safe on a live probe
             print(f"ERROR: --dry-run list_data failed ({classify_error(e)}, fail-safe exit 2): {e}",
                   file=sys.stderr)
