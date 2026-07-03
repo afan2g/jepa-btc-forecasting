@@ -62,30 +62,11 @@ def test_v1_declared_horizon_missing_from_matrix_rejected():
         run_from_manifest(m, man)
 
 
-# ---------- legacy path (branch deleted in phase 3) ----------
+# ---------- legacy path removed (phase 3): non-versioned dicts are refused ----------
 
-def test_legacy_manifest_dict_still_runs():
-    # Phase-3 removal target: delete this test with the legacy branch.
-    m, feats, lb = make_matrix(signal_strength=4.0, seed=8)
+def test_run_from_manifest_requires_versioned_manifest():
+    m, feats, lb = make_matrix(n=64, signal_strength=1.0, seed=1)
     man = {"feature_cols": feats, "embargo_ns": lb, "max_lookback_ns": lb,
-           "gate": {"n_groups": 6, "k": 2}}
-    res = run_from_manifest(m, man)
-    assert res["gate"]["min_sample_sharpe"] == 0.0
-    assert "10s" in res["horizons"]
-
-
-def test_legacy_manifest_rejects_leaky_feature_names():
-    # The legacy branch skips validate_frame; the leak screen must never be skipped.
-    m, feats, lb = make_matrix(n=64, signal_strength=1.0, seed=1)
-    m["mid_fwd_10s"] = 0.0
-    man = {"feature_cols": feats + ["mid_fwd_10s"], "embargo_ns": lb,
-           "max_lookback_ns": lb, "gate": {"n_groups": 4, "k": 2}}
-    with pytest.raises(ValueError, match="leak"):
+           "gate": {"n_groups": 4, "k": 2}}
+    with pytest.raises(ValueError, match="manifest_version"):
         run_from_manifest(m, man)
-
-
-def test_legacy_manifest_missing_keys_fail_with_contract_error():
-    # Raw KeyError is not a contract error; name the missing keys.
-    m, feats, lb = make_matrix(n=64, signal_strength=1.0, seed=1)
-    with pytest.raises(ValueError, match="legacy manifest missing"):
-        run_from_manifest(m, {"feature_cols": feats, "gate": {"n_groups": 4, "k": 2}})

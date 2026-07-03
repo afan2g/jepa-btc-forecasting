@@ -310,8 +310,8 @@ def test_run_from_manifest_accepts_valid_versioned_manifest():
 
 
 def test_run_from_manifest_refuses_v1_fields_without_version():
-    # A typo in 'manifest_version' itself must not silently downgrade a rich manifest
-    # to the unvalidated legacy path.
+    # run_from_manifest universally requires manifest_version now (legacy path removed):
+    # a full v1 manifest whose version key was lost to a typo is refused, not downgraded.
     m, feats, _ = make_matrix(n=64, signal_strength=1.0, seed=1)
     man = _manifest(feature_cols=feats, gate={"n_groups": 4, "k": 2})
     del man["manifest_version"]
@@ -320,8 +320,8 @@ def test_run_from_manifest_refuses_v1_fields_without_version():
 
 
 def test_run_from_manifest_refuses_optional_v1_fields_without_version():
-    # Codex P2: optional v1 fields (dtypes/as_of_ns/availability_lag_ns/extra_cols) on a
-    # legacy-shaped manifest must also fail closed, not be silently ignored.
+    # Codex P2, now the universal required-version guard: a non-versioned dict carrying
+    # optional v1 fields (dtypes/as_of_ns/availability_lag_ns/extra_cols) is refused too.
     m, feats, lb = make_matrix(n=64, signal_strength=1.0, seed=1)
     man = {"feature_cols": feats, "embargo_ns": lb, "max_lookback_ns": lb,
            "gate": {"n_groups": 4, "k": 2}, "dtypes": {"cvd": "float64"}}
@@ -489,6 +489,6 @@ def test_unsafe_infer_param_hygiene():
 
 
 def test_leaky_feature_names_public_helper():
-    # Public wrapper for the runner's legacy-branch screen (and manifest-authoring tools).
+    # Public wrapper over the label-derived-name screen, for manifest-authoring tools.
     assert leaky_feature_names(["ofi_integrated", "mid_fwd_5s", "y", "spread_tick"]) == \
         ["mid_fwd_5s", "y"]

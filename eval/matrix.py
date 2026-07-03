@@ -36,8 +36,7 @@ def validate_matrix(df: pd.DataFrame, feature_cols: list[str]) -> None:
     for c in _TIMING:
         # pd.NA comparisons are skipped by Series.all() (fail-open) and datetime64 math
         # raises confusing TypeErrors — require non-null integer ns up front (mirrors
-        # eval.manifest.validate_frame; needed here for the legacy path and direct
-        # run_study callers).
+        # eval.manifest.validate_frame; needed here for direct run_study callers).
         if not pd.api.types.is_integer_dtype(df[c]):
             raise ValueError(f"timing column {c!r} must be integer nanoseconds, "
                              f"got {df[c].dtype}")
