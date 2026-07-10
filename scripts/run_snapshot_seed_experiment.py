@@ -277,8 +277,13 @@ def main(argv=None) -> int:
     gb, gb_basis = full_day_gb_from_manifest(
         os.path.join(args.coinapi_root, "_manifest.jsonl"), args.day)
     if gb is None:
-        gb = os.path.getsize(capi_path) / 1e9
-        gb_basis = "parquet_size_fallback"
+        # No measured billable size (decode manifest absent or lacks the day): leave
+        # the day UNPRICED rather than substituting the local parquet size — the
+        # economics gate must run on the vendor's billable csv.gz bytes or not at
+        # all, and effective_prereg_pass fails closed on unpriced snapshot arms.
+        print("WARNING: no measured src_bytes for this day in _manifest.jsonl; "
+              "snapshot arms run UNPRICED and the effective verdict fails closed "
+              "on economics.", file=sys.stderr)
 
     acceptance = SnapshotAcceptance(min_levels_per_side=args.seed_min_levels,
                                     max_age_s=args.max_age_s,
