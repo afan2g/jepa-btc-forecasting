@@ -273,6 +273,14 @@ def test_freeze_counts_come_from_the_ledger(g0_pipeline):
                               trade_validation_thresholds=g0_pipeline["thresholds"],
                               holdout_scope=g0_pipeline["scope"],
                               generated_at="2026-07-10T12:00:00+00:00")
+    edited = copy.deepcopy(g0_pipeline["res_xv"])
+    edited["ledger"]["n_imported_trials"] = 3         # in range but FALSE
+    with pytest.raises(ValueError, match="imported trial count"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope=g0_pipeline["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
 
 
 def test_freeze_rejects_edited_evidence_values(g0_pipeline):

@@ -598,6 +598,9 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
             "noise_band": dict(h["noise_band"]),
             "gate_sha256": hash_obj(gate),
             "matched_row_sha256": matched["row_content_sha256"],
+            # Ledger-pinned audit of the carried search history: the freeze verifies
+            # the dev result's reported import count against this, not the editable JSON.
+            "n_imported_trials": n_imported,
             # Per-arm FULL content pins (reserved + feature values), ledger-pinned so an
             # edited dev-result JSON cannot substitute the hash the holdout refit
             # verifies against.

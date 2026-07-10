@@ -203,6 +203,10 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
         raise ValueError("the pinned ledger verdict for the winner's horizon is not a "
                          "pass (its PBO/noise-band/solo gates failed closed at study "
                          "time); an edited dev result cannot authorize the holdout")
+    if dev_result["ledger"]["n_imported_trials"] != vr["n_imported_trials"]:
+        raise ValueError("dev result imported trial count does not reconcile to the "
+                         "pinned ledger verdict; the carried-history audit cannot be "
+                         "edited")
     nb, vnb = h["noise_band"], vr["noise_band"]
     checks = {
         "pbo_available": bool(h.get("pbo_available")) == bool(vr["pbo_available"]),

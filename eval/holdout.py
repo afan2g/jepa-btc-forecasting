@@ -20,7 +20,7 @@ from eval.consumption import (STATE_SCORED, STATE_VALIDATED, STATE_VALIDATION_FA
                               load_record, record_holdout_score, record_path_for)
 from eval.cost import net_pnl, weighted_sharpe
 from eval.freeze import verify_freeze
-from eval.hashing import hash_obj, matrix_content_hash
+from eval.hashing import canonical_row_order, hash_obj, matrix_content_hash
 from eval.manifest import feature_list, validate_frame
 from eval.matrix import RESERVED, validate_matrix
 from eval.partition import (contract_hash, require_binding, validate_development_span,
@@ -180,6 +180,12 @@ def score_fixed_holdout(*, freeze_artifact: dict, records_dir, contract: dict,
                          f"scope {scope['days']}; partial or substituted holdout builds "
                          "are rejected")
 
+    # Canonical row order before fitting: the content pins are order-insensitive, so
+    # the same frozen rows in a different parquet order pass verification — but an
+    # order-sensitive fit (LightGBM binning paths) must still reproduce the identical
+    # score from the frozen artifact.
+    dev_matrix = canonical_row_order(dev_matrix)
+    holdout_matrix = canonical_row_order(holdout_matrix)
     h = winner["horizon"]
     dev_slice = dev_matrix[dev_matrix["horizon"] == h].reset_index(drop=True)
     hold_slice = holdout_matrix[holdout_matrix["horizon"] == h].reset_index(drop=True)

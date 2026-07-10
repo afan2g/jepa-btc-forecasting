@@ -164,6 +164,15 @@ def test_score_consumes_once_and_reproduces(tmp_path, g0_pipeline):
     assert again["metrics"] == res["metrics"]
     assert _load(tmp_path, g0_pipeline)["state"] == "scored"  # verify mutated nothing
 
+    # row order is canonicalized before the fit: the same frozen rows in a different
+    # parquet order must reproduce the identical recorded score
+    w = g0_pipeline["world"]
+    arm = g0_pipeline["res_xv"]["winner"]["arm"]
+    shuffled = (w["dev"]["arms"][arm]["matrix"]
+                .sample(frac=1.0, random_state=7).reset_index(drop=True))
+    reordered = _score(tmp_path, g0_pipeline, dev_matrix=shuffled, verify_only=True)
+    assert reordered["reproduces_recorded_score"] is True
+
 
 def test_verify_only_is_not_a_holdout_oracle(tmp_path, g0_pipeline):
     """Non-reproducing inputs get NO metrics back: repeated verify calls with perturbed
