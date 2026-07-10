@@ -20,9 +20,29 @@ information source (spec §1). Data needed:
 | Target / label venue | Coinbase **BTC-USD** (spot) | Crypto Lake + CoinAPI (hybrid) | `book_delta_v2`, `trades` |
 
 History span: **12–24 months** for SSL pretrain; recent 3–6 mo for head finetune; clean held-out OOS
-~1 mo (spec §4). **The OOS month must be chosen from the usable all-feed calendar (§5b), not simply
-"most recent"** — recent May–June 2026 has Binance gaps; the most-recent usable run ends 2026-05-05
-(OOS ≈ April 2026). Planning figures below use **18 months** (547 days) unless noted.
+~1 mo (spec §4). Acquisition is staged before that final span (§1.1). The pilot OOS is April 2026;
+it becomes consumed model-selection evidence after G0 and cannot be reused for formal G1. **The
+formal G1 OOS month must be outside the pilot and chosen from the usable all-feed calendar (§5b)
+using coverage only, not model outcomes or simply "most recent".** Planning figures below use
+**18 months** (547 days) unless noted.
+
+### 1.1 Staged acquisition policy (adopted 2026-07-10)
+
+Binding protocol:
+[`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](superpowers/plans/2026-07-10-staged-signal-acquisition.md).
+The data target is unchanged, but vendor spend is sequenced:
+
+1. Coinbase-only G0-CB uses the pilot window `2025-11-01` through `2026-04-30`.
+   Approve/download only the pilot-window subset of the reviewed CoinAPI manifest first.
+2. If the recorded G0-CB diagnosis authorizes the next spend, acquire the same six complete
+   calendar months for Binance futures and spot.
+3. Reconstruct the pilot and run matched Coinbase-only, Binance-only, and combined G0-XV arms.
+4. Pull the remaining approved Binance archive only after G0-XV passes. Remaining Coinbase fills
+   and full production reconstruction are separately resumable milestones.
+
+G0-CB is a target-data/economics and lower-bound screen; weak Coinbase-own-book predictivity alone
+does not disprove a Binance-leading signal. G0-XV is a spend gate, not formal G1 or final E2.3.
+Pilot and full datasets have separate source manifests, build IDs, feature manifests, and holdouts.
 
 ---
 
@@ -981,6 +1001,14 @@ one-shot pull on this plan: stage by month/quota
 window, project only needed columns, process/recon day-by-day, and keep resumable manifests so a
 run can stop before the quota is tight.
 
+**Six-month Binance pilot budget:** `2025-11-01` through `2026-04-30` is 181 days. The Binance
+downloader plan's conservative `~1.23 GB/day` estimate gives **~222.63 GB**. The completed
+`2026-04-01` nine-unit Stage-1 smoke measured **687,215,789 bytes** (~0.687 decimal GB), which would
+extrapolate to ~124.4 GB, but one day is not a quota guarantee. Plan with 222.63 GB, reconcile each
+batch from the raw manifest, and keep the operating target ≤250 GB per quota window. At the recorded
+156.25 GB usage snapshot, the pilot is not a one-batch operation even though the vendor's 300 GB
+limit is soft; split it deterministically and resume in the next window.
+
 After `recon` + bar building, the **training set collapses to GB-scale** (§7).
 
 ---
@@ -1147,7 +1175,7 @@ Other open items:
       canonical, ties break by original row index, `order_id` is never an ordering key
       (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,
       `tests/test_coinapi_within_timestamp_ordering.py`; quality counters `seq_disorder`/`seq_duplicate`).
-- [ ] **Binance downloader** — vendor stages not yet built; **plan:**
+- [ ] **Binance acquisition + reconstruction** — **plan:**
       [`docs/superpowers/plans/2026-07-02-binance-downloader-plan.md`](superpowers/plans/2026-07-02-binance-downloader-plan.md).
       Same throttled/resumable/partitioned pattern as `download_coinapi.py`, streaming per day
       (109 M rows). Read direct via pyarrow S3 (`eu-west-1`) or lakeapi.
@@ -1155,17 +1183,20 @@ Other open items:
       `ingest/lake_binance.py` (feed/instrument registry, Hive partition paths, manifest/resume
       state, joint `origin_time`→`received_time` engine-time resolver, quota estimate + broad-pull
       gate) and `scripts/plan_lake_binance_batches.py` (deterministic quota-window batch planner).
-      *Stage-1 vendor CLI landed 2026-07-02 (`ingest/download_lake_binance.py`, **no live Lake pull
-      run**):* streaming/atomic/resumable per-`(feed,exchange,symbol,day)` download to the normalized
+      *Stage-1 vendor CLI landed 2026-07-02 (`ingest/download_lake_binance.py`):*
+      streaming/atomic/resumable per-`(feed,exchange,symbol,day)` download to the normalized
       ZSTD Parquet raw store (incl. the `book` seed product), retry/backoff, quota gate before any
       transfer, and the 0/2/3/4 exit-code contract — fully unit-tested with injected fake
-      readers/listers (`tests/test_download_lake_binance.py`).
-      *Stage-2 recon runner landed 2026-07-09 (`scripts/run_binance_recon.py`, **offline only — no
-      live run**):* local raw store → certified top-K L2 + normalized trades/funding/OI/liquidations,
+      readers/listers (`tests/test_download_lake_binance.py`). *Bounded Stage-1 smoke completed
+      2026-07-10 for `2026-04-01`: all nine required futures/spot units `ok`, 147,377,429 rows,
+      687,215,789 bytes; Parquet rows/schemas/sizes/fingerprints/SHA-256 reconciled to the manifest,
+      with no temporary/missing/error units.*
+      *Stage-2 recon runner landed 2026-07-10 (`scripts/run_binance_recon.py`, offline tests only):*
+      local raw store → certified top-K L2 + normalized trades/funding/OI/liquidations,
       seed-source crossed-rate gate (>5% → `inconclusive`, no certified output), fail-closed
       publishing, resumable processed manifest; Python oracle now, native pending tick-scale
-      verification (Q1). Still open: live metadata/schema probes + one-day Phase-2 validation,
-      Binance tick-scale verification, and the staged historical archive pull.
+      verification (Q1). Still open: bounded smoke schema/tick-scale evidence, one-day Stage-2
+      validation, the six-month pilot, G0-XV, and (only after that gate) the remaining archive.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
 
 ---

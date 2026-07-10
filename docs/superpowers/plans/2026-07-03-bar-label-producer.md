@@ -10,10 +10,12 @@
 > §5–§8/§10 (design), [`docs/experiment-plan.md`](../../experiment-plan.md)
 > E0.3/E0.4/E0.5 + Phase 1/G1 (gates), [`docs/feature-manifest.md`](../../feature-manifest.md)
 > (the output contract), [`docs/data.md`](../../data.md) §5/§5a/§5b (coverage +
-> backfill gate). Section refs like "§5.4" point to the spec.
+> backfill gate), and
+> [`2026-07-10-staged-signal-acquisition.md`](2026-07-10-staged-signal-acquisition.md)
+> (Coinbase-first/pilot/full rollout). Section refs like "§5.4" point to the spec.
 
-**Goal.** Build the offline **producer** that turns reconstructed Binance +
-Coinbase event streams into the exact
+**Goal.** Build the offline **producer** that turns reconstructed Coinbase-only
+or Binance + Coinbase event streams into the exact
 `data/processed/model_matrix.parquet` + `data/processed/feature_manifest.json`
 that the already-built consumer `eval.runner.run_from_manifest`
 ([`eval/runner.py`](../../../eval/runner.py)) loads, validates, and gates (G1).
@@ -107,7 +109,7 @@ omits `bars*` — or a non-editable install / CLI import of the producer fails (
 runs would still pass, hiding it). T1 (the first `bars/` module) carries the `include = [...,
 "bars*"]` update and extends `tests/test_packaging.py::test_baseline_packages_are_shipped`.
 
-**Data flow (one instrument-day, then consolidate):**
+**Data flow (one instrument-day, then consolidate):** in cross-venue mode,
 a **streaming, day-partitioned k-way merge** of Binance+Coinbase deltas+trades on the
 engine-time axis (§C.1; `recon.merge_sorted` is the bounded-fixture oracle **only**, never
 the full-day path) → `bars.clock` (trailing-threshold schedule) emits bar boundaries →
@@ -124,6 +126,26 @@ slippage)/`half_spread_bps` → **guard-aware `stitch_policy` masks + `window_ve
 cross-seam/guard/uncovered rows** (§C.3) → per-day parquet → consolidate the labeled window
 → **`validate_frame` + `validate_matrix`** (fail closed — the NaN/inf/finite screens live in
 `validate_matrix`, §H/T8) → write `model_matrix.parquet` + `feature_manifest.json`.
+
+### Staged dataset modes (binding before T1)
+
+The staged acquisition protocol requires two source modes and four explicit manifest views. This is
+one producer architecture, not two forks:
+
+- **`coinbase_only`:** no Binance input is required or opened. The clock, observable feature book,
+  true label book, trades, labels, and costs all come from Coinbase. Its manifest lists only Coinbase
+  under `venues` and only Coinbase columns under `feature_cols`. Missing Binance columns are not
+  created or zero-filled.
+- **`cross_venue`:** requires certified coverage from both venues and uses the streaming merge above.
+  It emits one common row universe, then three manifests over identical row IDs, reserved columns,
+  labels, costs, horizons, split assignments, and regime tags: Coinbase-only control, Binance-only
+  signal, and combined. Only the ordered `feature_cols`/venue-source declarations differ.
+
+The first G0-CB run uses a Coinbase-only pilot build. After Binance pilot reconstruction, the
+Coinbase-only control is regenerated on the **matched cross-venue row universe**; comparing the
+earlier broader Coinbase build to the combined arm is forbidden. A row lacking certified Binance
+coverage is excluded from all three G0-XV arms, not represented by sentinel values. Dataset/build IDs
+and source-manifest hashes distinguish pilot from full production outputs.
 
 ---
 
@@ -779,43 +801,44 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   in `generated_at`.
 
 **Tier 2 — real-data (skipif-gated, runs only after backfill unlock):**
-`data/processed/*` present ⇒ the E0.3 median-bar histogram, τ ladder, and the first real
-G1 run. Skips cleanly today (matches `tests/test_baseline_integration.py`).
+`data/processed/*` present ⇒ the E0.3 median-bar histogram, τ ladder, G0-CB, and then
+the matched G0-XV arms when Binance pilot data exists. Formal G1 uses a later full-data
+build and separate holdout. Skips cleanly today (matches `tests/test_baseline_integration.py`).
 
 ---
 
 ## Before-backfill vs. after-backfill
 
-Backfill is **GATED and currently LOCKED** (data.md §5a/§9: `download_coinapi.py` refuses
->1-day full pulls (exit 4) until the §5a parity + reseed **multi-day** validation passes;
-memory `crypto-lake-access-state` / `coinbase-parity-gate-findings`: as of **2026-07-03**
-seam-day parity is validated but the broad full-window map is still the gate → backfill
-LOCKED). The split is therefore decisive:
+Backfill is **GATED and currently LOCKED** until issue #33's reviewed manifest reaches
+`ready`/`scope_complete=true`; `download_coinapi.py` retains its broad-pull and spend controls.
+The split is therefore decisive:
 
 **Buildable & fully testable NOW (pre-backfill) — synthetic + tiny fixtures:**
-all producer *code* (T1–T9): clock, trailing-threshold schedule, dual-book snapshot,
+all producer *code* (T1–T9): clock, trailing-threshold schedule,
+source-mode snapshot orchestration (Coinbase-only; dual-book in cross-venue mode),
 features, received-time per-venue feed-lag reads, **guard-aware seam-masking logic (on
 synthetic seams)**, triple-barrier labels, per-horizon uniqueness, cost columns, manifest emission, the
 end-to-end orchestrator; every Tier-1 test including value-level no-lookahead, sample-timing,
 seam masking, threshold causality, the leakage-control gate, and determinism. This
 exercises the **entire plumbing** through the built consumer without a byte of vendor data.
 
-**Requires the final backfilled dataset (post-backfill unlock) — T10:**
-the **final reviewed stitch plan / seam list** (the product of the §5a parity + reseed
-multi-day validation — the masking *code* is pre-backfill, the *seam list it consumes* is
-not); **threshold calibration** to hit the **E0.3 median-bar ≤ 2 s gate** on the **declared
+**Requires reviewed pilot data (post-backfill unlock) — T10:**
+the **pilot-window reviewed stitch plan / seam list** (the masking *code* is pre-backfill,
+the *seam list it consumes* is not); **threshold calibration** to hit the
+**E0.3 median-bar ≤ 2 s gate** on the **declared
 default clock's reference stream — real *Coinbase* trade volume** (Codex #B; Binance-volume
 calibration is scoped to the separate post-E2.5 Binance-clock path and must not size the
 Coinbase-default schedule); **τ measurement** (E1.1) to set the real horizon ladder; the
-**time-per-bar histogram** artifact; the **first real G1 run** over the usable calendar
-(704/730 d) with real regime stratification, real DSR trial count, and PBO over ≥32 OOS samples.
-**OOS held out FIRST (Codex deep-review #1):** the clean ~1-month OOS (≈**April 2026**, data.md:22-25)
-is **partitioned out and touched once, last**, for the final G1 report — T10 calibrates thresholds,
+**time-per-bar histogram** artifact; G0-CB and matched G0-XV with real regime stratification,
+the complete pilot-driven DSR trial count, and PBO over the preregistered pilot splits.
+**Pilot OOS held out FIRST:** April 2026
+is **partitioned out and touched once, last**, for the G0 reports — T10 calibrates thresholds,
 measures τ, and does all model/config selection on the **pre-OOS** data only, with labels/CV/metrics
 **pre-registered** before the OOS is read (experiment-plan:27-29). The runner just evaluates whatever
 rows it is given (`eval/runner.py:60-62`), so the producer/T10 must **exclude April from the
 calibration/selection matrix**, not merely annotate it. These are gated on backfill unlock and are
-**not** part of the code-complete producer.
+**not** part of the code-complete producer. April is consumed after G0 and cannot be reused as
+formal G1 OOS; the full-data run freezes a separate holdout outside the pilot.
 
 ---
 
@@ -833,9 +856,9 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T5** `feat/labels-triple-barrier` | Triple-barrier (**as-of/trailing** vol-scaled EWMA barriers — vol from returns `≤ t_event` only, params persisted, deep-review #4; vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, `P0` = TRUE reconstructed mid at `t_event` (#1)**; unresolved barrier → realized return + `label=0` (#4) | T2 target anchor | `data/labels.py` + span-anchor + as-of-vol tests | Pre |
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker + slippage, fee-tier param; **slippage includes the `coinbase_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable Coinbase book at `coinbase_read_ts` (one-sided book → drop, #4) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
-| **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection test | Pre |
-| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
-| **T10** `feat/producer-calibration` (Post) | Consume the **final reviewed seam list**; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; first real G1. **Acceptance: seam masking holds on the real stitch plan** | T9, backfilled data + reviewed stitch plan | E0.3/E0.5 artifacts + G1 result | **Post** (backfill unlock) |
+| **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; staged `dataset_id`/`build_id`/`venues`/`sources`; emit Coinbase-only plus matched Coinbase/Binance/combined manifest views; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection + feature-subset identity tests | Pre |
+| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; explicit `coinbase_only` / `cross_venue` source modes; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: Coinbase-only opens no Binance inputs; no surviving row crosses a seam; the three cross-venue arms have identical row/split/label/cost hashes; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + mode/matched-arm + determinism tests | Pre (synthetic seams) |
+| **T10** `feat/producer-calibration` (Post) | Consume the reviewed pilot seam list; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; G0-CB then matched G0-XV artifacts. Freeze April 2026 before its one-time pilot OOS read. Formal G1 is a later full-data run with a separate holdout. **Acceptance: seam masking holds on the real stitch plan and pilot arms share row/split/label/cost hashes** | T9, pilot backfilled data + reviewed stitch plan | E0.3/E0.5 artifacts + G0-CB/G0-XV results | **Post** (pilot backfill unlock) |
 
 ---
 
