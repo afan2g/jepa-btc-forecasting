@@ -727,8 +727,11 @@ def load_lake_cached_day(cache_root, *, table: str, exchange: str, symbol: str,
 
 
 def _slim_meta(meta: dict) -> dict:
-    """Report-sized copy of a replay meta: unbounded per-sample lists dropped/capped
-    (counts and hashes — computed over the FULL meta — are kept)."""
+    """Report-sized copy of a replay meta: unbounded per-sample lists dropped/capped.
+    The original hash over the FULL replay meta is preserved as `full_meta_hash`;
+    `report_hash` is RECOMPUTED over this slim view (including any fields attached
+    after the replay, e.g. `stream_stats`) so the artifact's advertised hash always
+    covers exactly the content it ships with."""
     m = dict(meta)
     m.pop("crossed_sample_ts", None)
     if "reseed_ts" in m:
@@ -738,6 +741,8 @@ def _slim_meta(meta: dict) -> dict:
         cov = dict(cov)
         cov["invalid_runs_idx"] = list(cov["invalid_runs_idx"])[:100]
         m["coverage"] = cov
+    m["full_meta_hash"] = m.pop("report_hash", None)
+    m["report_hash"] = hash_obj(_json_safe(m), exclude_keys=("report_hash",))
     return m
 
 

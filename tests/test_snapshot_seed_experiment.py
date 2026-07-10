@@ -887,6 +887,16 @@ class TestRunExperimentDay:
             assert arm["economics"] is None, name
             assert arm["prereg_pass_effective"] is False, name
 
+    def test_stream_arm_meta_hash_covers_stream_stats(self):
+        from eval.hashing import hash_obj
+        rep = self._run()
+        meta = rep["arms"]["coinapi_stream_L2"]["meta"]
+        assert "stream_stats" in meta
+        # the advertised meta hash must cover EVERYTHING in the meta (a corrupt
+        # stream sizing basis must change the hash); note the report meta is the
+        # _slim_meta view, whose hash is recomputed after slimming + stats
+        assert meta["report_hash"] == hash_obj(meta, exclude_keys=("report_hash",))
+
     def test_economics_verdict_attached_to_priced_arms(self):
         rep = self._run()
         assert rep["arms"]["coinapi_on_demand_L2"]["economics"] is not None
