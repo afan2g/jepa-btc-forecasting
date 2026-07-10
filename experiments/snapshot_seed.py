@@ -15,14 +15,18 @@ snapshot SOURCE swapped. Snapshot sources are emulated offline from full-day Coi
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from math import isfinite
 
 import numpy as np
 import pandas as pd
 
+from eval.hashing import hash_obj
 from recon.coinapi import L3Book, _iter_actions
-from recon.reseed import BookSnapshot, book_snapshot, classify_snapshot
+from recon.ingest import shared_engine_time_col
+from recon.reseed import (BookSnapshot, ReseedPolicy, book_snapshot, classify_snapshot,
+                          reconstruct_lake_l2_at_samples_seeded)
 
 
 def _chunks(frame_or_chunks):
@@ -148,6 +152,187 @@ def classify_candidate(snap: BookSnapshot, *, requested_ts: int,
             if abs(p * scale - round(p * scale)) > 1e-6:
                 return "off_tick"
     return "ok"
+
+
+def frame_replay_hash(frame: pd.DataFrame | None) -> str | None:
+    """Deterministic content hash of a reconstructed top-K frame (the replay hash).
+
+    Rows in `sample_ts` order, columns in a fixed canonical order (`sample_ts` first,
+    the rest sorted by name); numeric buffers hashed as int64/float64 bytes so the hash
+    is a function of logical content, not file bytes or column insertion order. Two
+    replays of the same inputs must produce the same hash — the determinism invariant
+    every arm report pins.
+    """
+    if frame is None:
+        return None
+    f = frame.sort_values("sample_ts").reset_index(drop=True)
+    cols = ["sample_ts"] + sorted(c for c in f.columns if c != "sample_ts")
+    h = hashlib.sha256()
+    for c in cols:
+        h.update(c.encode())
+        h.update(b"\x00")
+        if c == "sample_ts":
+            h.update(np.ascontiguousarray(f[c].to_numpy(np.int64)).tobytes())
+        else:
+            h.update(np.ascontiguousarray(f[c].to_numpy(np.float64)).tobytes())
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def seed_lake_replay(lake_df: pd.DataFrame, candidates, *, grid, k: int,
+                     acceptance: SnapshotAcceptance, reseed: bool = True,
+                     reseed_after_crossed_s: float = 2.0,
+                     engine: str = "python", price_scale: int | None = None,
+                     engine_time_col: str | None = None,
+                     frame_out: bool = True) -> tuple[pd.DataFrame | None, dict]:
+    """Seed/reseed the PRODUCTION Lake `book_delta_v2` replay from vendor snapshot
+    candidates, with the cross-vendor acceptance gate applied up front.
+
+    `candidates` is a list of `(BookSnapshot, provenance_dict)`; the requested time of
+    each candidate is `provenance["at_ts"]` when present (an extracted/requested
+    snapshot), else the snapshot's own stamp (a streamed candidate). Candidates failing
+    `classify_candidate` are recorded in the rejection ledger and NEVER injected;
+    accepted ones are handed unmodified to the production seeded replay
+    (`recon.reseed.reconstruct_lake_l2_at_samples_seeded`, or its native twin), which
+    re-validates them structurally — the experiment swaps only the snapshot SOURCE,
+    never the replay semantics. With zero accepted candidates the result is
+    byte-identical to the production cold start.
+
+    Returns `(frame, meta)`: the production replay meta plus the acceptance ledger,
+    `frame_hash` (replay hash) and `report_hash` (canonical-JSON meta hash).
+    """
+    ledger: dict = {"n_total": len(candidates), "n_accepted": 0,
+                    "accepted": [], "rejected": []}
+    accepted: list[BookSnapshot] = []
+    for snap, prov in candidates:
+        requested_ts = int(prov.get("at_ts", snap.ts))
+        reason = classify_candidate(snap, requested_ts=requested_ts, policy=acceptance)
+        entry = {"ts": int(snap.ts), "requested_ts": requested_ts,
+                 "levels": {"bids": len(snap.bids), "asks": len(snap.asks)},
+                 "provenance": dict(prov)}
+        if reason == "ok":
+            accepted.append(snap)
+            ledger["accepted"].append(entry)
+        else:
+            ledger["rejected"].append({**entry, "reason": reason})
+    ledger["n_accepted"] = len(accepted)
+
+    policy = ReseedPolicy(enabled=reseed,
+                          min_levels_per_side=acceptance.min_levels_per_side,
+                          reseed_after_crossed_s=reseed_after_crossed_s,
+                          max_spread_frac=acceptance.max_spread_frac)
+    etc = engine_time_col or shared_engine_time_col(lake_df)
+    if engine == "native":
+        from recon import native as _native
+        frame, meta = _native.reconstruct_lake_l2_at_samples_seeded_native(
+            lake_df, grid, k=k, engine_time_col=etc, snapshots=accepted or None,
+            policy=policy, frame_out=frame_out, price_scale=price_scale)
+    else:
+        frame, meta = reconstruct_lake_l2_at_samples_seeded(
+            lake_df, grid, k=k, engine_time_col=etc, snapshots=accepted or None,
+            policy=policy, frame_out=frame_out)
+    meta = dict(meta)
+    meta["engine"] = engine
+    meta["engine_time_col"] = etc
+    meta["acceptance"] = acceptance.as_dict()
+    meta["candidates"] = ledger
+    meta["frame_hash"] = frame_replay_hash(frame)
+    meta["report_hash"] = hash_obj(meta, exclude_keys=("report_hash",))
+    return frame, meta
+
+
+def _sustained_cross_trigger(frame: pd.DataFrame, *, trigger_ns: int,
+                             after_ts: int | None) -> int | None:
+    """First causally-observable reseed trigger in a reconstructed frame.
+
+    A trigger is `first_crossed_sample_ts + trigger_ns` for a run of CONSECUTIVE
+    crossed grid samples that is still crossed at the trigger time (a transient cross
+    that self-heals inside the window never triggers — the production
+    `reseed_after_crossed_s` semantics at grid resolution). Only triggers strictly
+    after `after_ts` qualify. Uses nothing later than the trigger time itself except
+    run persistence, which a live requester would observe by simply waiting.
+    """
+    f = frame.sort_values("sample_ts")
+    ts = f["sample_ts"].astype("int64").to_numpy()
+    bid = f["bid_0_price"].to_numpy(dtype="float64")
+    ask = f["ask_0_price"].to_numpy(dtype="float64")
+    crossed = np.isfinite(bid) & np.isfinite(ask) & (bid >= ask)
+    i, n = 0, len(ts)
+    while i < n:
+        if not crossed[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and crossed[j + 1]:
+            j += 1
+        trig = int(ts[i]) + int(trigger_ns)
+        if (after_ts is None or trig > after_ts) and int(ts[j]) >= trig:
+            return trig
+        i = j + 1
+    return None
+
+
+def on_demand_reseed_arm(lake_df: pd.DataFrame, provider, *, grid, k: int,
+                         acceptance: SnapshotAcceptance,
+                         trigger_after_crossed_s: float = 2.0, max_requests: int = 24,
+                         engine: str = "python", price_scale: int | None = None,
+                         engine_time_col: str | None = None
+                         ) -> tuple[pd.DataFrame | None, dict]:
+    """The ON-DEMAND strategy: request a vendor snapshot only when the Lake replay is
+    observably broken (book crossed continuously past the trigger window), exactly when
+    a live operator could have requested one.
+
+    `provider(requested_ts) -> (BookSnapshot, provenance)` emulates the vendor (offline:
+    an L3 as-of extraction from a full-day file we already own). Iterative fixed point:
+    replay with the snapshots injected so far, find the first sustained-crossing trigger
+    after the last injection, request a snapshot at that trigger, inject it if accepted,
+    repeat. Each iteration's trigger uses only state observable at the trigger time, so
+    the request sequence is exactly what a causal live system would have produced; the
+    request count is the arm's per-day vendor request cost.
+
+    Terminates on: no remaining trigger (`no_trigger`), the request budget
+    (`max_requests`), or a rejected/ineffective snapshot at a recurring trigger
+    (`no_progress` — never loops on a vendor that cannot help).
+    """
+    trigger_ns = int(trigger_after_crossed_s * 1e9)
+    injected: list[tuple[BookSnapshot, dict]] = []
+    request_log: list[dict] = []
+    requested_seen: set[int] = set()
+    terminated = None
+    frame = meta = None
+    while True:
+        frame, meta = seed_lake_replay(
+            lake_df, injected, grid=grid, k=k, acceptance=acceptance, reseed=True,
+            reseed_after_crossed_s=trigger_after_crossed_s, engine=engine,
+            price_scale=price_scale, engine_time_col=engine_time_col, frame_out=True)
+        last_injected_ts = max((sn.ts for sn, _ in injected), default=None)
+        trig = _sustained_cross_trigger(frame, trigger_ns=trigger_ns,
+                                        after_ts=last_injected_ts)
+        if trig is None:
+            terminated = "no_trigger"
+            break
+        if trig in requested_seen:
+            terminated = "no_progress"
+            break
+        if len(request_log) >= max_requests:
+            terminated = "max_requests"
+            break
+        snap, prov = provider(trig)
+        prov = {**prov, "at_ts": int(prov.get("at_ts", trig))}
+        reason = classify_candidate(snap, requested_ts=trig, policy=acceptance)
+        requested_seen.add(trig)
+        request_log.append({"requested_ts": int(trig), "snap_ts": int(snap.ts),
+                            "reason": reason, "injected": reason == "ok"})
+        if reason == "ok":
+            injected.append((snap, prov))
+    meta = dict(meta)
+    meta["on_demand"] = {"request_log": request_log, "terminated": terminated,
+                         "n_requests": len(request_log),
+                         "n_injected": sum(1 for r in request_log if r["injected"]),
+                         "trigger_after_crossed_s": float(trigger_after_crossed_s),
+                         "max_requests": int(max_requests)}
+    meta["report_hash"] = hash_obj(meta, exclude_keys=("report_hash",))
+    return frame, meta
 
 
 def coinapi_snapshot_at(chunks, *, day, at_ts: int, max_levels: int | None = None,

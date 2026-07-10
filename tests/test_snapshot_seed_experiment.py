@@ -232,3 +232,188 @@ class TestSnapshotsFromTopkFrame:
         snaps, _ = snapshots_from_topk_frame(_topk_frame(), max_levels=2,
                                              stride_ns=2 * NS)
         assert [sn.ts for sn in snaps] == [DAY_OPEN + s(0), DAY_OPEN + s(2)]
+
+
+# ---------------------------------------------------------------- seeded Lake replay arm
+def synthetic_lake_day():
+    """A degraded synthetic Lake `book_delta_v2` day whose repair is hand-checkable.
+
+    The clearing update for the 105.0 bid is MISSING from the stream (the §5a stranded-
+    level failure mode): asks later move down through it, so from t=200s the
+    reconstructed book is crossed (bid 105 >= ask 103) and STAYS crossed — only a
+    full-state snapshot reseed can drop the stranded level.
+    """
+    rows = [
+        # establish a 2-level book
+        dict(origin_time=DAY_OPEN + s(10), sequence_number=1, side_is_bid=True,
+             price=100.0, size=2.0),
+        dict(origin_time=DAY_OPEN + s(10), sequence_number=2, side_is_bid=True,
+             price=99.0, size=3.0),
+        dict(origin_time=DAY_OPEN + s(10), sequence_number=3, side_is_bid=False,
+             price=106.0, size=2.0),
+        dict(origin_time=DAY_OPEN + s(10), sequence_number=4, side_is_bid=False,
+             price=107.0, size=3.0),
+        # bid appears at 105 ... its size=0 clear is LOST upstream
+        dict(origin_time=DAY_OPEN + s(100), sequence_number=5, side_is_bid=True,
+             price=105.0, size=5.0),
+        # asks walk down through the stranded bid -> crossed from here on
+        dict(origin_time=DAY_OPEN + s(200), sequence_number=6, side_is_bid=False,
+             price=103.0, size=4.0),
+        dict(origin_time=DAY_OPEN + s(210), sequence_number=7, side_is_bid=False,
+             price=104.0, size=1.0),
+        # later ordinary activity (keeps the day alive after the repair point)
+        dict(origin_time=DAY_OPEN + s(400), sequence_number=8, side_is_bid=True,
+             price=101.0, size=1.5),
+    ]
+    return pd.DataFrame(rows)
+
+
+def _true_state_snapshot(ts):
+    """The TRUE book at `ts`>=210s (what a trusted vendor snapshot would deliver):
+    no stranded 105 bid, asks at 103/104 gone-and-replaced view kept simple."""
+    from recon.reseed import book_snapshot
+    return book_snapshot(ts, bids=((100.0, 2.0), (99.0, 3.0)),
+                         asks=((103.0, 4.0), (104.0, 1.0)))
+
+
+GRID = [DAY_OPEN + s(i * 30) for i in range(20)]  # 30 s grid over the first 10 min
+
+
+class TestSeedLakeReplay:
+    def _acceptance(self, **kw):
+        from experiments.snapshot_seed import SnapshotAcceptance
+        defaults = dict(min_levels_per_side=2, max_age_s=600.0, tick_scale=100)
+        defaults.update(kw)
+        return SnapshotAcceptance(**defaults)
+
+    def _run(self, candidates, **kw):
+        from experiments.snapshot_seed import seed_lake_replay
+        return seed_lake_replay(synthetic_lake_day(), candidates, grid=GRID, k=2,
+                                acceptance=self._acceptance(), **kw)
+
+    def test_rejected_candidates_are_never_injected(self):
+        from recon.reseed import book_snapshot
+        crossed = book_snapshot(DAY_OPEN + s(300), bids=((105.0, 1.0), (99.0, 1.0)),
+                                asks=((103.0, 1.0), (104.0, 1.0)))
+        frame, meta = self._run([(crossed, {"origin": "test"})])
+        cold, cold_meta = self._run([])
+        assert meta["candidates"]["n_accepted"] == 0
+        assert meta["candidates"]["rejected"][0]["reason"] == "crossed"
+        assert meta["frame_hash"] == cold_meta["frame_hash"]  # byte-identical cold path
+
+    def test_stale_candidate_rejected_by_requested_ts(self):
+        snap = _true_state_snapshot(DAY_OPEN + s(300))
+        prov = {"at_ts": DAY_OPEN + s(1200)}  # requested 15 min after the state's stamp
+        frame, meta = self._run([(snap, prov)], )
+        assert meta["candidates"]["n_accepted"] == 0
+        assert meta["candidates"]["rejected"][0]["reason"] == "stale"
+
+    def test_pre_seed_samples_identical_to_cold_start(self):
+        snap = _true_state_snapshot(DAY_OPEN + s(300))
+        seeded, _ = self._run([(snap, {})])
+        cold, _ = self._run([])
+        pre = [t for t in GRID if t < DAY_OPEN + s(300)]
+        pd.testing.assert_frame_equal(
+            seeded[seeded["sample_ts"].isin(pre)].reset_index(drop=True),
+            cold[cold["sample_ts"].isin(pre)].reset_index(drop=True))
+
+    def test_seed_repairs_the_stranded_crossing(self):
+        snap = _true_state_snapshot(DAY_OPEN + s(300))
+        seeded, meta = self._run([(snap, {})])
+        cold, cold_meta = self._run([])
+        # cold: crossed from 200s onward; seeded: uncrossed from 300s onward
+        post = seeded[seeded["sample_ts"] >= DAY_OPEN + s(300)]
+        assert (post["bid_0_price"] < post["ask_0_price"]).all()
+        assert meta["crossed_samples"] < cold_meta["crossed_samples"]
+        assert meta["seed_accepted"] is True
+
+    def test_same_ts_delta_applies_before_snapshot(self):
+        # A delta at EXACTLY the snapshot ts must be overwritten by the snapshot
+        # (authoritative full state) — the production _merge_time_ordered rule.
+        snap = _true_state_snapshot(DAY_OPEN + s(400))  # same ts as the seq=8 delta
+        seeded, _ = self._run([(snap, {})])
+        at = seeded[seeded["sample_ts"] == DAY_OPEN + s(420)].iloc[0]
+        # snapshot state has bid_0 100.0; the same-ts delta (bid 101@1.5) was overwritten
+        assert at["bid_0_price"] == 100.0
+
+    def test_deterministic_replay_hash(self):
+        snap = _true_state_snapshot(DAY_OPEN + s(300))
+        _, m1 = self._run([(snap, {})])
+        _, m2 = self._run([(snap, {})])
+        assert m1["frame_hash"] == m2["frame_hash"]
+        assert m1["report_hash"] == m2["report_hash"]
+
+    def test_ledger_carries_provenance_and_acceptance(self):
+        snap = _true_state_snapshot(DAY_OPEN + s(300))
+        _, meta = self._run([(snap, {"vendor": "coinapi", "method": "l3_replay_as_of"})])
+        led = meta["candidates"]
+        assert led["n_total"] == 1 and led["n_accepted"] == 1
+        acc = led["accepted"][0]
+        assert acc["ts"] == DAY_OPEN + s(300)
+        assert acc["provenance"]["vendor"] == "coinapi"
+        assert meta["acceptance"] == self._acceptance().as_dict()
+
+
+# ------------------------------------------------------------------- on-demand reseeding
+def _true_state_provider(requested_ts):
+    """Emulated vendor: returns the TRUE book state as of `requested_ts` (age 0)."""
+    snap = _true_state_snapshot(requested_ts)
+    return snap, {"vendor": "synthetic", "at_ts": requested_ts}
+
+
+class TestOnDemandReseedArm:
+    def _acceptance(self):
+        from experiments.snapshot_seed import SnapshotAcceptance
+        return SnapshotAcceptance(min_levels_per_side=2, max_age_s=600.0, tick_scale=100)
+
+    def _run(self, provider, **kw):
+        from experiments.snapshot_seed import on_demand_reseed_arm
+        defaults = dict(grid=GRID, k=2, acceptance=self._acceptance(),
+                        trigger_after_crossed_s=30.0, max_requests=8)
+        defaults.update(kw)
+        return on_demand_reseed_arm(synthetic_lake_day(), provider, **defaults)
+
+    def test_single_trigger_repairs_the_day_with_one_request(self):
+        frame, meta = self._run(_true_state_provider)
+        log = meta["on_demand"]["request_log"]
+        assert len(log) == 1
+        # crossing is first observable at the 210 s sample; the request fires only after
+        # the book has been crossed for the full trigger window (no future peeking).
+        assert log[0]["requested_ts"] == DAY_OPEN + s(240)
+        assert log[0]["injected"] is True
+        post = frame[frame["sample_ts"] >= DAY_OPEN + s(240)]
+        assert (post["bid_0_price"] < post["ask_0_price"]).all()
+
+    def test_no_requests_when_never_crossed(self):
+        clean = synthetic_lake_day().iloc[:4]  # only the clean 2-level establishment
+        from experiments.snapshot_seed import on_demand_reseed_arm
+        frame, meta = on_demand_reseed_arm(clean, _true_state_provider, grid=GRID, k=2,
+                                           acceptance=self._acceptance(),
+                                           trigger_after_crossed_s=30.0, max_requests=8)
+        assert meta["on_demand"]["request_log"] == []
+        assert meta["on_demand"]["terminated"] == "no_trigger"
+
+    def test_max_requests_bounds_the_loop(self):
+        frame, meta = self._run(_true_state_provider, max_requests=0)
+        assert meta["on_demand"]["request_log"] == []
+        assert meta["on_demand"]["terminated"] == "max_requests"
+
+    def test_rejected_snapshot_stops_without_injection(self):
+        from recon.reseed import book_snapshot
+
+        def bad_provider(requested_ts):
+            snap = book_snapshot(requested_ts, bids=((105.0, 1.0), (99.0, 1.0)),
+                                 asks=((103.0, 1.0), (104.0, 1.0)))  # crossed
+            return snap, {"vendor": "synthetic", "at_ts": requested_ts}
+
+        frame, meta = self._run(bad_provider)
+        log = meta["on_demand"]["request_log"]
+        assert len(log) == 1
+        assert log[0]["injected"] is False and log[0]["reason"] == "crossed"
+        assert meta["on_demand"]["terminated"] == "no_progress"
+
+    def test_deterministic_across_runs(self):
+        _, m1 = self._run(_true_state_provider)
+        _, m2 = self._run(_true_state_provider)
+        assert m1["frame_hash"] == m2["frame_hash"]
+        assert m1["on_demand"]["request_log"] == m2["on_demand"]["request_log"]
