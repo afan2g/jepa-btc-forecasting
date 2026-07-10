@@ -418,4 +418,11 @@ def test_score_requires_declared_targets(tmp_path, g0_pipeline):
     hidden["target_cols"] = ["y_fwd_bps"]
     with pytest.raises(ValueError, match="declare exactly"):
         _score(tmp_path, g0_pipeline, holdout_manifest=hidden)
+    # ... and the holdout manifest's single target venue must be Coinbase BTC-USD
+    wrong_venue = copy.deepcopy(w["holdout"]["arms"][arm]["manifest"])
+    for v in wrong_venue["venues"]:
+        if v.get("role") == "target":
+            v["symbol"] = "ETH-USD"
+    with pytest.raises(ValueError, match="exactly one target venue COINBASE/BTC-USD"):
+        _score(tmp_path, g0_pipeline, holdout_manifest=wrong_venue)
     assert _load(tmp_path, g0_pipeline)["state"] == "validated"

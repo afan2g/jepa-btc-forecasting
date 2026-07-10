@@ -21,6 +21,7 @@ from eval.consumption import (STATE_SCORED, STATE_VALIDATED, STATE_VALIDATION_FA
 from eval.cost import net_pnl, weighted_sharpe
 from eval.freeze import verify_freeze
 from eval.hashing import canonical_row_order, hash_obj, matrix_content_hash
+from eval.g0 import _require_expected_target
 from eval.manifest import feature_list, target_list, validate_frame
 from eval.runner import BASELINE_TARGETS
 from eval.matrix import RESERVED, validate_matrix
@@ -93,6 +94,9 @@ def preflight_holdout_inputs(freeze_artifact: dict, *, contract: dict,
             raise ValueError(f"the {side} manifest must declare exactly "
                              f"{sorted(BASELINE_TARGETS)} as target_cols (the outcomes "
                              f"the scorer consumes); it declares {sorted(targets)}")
+        # Same pinned target venue as every G0 path: the one-time April score must be
+        # against Coinbase BTC-USD labels/costs, never a substituted target market.
+        _require_expected_target(man, f"the {side} manifest")
     frozen_dev_manifest = freeze_artifact["sources"]["arm_manifests"][winner["arm"]]
     if hash_obj(dev_manifest) != frozen_dev_manifest:
         raise ValueError(f"dev manifest is not the frozen {winner['arm']!r} arm build "
