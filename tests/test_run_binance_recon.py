@@ -517,6 +517,27 @@ def test_book_stride_ms_recorded_and_validated(tmp_path):
     assert run_cli(tmp_path, raw, "--book-stride-ms", "0")[0] == rbr.SETUP_ERROR_EXIT
 
 
+def test_settings_change_invalidates_resume(tmp_path):
+    # A rerun with a different reconstruction contract (--k / --grid-s / policy) must REBUILD the
+    # topk unit — never silently reuse an output produced under the old settings. Passthrough
+    # tables are contract-independent (schema version only) and stay done.
+    raw = write_store(tmp_path)
+    rc1, out, rep = run_cli(tmp_path, raw)                       # k=2, hourly grid
+    assert rc1 == 0
+    rc2, _, _ = run_cli(tmp_path, raw, "--k", "3")               # argparse last-wins
+    assert rc2 == 0
+    report = read_report(rep)
+    assert report["counts"]["ok"] == 1 and report["counts"]["skip"] == 4
+    frame = read_parquet(outpath(out, "topk_l2"))
+    assert "bid_2_price" in frame.columns                        # rebuilt at k=3
+    rc3, _, _ = run_cli(tmp_path, raw, "--k", "3", "--grid-s", "1800")
+    assert rc3 == 0
+    assert read_report(rep)["counts"]["ok"] == 1                 # grid change rebuilds too
+    assert len(read_parquet(outpath(out, "topk_l2"))) == 48
+    rc4, _, _ = run_cli(tmp_path, raw, "--k", "3", "--grid-s", "1800")
+    assert read_report(rep)["counts"]["skip"] == 5               # same contract => all done
+
+
 def test_missing_pyarrow_is_setup_error_and_never_revokes_outputs(tmp_path, monkeypatch):
     # pyarrow is an optional extra imported lazily by the workers: a missing/broken install must
     # be a SETUP failure (exit 2) before any unit runs — never a per-unit data `error` that

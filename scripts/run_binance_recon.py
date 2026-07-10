@@ -433,6 +433,20 @@ def raw_input_identities(u: Unit, cfg: RunConfig) -> dict:
         lb.raw_parquet_path(cfg.raw_root, u.feed, u.exchange, u.symbol, u.day))}
 
 
+def unit_settings(u: Unit, cfg: RunConfig) -> dict:
+    """The output-contract settings a prior verdict must have been produced under to stay valid
+    on resume: schema version for every output, plus the reconstruction contract (k, grid,
+    seed thinning, seed/reseed policy, thresholds) for topk units — a rerun with different
+    settings must REBUILD, never silently reuse an output built under the old contract. The
+    engine is deliberately excluded: native and Python are conformance-pinned to identical
+    outputs, so switching engines does not invalidate a day."""
+    s = {"schema_version": lb.PROCESSED_SCHEMA_VERSION[u.output]}
+    if u.feed == "book_delta_v2":
+        s.update(k=cfg.k, grid_ms=cfg.grid_ms, book_stride_ms=cfg.book_stride_ms,
+                 policy=cfg.policy.as_dict(), thresholds=cfg.thresholds.as_dict())
+    return s
+
+
 def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
     """Resume policy — the MANIFEST verdict is consulted first, the output file second, so a
     published parquet is trusted only when its `ok` record exists (a crash between the atomic
@@ -440,7 +454,8 @@ def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
     instead of masquerading as done). A unit is done iff its last verdict is terminal for its feed
     class AND the raw inputs that produced the verdict are UNCHANGED (`raw_inputs` identities —
     so a Stage-1 in-place refresh, a seed partition appearing/being refilled, or a raw partition
-    vanishing all re-run the unit):
+    vanishing all re-run the unit) AND the verdict was produced under the SAME output contract
+    (`unit_settings` — k/grid/stride/policy/thresholds/schema version):
 
       * `ok` — additionally requires the final parquet to still exist (a deleted output re-runs);
       * `degraded` / `inconclusive` — recorded verdicts, done while their inputs are unchanged;
@@ -466,6 +481,8 @@ def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
             return False   # a required hole stays pending — resume must keep exiting 3
     elif status not in ("degraded", "inconclusive"):
         return False       # error or unknown status — always re-run
+    if any(rec.get(key) != value for key, value in unit_settings(u, cfg).items()):
+        return False       # produced under a different contract — rebuild, never reuse
     return rec.get("raw_inputs") == raw_input_identities(u, cfg)
 
 
