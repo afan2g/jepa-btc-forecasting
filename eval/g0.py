@@ -29,7 +29,7 @@ import pandas as pd
 
 from eval.baseline import CONFIGS, evaluate_config
 from eval.hashing import canonical_row_order, hash_obj, matrix_content_hash, split_hash
-from eval.ledger import TrialLedger, identity_hash, trial_identity
+from eval.ledger import TRIAL_PROTOCOLS, TrialLedger, identity_hash, trial_identity
 from eval.manifest import feature_list, target_list, validate_frame
 from eval.matrix import RESERVED, validate_matrix
 from eval.partition import contract_hash, require_binding, validate_development_span
@@ -446,9 +446,16 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
                                  "explicitly")
 
     ledger = ledger if ledger is not None else TrialLedger()
-    n_imported = 0
+    # n_imported counts the TRIAL entries carried in from the supplied prior histories
+    # (deduplicated, verdict entries excluded) — NOT how many were newly inserted, which
+    # would report 0 on an idempotent rerun over an already-populated ledger and change
+    # the frozen evidence hash.
+    imported_ids: set = set()
     for prior in prior_ledgers:
-        n_imported += ledger.import_history(prior)
+        ledger.import_history(prior)
+        imported_ids.update(e["identity_sha256"] for e in prior.entries()
+                            if e["identity"]["protocol"] in TRIAL_PROTOCOLS)
+    n_imported = len(imported_ids)
 
     preps = [_prepare_development_input(a["matrix"], a["manifest"], contract,
                                         arm=a["name"]) for a in arms]

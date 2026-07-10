@@ -129,12 +129,21 @@ def test_binding_drop_count_mismatch_rejected():
         require_binding(man, c, "development")
 
 
-def test_binding_undeclared_horizon_rejected():
-    c = _contract()
-    man = _manifest(c)
-    man["horizons"] = {"10s": H10, "60s": 60_000_000_000}
-    with pytest.raises(ValueError, match="not declared identically"):
-        require_binding(man, c, "development")
+def test_binding_requires_exact_horizon_map():
+    """Both directions: an extra rung is undeclared in the contract, and a DROPPED rung
+    would shrink the registered trial/PBO scope while echoing the full drop counts."""
+    two = make_g0_contract(horizons={"10s": H10, "60s": 60_000_000_000}, guard_ns=GUARD,
+                           drop_counts={"development": {"10s": 0, "60s": 0},
+                                        "holdout": {"10s": 0, "60s": 0}})
+    man = _manifest(_contract())
+    man["horizons"] = {"10s": H10, "60s": 60_000_000_000}       # superset of contract
+    with pytest.raises(ValueError, match="exactly match"):
+        require_binding(man, _contract(), "development")
+    man2 = make_g0_manifest("coinbase_only", G0_CB_FEATURES, contract=two,
+                            partition="development", dataset_id="d", build_id="b")
+    man2["horizons"] = {"10s": H10}                             # dropped the 60s rung
+    with pytest.raises(ValueError, match="exactly match"):
+        require_binding(man2, two, "development")
 
 
 def test_world_drop_counts_reconcile_to_generator():

@@ -239,6 +239,19 @@ def test_armwise_false_pass_is_caught_by_unified_ledger():
     assert bn_dsrs[0] < solo_dsr and bn_dsrs[0] < 0.95
 
 
+def test_rerun_on_populated_ledger_is_idempotent(g0_pipeline):
+    """Codex PR#60 round-8: n_imported_trials counts the supplied prior histories
+    deterministically (dedup, verdicts excluded) — a rerun over the already-populated
+    ledger reproduces the identical dev result and evidence hash, not
+    n_imported_trials=0."""
+    w = g0_pipeline["world"]
+    again = run_g0xv_development(_arms(w), w["contract"], gate=g0_pipeline["xv_gate"],
+                                 ledger=g0_pipeline["led_xv"],
+                                 prior_ledgers=[g0_pipeline["led_cb"]])
+    assert again["ledger"]["n_imported_trials"] == 4
+    assert hash_obj(again) == hash_obj(g0_pipeline["res_xv"])
+
+
 def test_dev_result_and_freeze_are_invariant_to_holdout_content(g0_pipeline):
     """Selection is a pure function of development inputs: re-running the unified study
     and rebuilding the freeze artifact (the holdout is never an input) reproduces the

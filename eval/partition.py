@@ -154,11 +154,12 @@ def require_binding(manifest: dict, contract: dict, expected_partition: str) -> 
         raise ValueError(f"manifest boundary_drop_counts {b['boundary_drop_counts']} do not "
                          f"reconcile to the contract's {expected_partition} counts "
                          f"{expected_counts}")
-    bad_h = {t: ns for t, ns in manifest["horizons"].items()
-             if contract["horizons"].get(t) != ns}
-    if bad_h:
-        raise ValueError(f"manifest horizons not declared identically in the partition "
-                         f"contract: {bad_h}")
+    # EXACT horizon-map equality, both directions: a build that silently drops a
+    # contract rung (e.g. 60s) would shrink the registered trial/PBO scope while still
+    # echoing the full drop counts; the protocol's horizon map is pinned.
+    if manifest["horizons"] != contract["horizons"]:
+        raise ValueError(f"manifest horizons {manifest['horizons']} must exactly match "
+                         f"the partition contract horizons {contract['horizons']}")
     return b
 
 
