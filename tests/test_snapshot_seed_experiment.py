@@ -418,6 +418,38 @@ class TestOnDemandReseedArm:
         assert m1["frame_hash"] == m2["frame_hash"]
         assert m1["on_demand"]["request_log"] == m2["on_demand"]["request_log"]
 
+    def test_retriggers_when_an_injection_is_immediately_recrossed(self):
+        # An accepted injection whose repair is undone WITHIN the same grid interval
+        # (a re-stranding delta right after the off-grid trigger) never splits the
+        # crossed run in the sampled frame. The arm must re-trigger one full window
+        # after the injection — a live operator re-observes persistent crossing and
+        # requests again — not terminate `no_trigger` on a still-crossed day.
+        import pandas as pd
+        recross = pd.concat([
+            synthetic_lake_day(),
+            pd.DataFrame([dict(origin_time=DAY_OPEN + s(256), sequence_number=9,
+                               side_is_bid=True, price=105.0, size=5.0)]),
+        ], ignore_index=True)
+        from experiments.snapshot_seed import on_demand_reseed_arm
+        # 45 s trigger on the 30 s grid: first trig = 210+45 = 255 (off-grid); the
+        # 256 s delta re-strands bid 105 before the 270 s sample.
+        frame, meta = on_demand_reseed_arm(
+            recross, _true_state_provider, grid=GRID, k=2,
+            acceptance=self._acceptance(), trigger_after_crossed_s=45.0,
+            max_requests=8)
+        log = meta["on_demand"]["request_log"]
+        # 255: first trigger (repair undone at 256 within the same interval);
+        # 300: window restarted at the injection — the production replay defers this
+        #      injection by its stricter EVENT-time clock (crossed since the 256 s
+        #      delta = 44 s < 45 s at arrival), so crossing persists;
+        # 345: next restart — applied, day repaired from the 360 s sample onward.
+        assert [r["requested_ts"] for r in log] == [DAY_OPEN + s(255),
+                                                    DAY_OPEN + s(300),
+                                                    DAY_OPEN + s(345)]
+        assert meta["on_demand"]["terminated"] == "no_trigger"
+        post = frame[frame["sample_ts"] >= DAY_OPEN + s(360)]
+        assert (post["bid_0_price"] < post["ask_0_price"]).all()
+
     def test_early_stamped_snapshot_is_injected_at_the_trigger_not_before(self):
         # A provider may return state STAMPED at an earlier cadence point (e.g. the
         # last stored grid second). Injecting it at that earlier stamp would repair

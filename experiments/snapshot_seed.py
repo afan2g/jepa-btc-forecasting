@@ -906,8 +906,13 @@ def _sustained_cross_trigger(frame: pd.DataFrame, *, trigger_ns: int,
     crossed grid samples that is still crossed at the trigger time (a transient cross
     that self-heals inside the window never triggers — the production
     `reseed_after_crossed_s` semantics at grid resolution). Only triggers strictly
-    after `after_ts` qualify. Uses nothing later than the trigger time itself except
-    run persistence, which a live requester would observe by simply waiting.
+    after `after_ts` (the last injection) qualify; for a run that STRADDLES
+    `after_ts` — an injection whose repair was undone within the same grid interval,
+    so the sampled run never split — the trigger clock restarts at the injection
+    (`after_ts + trigger_ns`): a live operator re-observes crossing persisting
+    through a full window after their repair attempt and requests again. Uses
+    nothing later than the trigger time itself except run persistence, which a live
+    requester would observe by simply waiting.
     """
     f = frame.sort_values("sample_ts")
     ts = f["sample_ts"].astype("int64").to_numpy()
@@ -922,7 +927,10 @@ def _sustained_cross_trigger(frame: pd.DataFrame, *, trigger_ns: int,
         j = i
         while j + 1 < n and crossed[j + 1]:
             j += 1
-        trig = int(ts[i]) + int(trigger_ns)
+        start = int(ts[i])
+        if after_ts is not None and start <= after_ts:
+            start = int(after_ts)  # run straddles the injection: window restarts there
+        trig = start + int(trigger_ns)
         if (after_ts is None or trig > after_ts) and int(ts[j]) >= trig:
             return trig
         i = j + 1
