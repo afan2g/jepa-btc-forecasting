@@ -1159,8 +1159,12 @@ Other open items:
       run**):* streaming/atomic/resumable per-`(feed,exchange,symbol,day)` download to the normalized
       ZSTD Parquet raw store (incl. the `book` seed product), retry/backoff, quota gate before any
       transfer, and the 0/2/3/4 exit-code contract — fully unit-tested with injected fake
-      readers/listers (`tests/test_download_lake_binance.py`). Still open: live metadata/schema probes
-      + one-day Phase-2 validation, the Stage-2 recon runner (`scripts/run_binance_recon.py`),
+      readers/listers (`tests/test_download_lake_binance.py`).
+      *Stage-2 recon runner landed 2026-07-09 (`scripts/run_binance_recon.py`, **offline only — no
+      live run**):* local raw store → certified top-K L2 + normalized trades/funding/OI/liquidations,
+      seed-source crossed-rate gate (>5% → `inconclusive`, no certified output), fail-closed
+      publishing, resumable processed manifest; Python oracle now, native pending tick-scale
+      verification (Q1). Still open: live metadata/schema probes + one-day Phase-2 validation,
       Binance tick-scale verification, and the staged historical archive pull.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
 
