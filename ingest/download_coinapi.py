@@ -262,9 +262,12 @@ def write_parquet(chunks, dest_tmp, *, schema=SCHEMA, to_table_fn=to_table,
     return rows, os.path.getsize(dest_tmp)
 
 
-def manifest_append(out_root, rec):
+def manifest_append(out_root, rec, sync=False):
     with open(os.path.join(out_root, "_manifest.jsonl"), "a") as f:
         f.write(json.dumps(rec) + "\n")
+        if sync:                      # billing-ledger rows must survive a kill/reboot
+            f.flush()
+            os.fsync(f.fileno())
 
 
 def now_iso():
@@ -433,6 +436,15 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
         # delivering) these bytes — commit the projection even if header validation / parsing /
         # publishing fails afterwards. A GET that raises before a body exists never reaches
         # here, so a transient 5xx/NoSuchKey neither consumes the budget nor reports billed GB.
+        # The commitment is PERSISTED (fsync'd append-only ledger row) before streaming
+        # continues: a kill/reboot between delivery and the execution report must not let the
+        # next run re-bill from a zeroed budget past --approve-usd.
+        manifest_append(args.out, {"kind": "billed_get", "dt": day, "product": product,
+                                   "key": key, "src_bytes": src_bytes,
+                                   "projected_usd": (round(projected, 6)
+                                                     if projected is not None else None),
+                                   "manifest_sha256": manifest_sha256, "ts": now_iso()},
+                        sync=True)
         if budget is not None:
             budget["spent_usd"] += projected
         res["billed_bytes"] = src_bytes
@@ -520,6 +532,28 @@ def _live_s3_factory():
     return s3, ff.discover_bucket(s3)
 
 
+def _ledger_billed_usd(out_root, manifest_sha256) -> float:
+    """Sum of the durable billed-GET ledger rows for THIS manifest fingerprint — what the vendor
+    has already been asked to deliver across ALL prior runs (successful, failed, or interrupted),
+    so --approve-usd caps cumulative spend per manifest, not per process lifetime."""
+    path = os.path.join(out_root, "_manifest.jsonl")
+    if not os.path.exists(path):
+        return 0.0
+    total = 0.0
+    with open(path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue                 # a torn final line (kill mid-append) is not billing
+            if (isinstance(rec, dict) and rec.get("kind") == "billed_get"
+                    and rec.get("manifest_sha256") == manifest_sha256):
+                v = rec.get("projected_usd")
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    total += float(v)
+    return total
+
+
 QUOTA_ABORT_EXIT = 5   # manifest-mode quota abort — distinct from input-error 2 / refusal 3 /
                        # gate 4 (range mode keeps its legacy exit 2 on quota)
 
@@ -588,7 +622,7 @@ def run_manifest_mode(args, s3_factory=None) -> int:
     budget = {"approve_usd": approve, "spent_usd": 0.0,
               "rates": {bf.PRODUCT_BOOK: float(cm["book_usd_per_gb"]),
                         bf.PRODUCT_TRADES: float(cm["trades_usd_per_gb"])}}
-    results, quota_hit = [], False
+    results, quota_hit, prior_billed = [], False, 0.0
     if plan["units"]:
         days = sorted({u["day"] for u in plan["units"]})
         check_backfill_gate(dt.date.fromisoformat(days[0]), dt.date.fromisoformat(days[-1]),
@@ -596,6 +630,12 @@ def run_manifest_mode(args, s3_factory=None) -> int:
         s3, bucket = (s3_factory or _live_s3_factory)()
         os.makedirs(args.out, exist_ok=True)
         cleanup_tmp(args.out)
+        # the spend cap is cumulative per manifest: seed the budget from the durable billed-GET
+        # ledger, so interrupted/failed prior runs (already billed by the vendor) count
+        prior_billed = _ledger_billed_usd(args.out, manifest_sha)
+        budget["spent_usd"] = prior_billed
+        if prior_billed:
+            print(f"  prior billed spend for this manifest (ledger): ${prior_billed:.2f}")
         # durable, append-only record of the run authorization: report files at --report-out are
         # replaced per run, so the spend evidence for EVERY run (incl. deliberate --overwrite
         # re-bills) must survive somewhere the next run cannot clobber
@@ -624,7 +664,8 @@ def run_manifest_mode(args, s3_factory=None) -> int:
         plan, results, generated_utc=generated,
         spend={"approve_usd": approve, "spend_evidence": args.spend_evidence,
                "allow_backfill": bool(args.allow_backfill),
-               "overwrite": bool(args.overwrite)})
+               "overwrite": bool(args.overwrite),
+               "prior_billed_usd": round(prior_billed, 6)})
     bf.write_json_atomic(report, args.report_out)
     rec = report["reconciliation"]
     print(f"\nDone. planned={rec['planned']} ok={rec['ok']} done_prior={rec['done_prior']} "

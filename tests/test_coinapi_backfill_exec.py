@@ -589,6 +589,41 @@ def test_failed_get_is_not_billed_but_delivered_bytes_are(ready):
     assert rep["reconciliation"]["refused_budget"] == 0
 
 
+def test_billing_ledger_survives_run_boundaries(ready):
+    # billed GETs are persisted to the append-only jsonl at the body-delivery moment: a later run
+    # initializes its budget from the ledger, so repeated interrupted/failed retries can never
+    # cumulatively re-bill past --approve-usd even though each single run stays under it
+    class InflatedS3(FakeS3):
+        def list_objects_v2(self, Bucket, Prefix, **kw):
+            resp = super().list_objects_v2(Bucket, Prefix, **kw)
+            if "20250102" in Prefix:
+                for o in resp["Contents"]:
+                    o["Size"] = 4_000_000_000          # $4 projected at $1/GB
+            return resp
+
+    # run 1: the 01-02 body IS delivered ($4 billed to the ledger), then fails post-GET
+    # (size mismatch vs the lying LIST) — no state, no output
+    fake = InflatedS3(default_objects())
+    rc = run_cli(ready, execute_args(ready, approve="5.69"),
+                 s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 1
+    ledger = [json.loads(x) for x in (ready["out"] / "_manifest.jsonl").read_text().splitlines()
+              if '"billed_get"' in x]
+    assert any(r["dt"] == "2025-01-02" and r["manifest_sha256"] == ready["sha"]
+               and r["projected_usd"] >= 4.0 for r in ledger)
+    # run 2, same cap: prior $4 is already committed, so retrying 01-02 (another $4) must be
+    # refused BEFORE any GET — without the ledger this run would start from $0 and re-bill
+    fake2 = InflatedS3(default_objects())
+    rc = run_cli(ready, execute_args(ready, approve="5.69"),
+                 s3_factory=lambda: (fake2, "coinapi"))
+    assert rc == 1
+    assert not any(c[0] == "get" and "20250102" in c[1] for c in fake2.calls)
+    rep = _report(ready)
+    by_key = {(u["product"], u["day"]): u for u in rep["units"]}
+    assert by_key[("limitbook_full", "2025-01-02")]["status"] == "refused_budget"
+    assert rep["spend"]["prior_billed_usd"] >= 4.0
+
+
 def test_overwrite_rerun_is_recorded_in_spend_evidence(ready):
     fake = FakeS3(default_objects())
     assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0

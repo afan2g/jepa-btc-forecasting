@@ -47,6 +47,12 @@ SEGMENT_SOURCES = ("lake", "coinapi", "excluded")
 SEAM_POLICY_KEYS = ("seam_guard_s", "warmup_consecutive", "fill_min_s", "min_lake_segment_s",
                     "span_invalid_max", "exclude_labels_crossing_seam",
                     "exclude_features_crossing_seam")
+# Contract FLOORS for the downstream seam-masking knobs (pinned to DEFAULT_SEAM_POLICY values,
+# contract-tested): seam_guard_s equals the longest label horizon (60s ladder), so any smaller
+# guard lets a label window lean on seam-adjacent book settling; warmup matches the parity gate.
+# Larger values only mask more — always safe.
+SEAM_GUARD_MIN_S = 60.0
+WARMUP_MIN = 3
 NS_PER_S = 1_000_000_000
 DAY_NS = 86_400 * NS_PER_S
 SECTION_KEYS = ("full_day_book_fills", "partial_day_book_fills", "trade_fills",
@@ -310,12 +316,18 @@ def _seam_policy_issues(day: str, policy: dict) -> list:
                 f"missing={sorted(set(SEAM_POLICY_KEYS) - set(policy))}:"
                 f"extra={sorted(set(policy) - set(SEAM_POLICY_KEYS))}"]
     issues = []
-    for k in ("seam_guard_s", "fill_min_s", "min_lake_segment_s"):
+    for k in ("fill_min_s", "min_lake_segment_s"):
         if not _is_num(policy[k]) or float(policy[k]) <= 0:
             issues.append(f"seam_policy_bad_value:{day}:{k}:{policy[k]!r}")
-    if not _is_num(policy["warmup_consecutive"]) or float(policy["warmup_consecutive"]) < 1:
+    # the two downstream-masking knobs get pinned contract FLOORS, not just positivity: a
+    # sub-horizon guard or a shortened warmup weakens the seam masking the reviewed plan promises
+    if not _is_num(policy["seam_guard_s"]) or float(policy["seam_guard_s"]) < SEAM_GUARD_MIN_S:
+        issues.append(f"seam_policy_bad_value:{day}:seam_guard_s:{policy['seam_guard_s']!r} "
+                      f"(< contract floor {SEAM_GUARD_MIN_S})")
+    if (not _is_num(policy["warmup_consecutive"])
+            or float(policy["warmup_consecutive"]) < WARMUP_MIN):
         issues.append(f"seam_policy_bad_value:{day}:warmup_consecutive:"
-                      f"{policy['warmup_consecutive']!r}")
+                      f"{policy['warmup_consecutive']!r} (< contract floor {WARMUP_MIN})")
     if (not _is_num(policy["span_invalid_max"])
             or not 0 <= float(policy["span_invalid_max"]) < 1):
         issues.append(f"seam_policy_bad_value:{day}:span_invalid_max:"
@@ -683,6 +695,7 @@ def build_execution_report(plan: dict, results: list, *, spend: dict, generated_
                   "spend_evidence": spend.get("spend_evidence"),
                   "allow_backfill": spend.get("allow_backfill"),
                   "overwrite": spend.get("overwrite"),
+                  "prior_billed_usd": spend.get("prior_billed_usd"),
                   "planned_usd_high": totals["usd_high"],
                   "planned_usd_low": totals["usd_low"],
                   "measured_gb_downloaded": measured_gb,

@@ -351,11 +351,12 @@ def test_segment_sources_aligned_with_reviewer():
 
 @pytest.mark.parametrize("mutator,match", [
     (lambda p: p.update(seam_guard_s=0), "seam_policy"),           # zeroed guard band
+    (lambda p: p.update(seam_guard_s=1.0), "seam_policy"),         # below the 60s label-horizon floor
     (lambda p: p.update(exclude_labels_crossing_seam=False), "seam_policy"),   # leakage switch
     (lambda p: p.update(exclude_features_crossing_seam="true"), "seam_policy"),  # non-bool
     (lambda p: p.pop("fill_min_s"), "seam_policy"),                # missing key
     (lambda p: p.update(rogue_knob=1), "seam_policy"),             # unknown key
-    (lambda p: p.update(warmup_consecutive=0), "seam_policy"),
+    (lambda p: p.update(warmup_consecutive=1), "seam_policy"),     # below the pinned warmup floor
     (lambda p: p.update(span_invalid_max=1.5), "seam_policy"),
 ])
 def test_refuses_unsafe_seam_policy_values(tmp_path, mutator, match):
@@ -374,6 +375,23 @@ def test_refuses_unsafe_seam_policy_values(tmp_path, mutator, match):
 
 def test_seam_policy_keys_aligned_with_reviewer():
     assert set(bf.SEAM_POLICY_KEYS) == set(fx.rv.DEFAULT_SEAM_POLICY)
+
+
+def test_seam_policy_floors_pinned_to_contract():
+    # a LARGER guard/warmup only masks more (safe); anything below the contract weakens the
+    # downstream seam masking, so the executor floors are pinned to the default policy values
+    assert bf.SEAM_GUARD_MIN_S == fx.rv.DEFAULT_SEAM_POLICY["seam_guard_s"] == 60.0
+    assert bf.WARMUP_MIN == fx.rv.DEFAULT_SEAM_POLICY["warmup_consecutive"] == 3
+
+
+def test_seam_policy_stricter_than_contract_is_accepted(tmp_path):
+    path, _ = fx.ready_manifest(tmp_path)
+    def stricter(m):
+        for r in m["days"]:
+            if r["day"] == "2025-01-03":
+                r["book_fill"]["seam_policy"].update(seam_guard_s=120.0, warmup_consecutive=5)
+    fx.mutate_manifest(path, stricter)
+    assert _plan(path, verify_inputs=False)["totals"]["n_units"] == 5
 
 
 def test_refuses_fill_unit_without_executable_stitch_plan(tmp_path):
