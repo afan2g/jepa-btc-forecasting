@@ -891,6 +891,36 @@ class TestRunnerScript:
         gb2, basis2 = runner.full_day_gb_from_manifest(mf, "1999-01-01")
         assert gb2 is None and basis2 == "missing"
 
+    def test_reconcile_manifest_buckets_and_prices(self):
+        import importlib
+        rec = importlib.import_module("scripts.reconcile_snapshot_seed_54")
+        manifest = {"cost_summary": {"gross_usd": 10.0, "book_usd": 9.0},
+                    "days": [
+            {"day": "2025-11-02", "classification": "inconclusive",
+             "book_fill": {"needed": True, "kind": "full_day", "gb": 2.0, "usd": 2.0,
+                           "full_day_reason": "crossed_seed_source", "why": "x"}},
+            {"day": "2025-01-03", "classification": "missing_needs_coinapi",
+             "book_fill": {"needed": True, "kind": "full_day", "gb": 1.0, "usd": 1.0,
+                           "why": "missing_needs_coinapi"}},
+            {"day": "2025-01-04", "classification": "",
+             "book_fill": {"needed": True, "kind": "full_day", "gb": 1.2, "usd": 1.2,
+                           "why": "calendar_book_gap"}},
+            {"day": "2025-01-07", "classification": "lake_present_degraded",
+             "book_fill": {"needed": True, "kind": "partial", "gb": 1.5, "usd": 1.5,
+                           "why": "y"}},
+            {"day": "2025-02-01", "classification": "lake_usable",
+             "book_fill": {"needed": False}},
+        ]}
+        out = rec.reconcile_manifest(manifest, pilot_window=("2025-11-01", "2026-04-30"))
+        b = out["buckets"]
+        assert b["addressable_crossed_seed_source"]["days"] == 1
+        assert b["addressable_crossed_seed_source"]["usd"] == 2.0
+        assert b["addressable_crossed_seed_source"]["pilot_days"] == 1
+        assert b["not_addressable_lake_absent"]["days"] == 2  # incl. calendar gap
+        assert b["not_addressable_partial_fills"]["days"] == 1
+        assert out["totals"]["book_fill_days"] == 4
+        assert out["totals"]["gross_usd"] == 10.0
+
     def test_missing_coinapi_parquet_exits_3(self, tmp_path, capsys):
         import importlib
         runner = importlib.import_module("scripts.run_snapshot_seed_experiment")
