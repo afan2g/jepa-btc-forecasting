@@ -1,0 +1,497 @@
+"""Hash-pinned G0-XV freeze artifact (issue #52).
+
+The freeze is the ONE object that authorizes touching the fixed holdout, and it is built
+strictly from development evidence: winner + configuration, the resolved numerical gate
+rules, the frozen trade-validation thresholds, the EXACT holdout scope (explicit day
+list — never a range, glob, or generic selector), the pinned sources (partition
+contract, arm manifests, matched row/split hashes), and the complete trial history
+(ledger hash + effective count, G0-CB history included). Its content hash is what the
+one-time consumption record (eval.consumption) and the holdout scorer (eval.holdout)
+verify — a stale, edited, or regenerated artifact no longer matches and every downstream
+step fails closed."""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import tempfile
+
+import numpy as np
+
+from eval.hashing import hash_obj
+from eval.ledger import TrialLedger, _json_safe, identity_hash, trial_identity
+from eval.partition import contract_hash, validate_partition_contract
+from eval.stats import deflated_sharpe
+from eval.study import LGBM_RUNGS
+
+FREEZE_VERSION = 1
+_VOLATILE = ("sha256", "generated_at")   # excluded from the pinned content hash
+
+_SCOPE_FIELDS = ("days", "venues", "dataset_id", "build_id", "excluded_days")
+
+
+def _canonical_day(token) -> str:
+    """One explicit ISO day. Anything else — ranges ('2026-04-01..30'), globs ('*'),
+    months ('2026-04'), non-strings — is a generic selector and is rejected: the holdout
+    transaction consumes an exact, enumerated scope only."""
+    if not isinstance(token, str):
+        raise ValueError(f"holdout scope days must be explicit ISO date strings, got "
+                         f"{token!r}")
+    try:
+        day = dt.date.fromisoformat(token)
+    except ValueError:
+        raise ValueError(f"holdout scope day {token!r} is not an explicit YYYY-MM-DD "
+                         "date; generic day selectors are rejected") from None
+    if day.isoformat() != token:
+        raise ValueError(f"holdout scope day {token!r} is not canonical YYYY-MM-DD")
+    return token
+
+
+def validate_holdout_scope(scope: dict, contract: dict) -> dict:
+    """Exact-scope validation: explicit sorted unique days, explicit venue keys, the
+    holdout dataset/build identity, and FULL-WINDOW coverage — every day of the
+    contract's holdout window is either a scope day or an explicitly reasoned exclusion.
+    The protocol forbids silently shortening the holdout (staged protocol §3): a
+    cherry-picked subset such as ['2026-04-15'] must not become the 'exact' scope the
+    one-time transaction then enforces."""
+    validate_partition_contract(contract)
+    if not isinstance(scope, dict) or set(scope) != set(_SCOPE_FIELDS):
+        raise ValueError(f"holdout scope must have exactly the fields {_SCOPE_FIELDS}")
+    days = scope["days"]
+    if not isinstance(days, list) or not days:
+        raise ValueError("holdout scope days must be a non-empty explicit list")
+    canon = [_canonical_day(d) for d in days]
+    if sorted(set(canon)) != canon:
+        raise ValueError("holdout scope days must be sorted and unique")
+    lo = dt.datetime.fromtimestamp(contract["holdout_start_ns"] / 1e9,
+                                   tz=dt.timezone.utc).date()
+    hi = dt.datetime.fromtimestamp(contract["holdout_end_ns"] / 1e9,
+                                   tz=dt.timezone.utc).date()
+    outside = [d for d in canon if not (lo <= dt.date.fromisoformat(d) < hi)]
+    if outside:
+        raise ValueError(f"holdout scope days outside the contract holdout window "
+                         f"[{lo}, {hi}): {outside}")
+    excl = scope["excluded_days"]
+    if (not isinstance(excl, dict)
+            or any(not isinstance(r, str) or not r for r in excl.values())):
+        raise ValueError("holdout scope excluded_days must map explicit days to "
+                         "non-empty reason strings (coverage gaps are explicit "
+                         "exclusions, never silent)")
+    excl_canon = [_canonical_day(d) for d in excl]
+    overlap = sorted(set(canon) & set(excl_canon))
+    if overlap:
+        raise ValueError(f"holdout scope days and excluded_days overlap: {overlap}")
+    window = []
+    d = lo
+    while d < hi:
+        window.append(d.isoformat())
+        d += dt.timedelta(days=1)
+    covered = sorted(set(canon) | set(excl_canon))
+    if covered != window:
+        missing = sorted(set(window) - set(covered))
+        extra = sorted(set(covered) - set(window))
+        raise ValueError(
+            f"holdout scope must cover EVERY day of the contract holdout window "
+            f"[{lo}, {hi}) — each day is a scope day or an explicitly reasoned "
+            f"exclusion; missing: {missing}, outside: {extra}. The holdout cannot be "
+            "silently shortened")
+    venues = scope["venues"]
+    if (not isinstance(venues, list) or not venues
+            or any(not isinstance(v, str) or not v or "*" in v or "?" in v
+                   for v in venues)):
+        raise ValueError("holdout scope venues must be a non-empty list of explicit venue "
+                         "keys (no wildcards)")
+    for k in ("dataset_id", "build_id"):
+        if not isinstance(scope[k], str) or not scope[k]:
+            raise ValueError(f"holdout scope {k} must be a non-empty string")
+    return scope
+
+
+def _validate_thresholds(thresholds: dict) -> dict:
+    if not isinstance(thresholds, dict) or not thresholds:
+        raise ValueError("trade_validation_thresholds must be a non-empty dict (the "
+                         "frozen thresholds #48's exact-scope validator applies)")
+    bad = {k: v for k, v in thresholds.items()
+           if not isinstance(v, (int, float, str, bool))}
+    if bad:
+        raise ValueError(f"trade_validation_thresholds must be scalar knobs: {bad}")
+    return thresholds
+
+
+def _close(a, b) -> bool:
+    return abs(float(a) - float(b)) <= 1e-9 * max(1.0, abs(float(a)), abs(float(b)))
+
+
+def _same_num(a, b) -> bool:
+    """Null-safe numeric equality: NaN is stored as null in both the strict-JSON dev
+    result and the sanitized ledger results."""
+    if a is None or b is None:
+        return a is None and b is None
+    return _close(a, b)
+
+
+def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
+    """Reconcile the claimed winner against the evidence it must have come from: a
+    PASSING horizon's solo-passing cross-venue candidate whose reported row AND pinned
+    ledger trial identity match every winner field — and whose SOLO gate is RECOMPUTED
+    from the pinned, self-validating ledger results (net PnL, trade floors, the naive
+    benchmark, and DSR with the full effective trial count and horizon-pool dispersion).
+    Editable pass verdicts in a saved dev-result JSON therefore cannot freeze a
+    non-passing config: the ledger hash pins the per-trial results the gate is re-derived
+    from. PBO and the noise band are NOT recomputable from the ledger (they need the
+    per-sample PnL matrices); their integrity anchor is deterministic re-execution of
+    the study, which is tested to reproduce bit-identical results."""
+    winner = dev_result["winner"]
+    h = dev_result["horizons"].get(winner["horizon"])
+    if not h or not h.get("pass"):
+        raise ValueError(f"frozen winner names horizon {winner['horizon']!r}, which is "
+                         "not a passing horizon of the dev result")
+    cid = winner["identity_sha256"]
+    if cid not in h.get("solo_pass_cross_venue", []):
+        raise ValueError("frozen winner is not a solo-passing cross-venue candidate of "
+                         "its horizon")
+    row = h["candidates"].get(cid)
+    if (not row or row["arm"] != winner["arm"] or row["config"] != winner["config"]
+            or row["variant"] != winner["variant"]):
+        raise ValueError("frozen winner fields do not match its reported candidate row")
+    entry = next((e for e in ledger.entries() if e["identity_sha256"] == cid), None)
+    if entry is None:
+        raise ValueError("frozen winner identity is not in the pinned trial ledger")
+    ident = entry["identity"]
+    same = (ident["protocol"] == "g0xv"
+            and all(ident[k] == winner[k]
+                    for k in ("arm", "config", "horizon", "variant",
+                              "dataset_id", "build_id", "feature_cols")))
+    if not same:
+        raise ValueError("frozen winner fields do not match its ledger trial identity; "
+                         "refusing to freeze an edited selection")
+    if winner["config"] not in LGBM_RUNGS:
+        raise ValueError(f"frozen winner config {winner['config']!r} is not a gate rung "
+                         f"{LGBM_RUNGS}")
+    if winner["arm"] == dev_result.get("control_arm"):
+        raise ValueError("frozen winner is the control arm; only cross-venue candidates "
+                         "can authorize the archive")
+
+    # The matrix-level verdicts (PBO availability/value, noise band, pass) are NOT
+    # recomputable from per-trial results, so the study pins them into the ledger as
+    # g0xv-verdict entries at run time. The verdict identity is RECONSTRUCTED from the
+    # dev result's arm/build echo, so an append-only ledger reused across builds cannot
+    # resolve to a stale verdict for a different study.
+    arms_echo = dev_result["arms"]
+    control = dev_result.get("control_arm")
+    if control not in arms_echo:
+        raise ValueError("dev result control_arm is not among its arms")
+    by_id = {e["identity_sha256"]: e for e in ledger.entries()}
+    gate_sha = hash_obj(_json_safe(dict(dev_result["gate"])))
+
+    def _verdict_entry(tag: str):
+        vi = trial_identity(
+            protocol="g0xv-verdict", arm="unified",
+            dataset_id=arms_echo[control]["dataset_id"],
+            build_id=hash_obj({a: e["build_id"] for a, e in arms_echo.items()}),
+            feature_cols=sorted(arms_echo), config="horizon_verdict", horizon=tag,
+            variant_params={"gate_sha256": gate_sha})
+        return by_id.get(identity_hash(vi))
+
+    v = _verdict_entry(ident["horizon"])
+    if v is None:
+        raise ValueError("no pinned g0xv-verdict entry matching this study's arms/builds "
+                         "and the winner's horizon; re-run the development study "
+                         "(horizon verdicts are ledger-pinned at study time)")
+    vr = v["result"]
+    if not vr["pass"]:
+        raise ValueError("the pinned ledger verdict for the winner's horizon is not a "
+                         "pass (its PBO/noise-band/solo gates failed closed at study "
+                         "time); an edited dev result cannot authorize the holdout")
+    if dev_result["ledger"]["n_imported_trials"] != vr["n_imported_trials"]:
+        raise ValueError("dev result imported trial count does not reconcile to the "
+                         "pinned ledger verdict; the carried-history audit cannot be "
+                         "edited")
+    # Study-level pins, checked once (identical on every verdict entry).
+    study_checks = {
+        "gate": hash_obj(_json_safe(dict(dev_result["gate"]))) == vr["gate_sha256"],
+        "matched_rows": dev_result["matched"]["row_content_sha256"]
+            == vr["matched_row_sha256"],
+        # The per-arm FULL content hashes the freeze copies into sources (and the
+        # holdout refit later verifies against) must be the ledger-pinned ones — an
+        # edited dev result cannot point the feature-substitution guard at recomputed
+        # feature matrices.
+        "arm_matrix_hashes": {a: e["matrix_content_sha256"]
+                              for a, e in arms_echo.items()}
+            == vr["arm_matrix_hashes"],
+        # The venue keys the scope-coverage rule reads must be the ledger-pinned ones —
+        # an edited echo could otherwise freeze a too-narrow trade-validation scope and
+        # burn the one-time record when scoring later rejects it.
+        "arm_venue_keys": {a: e["venue_keys"] for a, e in arms_echo.items()}
+            == vr["arm_venue_keys"],
+    }
+    bad = sorted(k for k, ok in study_checks.items() if not ok)
+    if bad:
+        raise ValueError(f"dev result does not reconcile to the pinned ledger horizon "
+                         f"verdict: {bad}")
+
+    def _reconcile_horizon(tag: str, hh: dict, vres: dict) -> None:
+        """VALUES too, not just verdicts, and for EVERY pinned horizon: the freeze pins
+        dev_result_sha256, so an edited PBO/noise number on ANY horizon (winner or not)
+        would misstate the frozen development evidence."""
+        nb2, vnb2 = hh["noise_band"], vres["noise_band"]
+        checks = {
+            "pass": bool(hh.get("pass")) == bool(vres["pass"]),
+            "pbo_available": bool(hh.get("pbo_available")) == bool(vres["pbo_available"]),
+            "pbo": _same_num(hh.get("pbo"), vres["pbo"]),
+            "pbo_n_rows": hh.get("pbo_n_rows") == vres["pbo_n_rows"],
+            "pbo_candidates": hash_obj(list(hh.get("pbo_candidates", [])))
+                == vres["pbo_candidates_sha256"],
+            "solo_pass_cross_venue": hash_obj(sorted(hh.get("solo_pass_cross_venue", [])))
+                == vres["solo_pass_cross_venue_sha256"],
+            "candidate_pool": sorted(hh.get("candidates", {})) == vres["pool"],
+            "noise_band_beats_control": bool(nb2["beats_control"])
+                == bool(vnb2["beats_control"]),
+            "noise_band_values": (
+                all(_same_num(nb2.get(k), vnb2.get(k))
+                    for k in ("band_low", "band_high", "delta_net_pnl"))
+                and nb2.get("combined_candidate") == vnb2.get("combined_candidate")
+                and nb2.get("control_candidate") == vnb2.get("control_candidate")),
+        }
+        bad2 = sorted(k for k, ok in checks.items() if not ok)
+        if bad2:
+            raise ValueError(f"dev result horizon {tag!r} does not reconcile to its "
+                             f"pinned ledger verdict: {bad2}")
+
+    # Re-derive the solo gate from the PINNED ledger, over the verdict's pinned study
+    # pool (NOT every historical same-horizon entry — an append-only ledger reused
+    # across builds must neither poison nor be poisoned by another study's dispersion).
+    # n_trials stays the FULL effective count: multiplicity spans the whole history.
+    res = entry["result"]
+    for k in ("net_pnl", "trade_sharpe", "sample_sharpe", "n_trades", "t_eff"):
+        if not _close(row[k], res[k]):
+            raise ValueError(f"winner candidate row {k} does not reconcile to the pinned "
+                             "ledger result")
+    pool = []
+    for pid in vr["pool"]:
+        pe = by_id.get(pid)
+        if pe is None:
+            raise ValueError("pinned verdict pool references a trial missing from the "
+                             "ledger (truncated or mismatched ledger)")
+        pool.append(pe)
+    twin = next(
+        (e for e in pool
+         if e["identity"]["config"] == "naive" and e["identity"]["variant"] == "base"
+         and e["identity"]["arm"] == ident["arm"]), None)
+    if twin is None:
+        raise ValueError("no naive benchmark trial for the winner's arm in the pinned "
+                         "study pool")
+    sr_std = float(np.array([e["result"]["trade_sharpe"] for e in pool]).std() + 1e-9)
+    gate = dev_result["gate"]
+    dsr = deflated_sharpe(sr_hat=res["trade_sharpe"], sr_trials_std=sr_std,
+                          n_trials=max(2, ledger.n_effective_trials()),
+                          T=max(int(round(res["t_eff"])), 2),
+                          skew=res["skew"], kurt=res["kurt"])
+    if not _close(dsr, row["dsr"]):
+        raise ValueError("winner DSR does not reconcile: recomputing over the pinned "
+                         "study pool with the full effective trial count does not "
+                         "reproduce the reported value")
+    solo = bool(res["net_pnl"] > 0 and dsr > gate["dsr_thresh"]
+                and res["n_trades"] >= gate["min_trades"]
+                and res["t_eff"] >= gate["min_eff_trades"]
+                and res["sample_sharpe"] >= gate["min_sample_sharpe"]
+                and res["net_pnl"] > twin["result"]["net_pnl"])
+    if not solo:
+        raise ValueError("frozen winner does not clear the solo gate recomputed from the "
+                         "pinned trial ledger (DSR with the full effective trial count, "
+                         "trade floors, and the naive benchmark); an edited pass verdict "
+                         "cannot authorize the holdout")
+
+    # The winner is the study's DETERMINISTIC selection — max net PnL over every
+    # solo-passing cross-venue candidate of every passing horizon — not merely "a valid
+    # passing candidate": with two passing candidates, a post-hoc swap to the runner-up
+    # would otherwise keep every hash valid. Every horizon's pass flag and solo list is
+    # reconciled against its own pinned verdict, so hiding a better horizon (or
+    # candidate) is also caught.
+    # Enumerate the horizon set from the LEDGER's pinned verdicts for this study, not
+    # from the editable dev result: a truncated result could otherwise hide a passing
+    # horizon whose best candidate beats the claimed winner.
+    ref = trial_identity(
+        protocol="g0xv-verdict", arm="unified",
+        dataset_id=arms_echo[control]["dataset_id"],
+        build_id=hash_obj({a: e["build_id"] for a, e in arms_echo.items()}),
+        feature_cols=sorted(arms_echo), config="horizon_verdict", horizon="any",
+        variant_params={"gate_sha256": gate_sha})
+    pinned_horizons = {
+        e["identity"]["horizon"] for e in ledger.entries()
+        if e["identity"]["protocol"] == "g0xv-verdict"
+        and all(e["identity"][k] == ref[k]
+                for k in ("arm", "dataset_id", "build_id", "feature_cols",
+                          "config", "variant", "variant_params"))}
+    if set(dev_result["horizons"]) != pinned_horizons:
+        raise ValueError(f"dev result horizons {sorted(dev_result['horizons'])} do not "
+                         f"match this study's ledger-pinned verdict horizons "
+                         f"{sorted(pinned_horizons)}; a truncated result cannot hide a "
+                         "passing horizon")
+
+    eligible_nets = []
+    for tag, hh in dev_result["horizons"].items():
+        vv = _verdict_entry(tag)
+        if vv is None:
+            raise ValueError(f"no pinned g0xv-verdict entry for horizon {tag!r}; "
+                             "re-run the development study")
+        _reconcile_horizon(tag, hh, vv["result"])
+        if not vv["result"]["pass"]:
+            continue
+        for cid2 in hh.get("solo_pass_cross_venue", []):
+            e2 = by_id.get(cid2)
+            if e2 is None:
+                raise ValueError("solo-passing candidate missing from the pinned ledger")
+            eligible_nets.append(e2["result"]["net_pnl"])
+    if not eligible_nets:
+        raise ValueError("no solo-passing cross-venue candidates in any passing horizon")
+    if not _close(res["net_pnl"], max(eligible_nets)):
+        raise ValueError("frozen winner is not the study's deterministic selection "
+                         "(max net PnL over solo-passing cross-venue candidates of "
+                         "passing horizons); a post-hoc winner swap cannot be frozen")
+    if not _close(winner["net_pnl"], res["net_pnl"]):
+        raise ValueError("frozen winner net_pnl does not match its pinned ledger result")
+
+
+def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedger,
+                          trade_validation_thresholds: dict, holdout_scope: dict,
+                          generated_at: str) -> dict:
+    """Freeze the G0-XV selection BEFORE any outcome-bearing holdout access. Only a
+    passing development study with a selected winner authorizes a holdout transaction —
+    a FAIL or blocking/inconclusive study freezes nothing (stop-or-pivot instead)."""
+    # Strict-JSON copy first: a legitimately passing multi-horizon study may carry NaN
+    # in a secondary horizon (unavailable PBO / empty noise band); hashing must treat it
+    # exactly like the JSON round-trip the CLI performs (NaN -> null), not crash.
+    dev_result = _json_safe(dev_result)
+    if dev_result.get("protocol") != "g0xv-development":
+        raise ValueError("freeze requires a g0xv-development result (G0-CB is "
+                         "development-only and never authorizes holdout access)")
+    if not dev_result.get("g0xv_dev_pass") or not dev_result.get("winner"):
+        raise ValueError("a failed or inconclusive G0-XV development study does not "
+                         "authorize holdout consumption; record a stop/pivot decision "
+                         "instead of freezing")
+    if dev_result["partition_contract_sha256"] != contract_hash(contract):
+        raise ValueError("dev result pins a different partition contract than the one "
+                         "supplied; refusing a stale/substituted contract")
+    if ledger.ledger_hash() != dev_result["ledger"]["ledger_sha256"]:
+        raise ValueError("ledger has changed since the development study ran (its hash "
+                         "no longer matches the dev result); re-run development so every "
+                         "trial is inside the frozen history")
+    # The frozen counts come from the LEDGER, not the editable dev result: the ledger
+    # hash covers identity/result pairs, not the reported counts.
+    n_eff = ledger.n_effective_trials()
+    if dev_result["ledger"]["n_effective_trials"] != n_eff:
+        raise ValueError(f"dev result reports {dev_result['ledger']['n_effective_trials']} "
+                         f"effective trials but the pinned ledger holds {n_eff}; "
+                         "refusing to freeze a misstated multiplicity")
+    n_imp = dev_result["ledger"]["n_imported_trials"]
+    if isinstance(n_imp, bool) or not isinstance(n_imp, int) or not 0 <= n_imp <= n_eff:
+        raise ValueError(f"dev result n_imported_trials {n_imp!r} is not a count within "
+                         "the pinned ledger's effective trials")
+    _verify_winner(dev_result, ledger)
+    validate_holdout_scope(holdout_scope, contract)
+    # The trade-validation scope must cover EVERY venue the winner's build consumes: a
+    # Coinbase-only validation PASS must never unlock scoring of Binance-derived
+    # features whose feeds were outside the exact-scope check. (Re-enforced against the
+    # actual holdout manifest at scoring preflight.)
+    winner_venues = dev_result["arms"][dev_result["winner"]["arm"]]["venue_keys"]
+    if sorted(holdout_scope["venues"]) != winner_venues:
+        raise ValueError(f"holdout scope venues {sorted(holdout_scope['venues'])} must "
+                         f"exactly cover the winner arm's venues {winner_venues}; the "
+                         "trade validation must cover every consumed feed")
+    _validate_thresholds(trade_validation_thresholds)
+
+    artifact = {
+        "freeze_version": FREEZE_VERSION,
+        "protocol": "g0xv-freeze",
+        "winner": dict(dev_result["winner"]),
+        "gate": dict(dev_result["gate"]),
+        "trade_validation_thresholds": dict(trade_validation_thresholds),
+        "holdout_scope": {**holdout_scope, "days": list(holdout_scope["days"]),
+                          "venues": list(holdout_scope["venues"]),
+                          "excluded_days": dict(holdout_scope["excluded_days"])},
+        "holdout_window": {"holdout_start_ns": contract["holdout_start_ns"],
+                           "holdout_end_ns": contract["holdout_end_ns"]},
+        "sources": {
+            "partition_contract_sha256": dev_result["partition_contract_sha256"],
+            "arm_manifests": {arm: echo["manifest_sha256"]
+                              for arm, echo in dev_result["arms"].items()},
+            # Full per-arm content pins (reserved + that arm's feature VALUES): the
+            # holdout refit must consume exactly the matrix the winner was selected on,
+            # features included — the reserved-only row hash cannot see feature
+            # substitution.
+            "arm_matrix_hashes": {arm: echo["matrix_content_sha256"]
+                                  for arm, echo in dev_result["arms"].items()},
+            "row_content_sha256": dev_result["matched"]["row_content_sha256"],
+            "split_sha256": dev_result["matched"]["split_sha256"],
+        },
+        "splits": {k: dev_result["matched"][k]
+                   for k in ("n_groups", "k", "embargo_ns", "n_rows")},
+        "trial_history": {
+            "ledger_sha256": ledger.ledger_hash(),
+            "n_effective_trials": n_eff,            # ledger-derived, verified above
+            "n_imported_trials": n_imp,
+        },
+        "dev_result_sha256": hash_obj(dev_result),
+        "generated_at": generated_at,
+    }
+    artifact["sha256"] = hash_obj(artifact, exclude_keys=_VOLATILE)
+    return artifact
+
+
+def freeze_hash(artifact: dict) -> str:
+    return hash_obj(artifact, exclude_keys=_VOLATILE)
+
+
+def verify_freeze(artifact: dict) -> dict:
+    """Recompute the content hash and compare to the embedded pin; fail closed on any
+    edit. Returns the artifact for chaining."""
+    if not isinstance(artifact, dict) or artifact.get("freeze_version") != FREEZE_VERSION:
+        raise ValueError(f"unsupported freeze artifact (freeze_version="
+                         f"{artifact.get('freeze_version') if isinstance(artifact, dict) else None!r})")
+    if artifact.get("sha256") != freeze_hash(artifact):
+        raise ValueError("freeze artifact content does not match its embedded sha256 "
+                         "(edited or corrupted); refusing to trust it")
+    return artifact
+
+
+def authorize_freeze(freeze_artifact: dict, *, dev_result: dict, ledger: TrialLedger,
+                     contract: dict) -> dict:
+    """An AUTHORITATIVE freeze is one that can be REBUILT from the saved dev result and
+    the pinned, self-validating ledger: the embedded self-hash only proves internal
+    consistency, so a fabricated artifact (arbitrary winner/source hashes with a
+    recomputed sha256) would otherwise authorize holdout consumption for a study that
+    never passed. The deterministic rebuild re-runs every reconciliation — winner
+    selection, per-horizon verdicts, counts, scope — and the hashes must agree."""
+    verify_freeze(freeze_artifact)
+    rebuilt = build_freeze_artifact(
+        dev_result, contract=contract, ledger=ledger,
+        trade_validation_thresholds=freeze_artifact["trade_validation_thresholds"],
+        holdout_scope=freeze_artifact["holdout_scope"],
+        generated_at=freeze_artifact["generated_at"])
+    if rebuilt["sha256"] != freeze_artifact["sha256"]:
+        raise ValueError("freeze artifact cannot be reproduced from the supplied dev "
+                         "result and pinned ledger; a fabricated or drifted selection "
+                         "artifact cannot authorize the holdout")
+    return freeze_artifact
+
+
+def write_freeze(artifact: dict, path) -> None:
+    verify_freeze(artifact)
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".freeze-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(artifact, f, indent=2, sort_keys=True, allow_nan=False)
+            f.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def load_freeze(path) -> dict:
+    with open(path) as f:
+        artifact = json.load(f)
+    return verify_freeze(artifact)

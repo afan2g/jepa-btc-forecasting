@@ -31,31 +31,43 @@ class ConfigResult:
     kurt: float
 
 
-def _fit_predict(model, Xtr, ytr, ltr, Xte, wtr, scale):
+def fit_model(model, Xtr, ytr, ltr, wtr, scale):
+    """Fit config `model` and return a `predict(Xte) -> bps forecast` callable. The ONE
+    model definition shared by CPCV evaluation below and the frozen pre-holdout fit
+    (eval.holdout.fit_frozen_config), so the holdout scores exactly the model the study
+    selected — hyperparameters cannot drift between the two paths."""
     if len(Xtr) < 2:        # degenerate fold (empty/near-empty train after purge) -> no trades
-        return np.zeros(len(Xte))
+        return lambda Xte: np.zeros(len(Xte))
     if model == "naive":
-        return np.zeros(len(Xte))
+        return lambda Xte: np.zeros(len(Xte))
     if model == "ridge":
-        return Ridge(alpha=1.0).fit(Xtr, ytr, sample_weight=wtr).predict(Xte)
+        m = Ridge(alpha=1.0).fit(Xtr, ytr, sample_weight=wtr)
+        return m.predict
     if model == "lgbm_reg":
         m = lgb.LGBMRegressor(n_estimators=200, num_leaves=31, learning_rate=0.05,
                               min_child_samples=50, subsample=0.8, verbose=-1,
                               random_state=0)
         m.fit(Xtr, ytr, sample_weight=wtr)
-        return m.predict(Xte)
+        return m.predict
     if model == "lgbm_clf":
         if len(np.unique(ltr)) < 2:        # single-class fold (heavy-flat regime) -> no trades
-            return np.zeros(len(Xte))
+            return lambda Xte: np.zeros(len(Xte))
         m = lgb.LGBMClassifier(n_estimators=200, num_leaves=31, learning_rate=0.05,
                                min_child_samples=50, subsample=0.8, verbose=-1,
                                random_state=0)
         m.fit(Xtr, ltr, sample_weight=wtr)
-        proba = m.predict_proba(Xte); cls = list(m.classes_)
-        p_up = proba[:, cls.index(1)] if 1 in cls else 0.0
-        p_dn = proba[:, cls.index(-1)] if -1 in cls else 0.0
-        return (p_up - p_dn) * scale          # signed score -> bps
+
+        def _predict(Xte):
+            proba = m.predict_proba(Xte); cls = list(m.classes_)
+            p_up = proba[:, cls.index(1)] if 1 in cls else 0.0
+            p_dn = proba[:, cls.index(-1)] if -1 in cls else 0.0
+            return (p_up - p_dn) * scale      # signed score -> bps
+        return _predict
     raise ValueError(f"unknown model {model!r}")
+
+
+def _fit_predict(model, Xtr, ytr, ltr, Xte, wtr, scale):
+    return fit_model(model, Xtr, ytr, ltr, wtr, scale)(Xte)
 
 
 def evaluate_config(matrix: pd.DataFrame, feature_cols, model: str, *,
