@@ -21,10 +21,12 @@ import os
 import sys
 from dataclasses import dataclass
 
+import pandas as pd
+
 # recon.ingest is pandas-only (NO boto3/lakeapi/pyarrow); importing it keeps this module CI-safe
 # while reusing the ONE authority for the single-axis engine-time convention (Requirement 4) rather
 # than duplicating it. pandas is a default dependency ("stdlib/pandas-light", plan file-structure).
-from recon.ingest import _ns, shared_engine_time_col
+from recon.ingest import _ns, _pick, shared_engine_time_col
 
 MANIFEST_NAME = "_manifest.jsonl"
 
@@ -195,6 +197,112 @@ def resolve_engine_time(*dfs):
         cleaned.append(df[keep].reset_index(drop=True))
         dropped.append(int((~keep).sum()))
     return col, col != "origin_time", cleaned, dropped
+
+
+# ----------------------------------------------------------------------------- passthrough normalizers (Req 6)
+# Raw-vendor engine-time aliases -> canonical names. The Stage-1 store is a LOSSLESS copy of the
+# vendor columns, so a partition may carry the raw `timestamp`/`receipt_timestamp` names instead of
+# the lakeapi-normalized `origin_time`/`received_time` (recon.ingest.ENGINE_TIME_CANDIDATES accepts
+# all four). Canonicalizing FIRST keeps resolve_engine_time's origin-first preference intact and
+# gives the processed store ONE stable schema.
+_TIME_ALIASES = {"origin_time": "timestamp", "received_time": "receipt_timestamp"}
+
+# Known trade/liquidation side encodings (docs §4.1: trades `side` is buy/sell). Classify ONLY known
+# spellings; anything else raises (the recon.ingest._side_str fail-loud pattern) — silently
+# defaulting would corrupt signed flow features downstream.
+_BUY_VALUES = frozenset({"buy", "b"})
+_SELL_VALUES = frozenset({"sell", "s"})
+
+
+def canonicalize_time_columns(df):
+    """Rename raw-vendor engine-time columns to the canonical `origin_time`/`received_time`.
+    Never clobbers: an alias is renamed only when its canonical column is absent."""
+    renames = {alias: canon for canon, alias in _TIME_ALIASES.items()
+               if canon not in df.columns and alias in df.columns}
+    return df.rename(columns=renames) if renames else df
+
+
+def _trade_side(v) -> str:
+    s = str(v).lower()
+    if s in _BUY_VALUES:
+        return "buy"
+    if s in _SELL_VALUES:
+        return "sell"
+    raise ValueError(f"unrecognized trade side value {v!r}; expected one of "
+                     f"{sorted(_BUY_VALUES | _SELL_VALUES)} (any case)")
+
+
+def _time_col(df, canon: str):
+    """int64-ns view of a REQUIRED canonical engine-time column (raises listing seen columns)."""
+    return _ns(df[_pick(df, (canon,), field=canon)])
+
+
+def normalize_trades(df):
+    """Raw trades partition -> the fixed processed contract `origin_time, received_time, price,
+    quantity, side, trade_id` (times int64 ns; side validated buy/sell). Row count and order are
+    preserved — the caller sorts on the resolved engine-time column."""
+    df = canonicalize_time_columns(df)
+    return pd.DataFrame({
+        "origin_time": _time_col(df, "origin_time"),
+        "received_time": _time_col(df, "received_time"),
+        "price": df[_pick(df, ("price",), field="trade price")].astype("float64"),
+        "quantity": df[_pick(df, ("quantity", "amount", "size"),
+                             field="trade quantity")].astype("float64"),
+        "side": df[_pick(df, ("side",), field="trade side")].map(_trade_side),
+        "trade_id": df[_pick(df, ("trade_id", "id"), field="trade id")].astype("int64"),
+    })
+
+
+def normalize_funding(df):
+    """Raw funding partition -> `origin_time, received_time, funding_rate` (+ `next_funding_time`
+    when the vendor provides it). ~8-hourly cadence expected; schema confirmed by the Phase-1
+    probe (Risk Q6) — drift beyond the known aliases fails loudly here."""
+    df = canonicalize_time_columns(df)
+    out = {
+        "origin_time": _time_col(df, "origin_time"),
+        "received_time": _time_col(df, "received_time"),
+        "funding_rate": df[_pick(df, ("funding_rate", "rate"),
+                                 field="funding_rate")].astype("float64"),
+    }
+    if "next_funding_time" in df.columns:
+        out["next_funding_time"] = _ns(df["next_funding_time"])
+    return pd.DataFrame(out)
+
+
+def normalize_open_interest(df):
+    """Raw open_interest partition -> `origin_time, received_time, open_interest`."""
+    df = canonicalize_time_columns(df)
+    return pd.DataFrame({
+        "origin_time": _time_col(df, "origin_time"),
+        "received_time": _time_col(df, "received_time"),
+        "open_interest": df[_pick(df, ("open_interest", "oi"),
+                                  field="open_interest")].astype("float64"),
+    })
+
+
+def normalize_liquidations(df):
+    """Raw liquidations partition -> `origin_time, received_time, price, quantity, side`.
+    Sparse/event-driven (Risk Q2) — a missing/empty partition is handled by the caller; this only
+    normalizes what exists."""
+    df = canonicalize_time_columns(df)
+    return pd.DataFrame({
+        "origin_time": _time_col(df, "origin_time"),
+        "received_time": _time_col(df, "received_time"),
+        "price": df[_pick(df, ("price",), field="liquidation price")].astype("float64"),
+        "quantity": df[_pick(df, ("quantity", "amount", "size"),
+                             field="liquidation quantity")].astype("float64"),
+        "side": df[_pick(df, ("side",), field="liquidation side")].map(_trade_side),
+    })
+
+
+# Every scoped output feed EXCEPT book_delta_v2 (which reconstructs through recon's own fail-loud
+# alias resolution) normalizes through exactly one of these.
+NORMALIZERS = {
+    "trades": normalize_trades,
+    "funding": normalize_funding,
+    "open_interest": normalize_open_interest,
+    "liquidations": normalize_liquidations,
+}
 
 
 # ----------------------------------------------------------------------------- schema versions (Req 6)
