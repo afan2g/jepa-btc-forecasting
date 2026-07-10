@@ -40,9 +40,10 @@ evidence.
 `G0-CB` validates target-venue data, labels, costs, CPCV, and the lower bound supplied
 by Coinbase's own book and trade flow. It uses the existing manifest-driven baseline
 ladder and a preregistered development gate block. Selection/CPCV uses only
-November-March. `G0-CB` must not load or score April features, labels, costs, or model
-outputs. Every candidate, configuration, horizon, threshold, and post-hoc variant it
-tries is persisted as trial history for the later #52 G0-XV ledger.
+November-March rows whose complete guarded support stays before April. `G0-CB` must
+not load or score April features, labels, costs, or model outputs. Every candidate,
+configuration, horizon, threshold, and post-hoc variant it tries is persisted as trial
+history for the later #52 G0-XV ledger.
 
 - PASS: proceed to the six-month Binance pilot.
 - FAIL because the target data, label timing, cost model, or execution economics are
@@ -123,8 +124,24 @@ must land before G0-CB/G0-XV execution. Its minimum contract is:
 | Use | Inclusive dates | Treatment |
 |---|---|---|
 | Six-month pilot | `2025-11-01` through `2026-04-30` | Six complete calendar months; all pilot vendor acquisition is bounded to this range. |
-| Development/CPCV | `2025-11-01` through `2026-03-31` | Training, CPCV, calibration, and registered trials. |
+| Development/CPCV | `2025-11-01` through `2026-03-31` | Training, CPCV, calibration, and registered trials; only rows whose complete guarded support stays before April. |
 | Pilot OOS | `2026-04-01` through `2026-04-30` | No outcome-bearing access in G0-CB; first and only modeling score occurs in G0-XV after its complete ledger/selection freeze, then the month is consumed. |
+
+These are **support-span partitions**, not filters on `t_event`'s calendar date. Let
+`holdout_start_ns` be `2026-04-01T00:00:00Z` and `guard_ns` be the consumed stitch
+policy's guard. Before any forward label path or adjacent-day source is read, the
+producer drops each development candidate unless
+`t_event + horizons[horizon] + guard_ns < holdout_start_ns`. After construction it
+also asserts that the actual guarded feature, cost, and label windows do not intersect
+April, including `t_barrier + guard_ns < holdout_start_ns`. A development build must
+never open April merely to decide that a boundary row should be dropped. The April
+holdout applies the symmetric future-boundary rule at `2026-05-01T00:00:00Z`, so its
+labels do not silently consume May.
+
+The producer records the partition bounds, horizon map, guard, prefilter rule, and
+per-horizon boundary-drop counts in a hash-pinned partition-contract source artifact.
+The artifact hash enters each dataset/build ID and is validated by #52 before CPCV,
+fit, or score.
 
 The existing `2026-04-01` Binance Stage-1 smoke is inside the pilot window. Coverage
 gaps remain explicit exclusions; neither producer nor evaluator may silently shorten
@@ -152,9 +169,10 @@ The formal G1 holdout must:
 The producer emits explicit, versioned datasets rather than zero-filling unavailable
 venue features:
 
-- `coinbase_only_pilot_dev`: November-March Coinbase clock, book, trade, labels, and
+- `coinbase_only_pilot_dev`: span-contained November-March Coinbase clock, book, trade, labels, and
   costs for G0-CB; the manifest lists only Coinbase in `venues` and only Coinbase
-  features in `feature_cols`. It has no April companion consumed by G0-CB.
+  features in `feature_cols`. Its guarded future support ends before April, and it has
+  no April companion consumed by G0-CB.
 - `cross_venue_pilot`: common matched rows with certified Coinbase and Binance
   coverage and separate development/April partitions. It supports three explicit
   manifests (Coinbase-only control, Binance-only, combined) whose feature lists differ
@@ -213,6 +231,7 @@ Do not start the remaining Binance archive when any of these holds:
 - `G0-XV` is FAIL, blocking, or inconclusive;
 - pilot source coverage or reconstruction is uncertified;
 - the three arms do not share identical rows/splits/labels/costs;
+- any development row's guarded feature, cost, or label support intersects April;
 - the pilot OOS had prohibited outcome-bearing access before manifests, candidates,
   splits, and trials were frozen;
 - quota, disk, or spend approval is missing; or

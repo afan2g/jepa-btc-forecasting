@@ -158,6 +158,17 @@ development-only selection/PBO, freezes the selection artifact, fits pre-April, 
 first and only April modeling score. T10 may prepare inputs but cannot report G0-CB/G0-XV by running
 each manifest independently.
 
+**Span-safe partition boundary (deep-review P2):** assigning a row by `t_event` date is not enough:
+its forward label can read the next partition. For each horizon, T9/T10 must apply a conservative
+prefilter **before label generation or adjacent-day loading**. A development candidate survives only
+when `t_event + horizon_ns + guard_ns < 2026-04-01T00:00:00Z`, where `guard_ns` is the consumed
+`SeamPolicy` guard. After construction, fail closed unless the actual guarded windows also stay
+before the boundary: the feature/cost support ends before April and
+`t_barrier + guard_ns < 2026-04-01T00:00:00Z`. Do not open April to resolve a March boundary label.
+Apply the same future-support rule at `2026-05-01T00:00:00Z` to the April holdout. Persist bounds,
+horizons, guard, rule version, and per-horizon drop counts in a hash-pinned partition-contract source
+artifact included in `build_id`; #52 validates the artifact before evaluation.
+
 ---
 
 ## §A. Bar clock construction (E0.3)
@@ -498,6 +509,12 @@ NaN-carried into the matrix (**`validate_matrix` rejects NaN/inf features** — 
 covers only columns/timing/dtypes). This is the value-level complement to the timing invariants
 below.
 
+**Pilot-partition integrity:** G0 development rows satisfy the pre-label conservative cutoff and
+their actual guarded feature/cost/label support ends strictly before April. April holdout label
+support ends strictly before May. This check runs before write and is independent of seam/vendor
+validity; adjacent-day stitching may bridge ordinary day partitions but never a pilot holdout
+boundary. The partition-contract source artifact and drop counts are part of the logical build.
+
 **Unique decision per `(t_event, horizon)` (Codex deep-review #2):** the monotone watermark can tie
 several backlog bars to one `t_event`; the producer emits **exactly one row per `(t_event, horizon)`**
 (coalesced to the last-closing bar, §C.2), so the evaluator's per-row PnL/trade counting
@@ -799,6 +816,11 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   gap case applies** (Changelog / #1).
 - **Leakage-control gate (E0.4):** random k-fold (no purge) shows inflated CV vs
   purged/embargoed on a synthetic overlapping-label series — the controls bite.
+- **Pilot partition boundary (P2):** plant March rows on both sides of the per-horizon conservative
+  cutoff. The unsafe row is dropped **without opening an April source**, the safe row survives, and
+  no emitted development row has `t_barrier + guard_ns >= 2026-04-01T00:00:00Z`. Mirror the fixture
+  at April's end to prove holdout labels do not load May; reconcile per-horizon drop counts to the
+  partition-contract artifact.
 - **Manifest round-trip:** producer emits matrix+manifest on a tiny fixture →
   `validate_frame` passes → `run_from_manifest` runs and returns the per-horizon result
   **schema** without crashing. Assert on **structure, not gate outcome** (Codex P3): a
@@ -873,8 +895,8 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker + slippage, fee-tier param; **slippage includes the `coinbase_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable Coinbase book at `coinbase_read_ts` (one-sided book → drop, #4) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; staged `dataset_id`/`build_id`/`venues`/`sources`; emit Coinbase-only plus matched Coinbase/Binance/combined manifest views; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection + feature-subset identity tests | Pre |
-| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; explicit `coinbase_only` / `cross_venue` source modes; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: Coinbase-only opens no Binance inputs; no surviving row crosses a seam; the three cross-venue arms have identical row/split/label/cost hashes; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + mode/matched-arm + determinism tests | Pre (synthetic seams) |
-| **T10** `feat/producer-calibration` (Post) | Consume the reviewed pilot seam list; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; emit a pre-April G0-CB development build, then separate matched G0-XV development and April holdout builds. G0-CB cannot open April. Freeze the G0-XV candidates after importing G0-CB trial history and before April access. #52, not the producer or three independent `run_from_manifest` calls, owns unified DSR/PBO selection, pre-April fit, and the sole April holdout score. Formal G1 is a later full-data run with a separate holdout. **Acceptance: seam masking holds; pilot arms share row/split/label/cost hashes; development/holdout source hashes are disjoint and immutable** | T9, pilot backfilled data + reviewed stitch plan, #52 evaluator | E0.3/E0.5 artifacts + frozen G0 input builds; #52 emits G0 results | **Post** (pilot backfill + evaluator unlock) |
+| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; explicit `coinbase_only` / `cross_venue` source modes; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); apply the **pre-label span-safe partition cutoff before adjacent-day reads** and emit its hash-pinned contract/drop counts; `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: Coinbase-only opens no Binance inputs; no surviving row crosses a seam or pilot holdout boundary; the three cross-venue arms have identical row/split/label/cost hashes; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + partition-boundary + mode/matched-arm + determinism tests | Pre (synthetic seams) |
+| **T10** `feat/producer-calibration` (Post) | Consume the reviewed pilot seam list; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; emit a span-contained pre-April G0-CB development build, then separate matched G0-XV development and April holdout builds. G0-CB cannot open April, including for boundary labels; April holdout labels cannot open May. Freeze the G0-XV candidates after importing G0-CB trial history and before April access. #52, not the producer or three independent `run_from_manifest` calls, owns unified DSR/PBO selection, pre-April fit, and the sole April holdout score. Formal G1 is a later full-data run with a separate holdout. **Acceptance: partition-contract counts reconcile; seam masking holds; pilot arms share row/split/label/cost hashes; development/holdout source hashes are disjoint and immutable** | T9, pilot backfilled data + reviewed stitch plan, #52 evaluator | E0.3/E0.5 artifacts + frozen G0 input builds; #52 emits G0 results | **Post** (pilot backfill + evaluator unlock) |
 
 ---
 
@@ -1084,7 +1106,7 @@ schema change.
   §C.2 member-observability parenthetical now says members are observable because **`t_event ≥` their
   max `received_time`** (the watermark is `≥`, not `=`), consistent with the monotone rule.
 - **Codex DEEP review (Codex on `b2be897`, requested per AGENTS.md Deep Review Guidelines) — 4
-  design-level P2 findings:** **#1** OOS (≈April 2026) is **held out first** — G0-CB does not score
+  design-level P2 findings:** **#1** pilot OOS (April 2026) is **held out first** — G0-CB does not score
   it; T10 calibrates/measures τ/selects on **pre-OOS** data only, pre-registers labels/CV/metrics,
   and **excludes April from the calibration/selection matrix** before G0-XV's sole score
   (data.md:22-25, experiment-plan:27-29; §split); **#2** the monotone

@@ -34,7 +34,8 @@ Binding protocol:
 The data target is unchanged, but vendor spend is sequenced:
 
 1. Coinbase pilot acquisition uses `2025-11-01` through `2026-04-30`, but the Coinbase-only G0-CB
-   modeling screen uses only `2025-11-01` through `2026-03-31` and never loads April outcomes.
+   modeling screen uses only span-contained `2025-11-01` through `2026-03-31` rows and never loads
+   April outcomes; unsafe March boundary rows are dropped before forward label reads.
    Approve/download only the pilot-window subset of the reviewed CoinAPI manifest first. The
    existing contiguous-range, book-only downloader cannot execute that sparse scope; #53 must add
    the exact reviewed-manifest book/trade planner and executor before any pilot backfill.
@@ -229,9 +230,13 @@ CoinAPI-fillable:
   704/730 (96.4%)` is *measured*, not assumed. The full artifact — `usable_days` (704), `lake_all_days`
   (652), `excluded_days_by_reason` (26, e.g. `missing:binF_book`), the fill-day book/trades status, and
   OOS runs — is written to **`data/usable_calendar.json`** (auditable without re-listing vendors).
-- **OOS month must come from the usable calendar, not "most recent."** Most-recent contiguous usable run
-  ≥21 d = **2026-02-06 → 2026-05-05**; the prior run is 2024-06-22 → 2026-02-04 (split by 1-day Binance
-  gaps). **Recent May–June 2026 is NOT usable** (Binance `book_delta_v2` gaps). Pick OOS ≈ **April 2026**.
+- **Any OOS month must come from the usable calendar, not "most recent."** At this snapshot the
+  most-recent contiguous usable run ≥21 d is **2026-02-06 → 2026-05-05**; the prior run is
+  2024-06-22 → 2026-02-04 (split by 1-day Binance gaps). **Recent May–June 2026 is NOT usable**
+  (Binance `book_delta_v2` gaps). April 2026 is reserved for and consumed by the G0-XV pilot; it is
+  **not eligible for formal G1**. Select formal G1 OOS later from a refreshed certified calendar,
+  using coverage only, wholly outside `2025-11-01..2026-04-30`; this snapshot does not predeclare a
+  formal month, so G1 remains blocked until one is frozen.
 
 Reproduce: `ingest/verify_trades_and_calendar.py --verify-backfill` (anchor via `--end`/`END`); writes
 `data/usable_calendar.json`.
@@ -1116,7 +1121,8 @@ Done:
 - [x] **Unit/timestamp sanity** (L1 mid, clean day) — $0.000 median / 0.999982 corr (§5a). *Not* parity.
 - [x] **Crypto Lake bucket region** — `eu-west-1` (pyarrow S3 read; head_bucket 403s).
 - [x] **Trade-feed validation** (1 day, 3 venues) — §5b; Coinbase needs origin_time sort.
-- [x] **Usable all-feed calendar** — §5b; OOS ≈ April 2026, 52 Coinbase fill days.
+- [x] **Usable all-feed calendar** — §5b; April 2026 is the pilot OOS, 52 Coinbase fill days; formal
+      G1 OOS is intentionally unselected and must be outside the pilot.
 - [x] **Coverage scripts de-hard-coded** — anchor on `END`/`--end` (§9).
 - [x] **CoinAPI billing/limits understood** — $1/GB flat-files, REST credits, ~10 req/min, shared
       balance (§2.2). **Pre-download action:** enable Spend Management (daily cap + hard-stop).

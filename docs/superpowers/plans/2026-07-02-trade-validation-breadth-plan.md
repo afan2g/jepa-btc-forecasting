@@ -165,14 +165,15 @@ a book seam. So the cohort exercises the checks; it does not hardcode their verd
 | Crash-adjacent full gap | `2024-08-06` | full Coinbase gap (no Lake partition for either product) → the calendar marks it a trade-fill day → must route to `coinapi_fill`, not fail |
 | Coinbase gap/fill seam | `2025-01-07` | 33-day-hole end; the `book_delta_v2` resume is 14:45:00Z — the validator measures whether `trades` is similarly sparse or fully present |
 | High-vol vendor seam | `2024-12-04` | 63.2 M L3 `book` events (high-vol regime); trades coverage measured independently |
-| Recent OOS | `2026-04-15` | inside the April-2026 OOS usable run (`2026-02-06→2026-05-05`); all 3 venues Lake-present |
+| Pilot-OOS integrity day | `2026-04-15` | inside the April-2026 pilot-OOS usable run (`2026-02-06→2026-05-05`); all 3 venues Lake-present; trade validation is outcome-blind integrity work, not model evaluation |
 | Late-window clean | `2026-06-15` | `lake_usable` (book) late-window control |
 
 **Random sample across splits** (requirement: "random sampled days across train/val/test"): given
 `--start/--end`, draw `--sample-n` days deterministically (seeded `random.Random(seed)`) stratified
-across the three split spans (SSL-pretrain / head-finetune / the untouched OOS ≈ April 2026),
+across the three validation spans (SSL-pretrain / head-finetune / April-2026 pilot-OOS integrity),
 restricted to `usable_days` from `data/usable_calendar.json`. Deterministic so a re-run validates the
-same days (the report records the resolved `days_selected`).
+same days (the report records the resolved `days_selected`). The formal G1 holdout is selected later
+outside the pilot and is not defined by this trade-integrity sample.
 
 **Crash-context requirement** is satisfied by `2024-08-05` (+ its `2024-08-06` gap neighbour) in
 both the cohort and the default sample.
@@ -522,7 +523,8 @@ booleans are deliberately distinct so a deferred, unvalidated fill can never rea
   whenever it is non-empty.
 
 **Interaction with the modeling calendar (§5b) & CV (§8/E0.4):** the effective modeling calendar is
-the contiguous usable runs (`2024-06-22→2026-02-04`, `2026-02-06→2026-05-05`, OOS ≈ April 2026).
+the contiguous usable runs (`2024-06-22→2026-02-04`, `2026-02-06→2026-05-05`); April 2026 is the
+pilot OOS, while formal G1 OOS remains unselected and must be outside the pilot.
 Purged+embargoed CPCV already drops label-span-overlapping bars at gap/seam boundaries, so a
 warn-heavy seam day (e.g. `2025-01-07`) loses its boundary bars to embargo regardless; trade
 validation gates the *interior* of each usable run.

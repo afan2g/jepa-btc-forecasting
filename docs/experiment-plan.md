@@ -45,6 +45,8 @@ the full Binance archive is not pulled before the primary premise has bounded OO
    not falsify a leading Binance signal; a failure requires a recorded diagnosis and proceed/stop
    decision. Selection/CPCV uses November-March only. G0-CB never loads or scores April modeling
    data; issue #52 records its complete development trial history for the later G0-XV ledger.
+   Partitioning is span-based: before any forward read, drop a development row unless
+   `t_event + horizon_ns + guard_ns < 2026-04-01T00:00:00Z`; event-date filtering alone is invalid.
 2. **Six-month acquisition:** bound Coinbase fills and Binance Stage-1/Stage-2 work to
    `2025-11-01` through `2026-04-30`. Development/CPCV ends `2026-03-31`; April 2026 is reserved as
    the G0-XV pilot OOS month and is consumed after that one modeling evaluation.
