@@ -624,6 +624,25 @@ def test_billing_ledger_survives_run_boundaries(ready):
     assert rep["spend"]["prior_billed_usd"] >= 4.0
 
 
+def test_nonfinite_ledger_rows_are_ignored(ready):
+    # json.loads accepts NaN/Infinity: a corrupt billed_get row must not poison the budget —
+    # NaN would make every guard comparison false (fail-OPEN) and only crash at report write
+    os.makedirs(ready["out"], exist_ok=True)
+    with open(ready["out"] / "_manifest.jsonl", "a") as f:
+        f.write('{"kind": "billed_get", "manifest_sha256": "%s", "projected_usd": NaN}\n'
+                % ready["sha"])
+        f.write('{"kind": "billed_get", "manifest_sha256": "%s", "projected_usd": Infinity}\n'
+                % ready["sha"])
+        f.write('{"kind": "billed_get", "manifest_sha256": "%s", "projected_usd": 0.5}\n'
+                % ready["sha"])
+    fake = FakeS3(default_objects())
+    rc = run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 0
+    rep = _report(ready)
+    assert rep["spend"]["prior_billed_usd"] == 0.5      # only the finite row counts
+    assert rep["reconciliation"]["ok"] == 5
+
+
 def test_overwrite_rerun_is_recorded_in_spend_evidence(ready):
     fake = FakeS3(default_objects())
     assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
