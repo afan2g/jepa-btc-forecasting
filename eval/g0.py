@@ -299,6 +299,28 @@ def _require_target_only_venues(manifest: dict, context: str) -> None:
     _require_expected_target(manifest, context)
 
 
+def require_cross_venue_manifest(manifest: dict, context: str) -> None:
+    """Venue contract for a cross-venue build: an explicit signal/target role on every
+    venue, at least one signal venue, every signal among the preregistered Binance
+    markets, and exactly one Coinbase BTC-USD target. Shared by the G0-XV development
+    arms and the holdout scoring preflight (the frozen winner is always cross-venue)."""
+    venues = manifest["venues"]
+    unroled = [v for v in venues if v.get("role") not in ("signal", "target")]
+    if unroled:
+        raise ValueError(f"{context} venues must declare an explicit signal/target "
+                         f"role, got: {unroled}")
+    signals = [v for v in venues if v["role"] == "signal"]
+    if not signals:
+        raise ValueError(f"{context} declares no signal venue; cross-venue builds must "
+                         "declare their signal venue explicitly")
+    bad = [v for v in signals
+           if (v.get("exchange"), v.get("symbol")) not in ALLOWED_SIGNAL_VENUES]
+    if bad:
+        raise ValueError(f"{context} signal venues must be the preregistered Binance "
+                         f"markets {ALLOWED_SIGNAL_VENUES}, got: {bad}")
+    _require_expected_target(manifest, context)
+
+
 def g0cb_manifest_prechecks(manifest: dict, contract: dict) -> None:
     """Everything G0-CB can reject WITHOUT touching matrix data — run by the CLI before
     the matrix file is opened, and again inside run_g0cb_study. A holdout-bound manifest
@@ -495,27 +517,10 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
             # authorization test is meaningless against a non-Coinbase control.
             _require_target_only_venues(a["manifest"], "the G0-XV control arm")
         else:
-            venues = a["manifest"]["venues"]
-            unroled = [v for v in venues if v.get("role") not in ("signal", "target")]
-            if unroled:
-                raise ValueError(f"G0-XV arm {a['name']!r} venues must declare an "
-                                 f"explicit signal/target role, got: {unroled}")
-            signals = [v for v in venues if v["role"] == "signal"]
-            if not signals:
-                raise ValueError(f"G0-XV arm {a['name']!r} declares no signal venue; "
-                                 "cross-venue arms must declare their signal venue "
-                                 "explicitly")
-            # ... and the signals must be the PREREGISTERED Binance markets: a
-            # Kraken/OKX signal targeting Coinbase would freeze the wrong acquisition
-            # experiment as Binance spend-gate evidence.
-            bad = [v for v in signals
-                   if (v.get("exchange"), v.get("symbol")) not in ALLOWED_SIGNAL_VENUES]
-            if bad:
-                raise ValueError(f"G0-XV arm {a['name']!r} signal venues must be the "
-                                 f"preregistered Binance markets "
-                                 f"{ALLOWED_SIGNAL_VENUES}, got: {bad}")
-            # Cross-venue arms still label/trade the SAME protocol target venue.
-            _require_expected_target(a["manifest"], f"G0-XV arm {a['name']!r}")
+            # A Kraken/OKX signal targeting Coinbase would freeze the wrong acquisition
+            # experiment as Binance spend-gate evidence; roles are explicit, signals are
+            # the preregistered Binance markets, the target stays Coinbase BTC-USD.
+            require_cross_venue_manifest(a["manifest"], f"G0-XV arm {a['name']!r}")
 
     ledger = ledger if ledger is not None else TrialLedger()
     # n_imported counts the TRIAL entries carried in from the supplied prior histories

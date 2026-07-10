@@ -196,7 +196,9 @@ def test_score_rejects_wrong_dev_build_and_tampered_dev_rows(tmp_path, g0_pipeli
     w = g0_pipeline["world"]
     ctrl = w["dev"]["arms"]["coinbase_only"]
     if g0_pipeline["res_xv"]["winner"]["arm"] != "coinbase_only":
-        with pytest.raises(ValueError, match="not the frozen"):
+        # the target-only control build now trips the cross-venue manifest contract
+        # before the frozen-arm hash check — either way it is refused
+        with pytest.raises(ValueError, match="not the frozen|declares no signal venue"):
             _score(tmp_path, g0_pipeline, dev_matrix=ctrl["matrix"],
                    dev_manifest=ctrl["manifest"])
     arm = g0_pipeline["res_xv"]["winner"]["arm"]
@@ -425,6 +427,12 @@ def test_score_requires_declared_targets(tmp_path, g0_pipeline):
             v["symbol"] = "ETH-USD"
     with pytest.raises(ValueError, match="exactly one target venue COINBASE/BTC-USD"):
         _score(tmp_path, g0_pipeline, holdout_manifest=wrong_venue)
+    # ... and it must declare the preregistered Binance signal venue like every
+    # cross-venue build (the frozen winner is always a cross-venue arm)
+    no_signal = copy.deepcopy(w["holdout"]["arms"][arm]["manifest"])
+    no_signal["venues"] = [v for v in no_signal["venues"] if v.get("role") == "target"]
+    with pytest.raises(ValueError, match="declares no signal venue"):
+        _score(tmp_path, g0_pipeline, holdout_manifest=no_signal)
     assert _load(tmp_path, g0_pipeline)["state"] == "validated"
 
 
