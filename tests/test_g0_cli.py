@@ -190,6 +190,16 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
                     "--report-json", _dump(tmp_path, "report.json", report)],
                    read_matrix=store) == 0
 
+    # a VALIDATED transaction with a wrong holdout build must refuse BEFORE any matrix
+    # is opened — repeated mismatched invocations cannot re-open the holdout
+    other = "binance_only" if arm != "binance_only" else "combined"
+    wrong_build = [a for a in score_args]
+    wrong_build[wrong_build.index(f[f"holdout_{arm}_mat"])] = f[f"holdout_{other}_mat"]
+    wrong_build[wrong_build.index(f[f"holdout_{arm}_man"])] = f[f"holdout_{other}_man"]
+    pre_calls = list(store.calls)
+    assert rg.main(wrong_build, read_matrix=store) == 2
+    assert store.calls == pre_calls
+
     # an unwritable --out must fail BEFORE the transaction is consumed — both a missing
     # parent dir and an existing DIRECTORY at the leaf (a writable parent is not enough)
     bad_out = [a if not a.endswith("score.json") else str(tmp_path / "nodir" / "s.json")

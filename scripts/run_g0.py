@@ -41,7 +41,7 @@ from eval.freeze import build_freeze_artifact, load_freeze, write_freeze  # noqa
 from eval.g0 import (g0cb_manifest_prechecks, run_g0cb_study,          # noqa: E402
                      run_g0xv_development)
 from eval.hashing import hash_obj                                      # noqa: E402
-from eval.holdout import score_fixed_holdout                           # noqa: E402
+from eval.holdout import preflight_holdout_inputs, score_fixed_holdout  # noqa: E402
 from eval.ledger import TrialLedger, _json_safe                        # noqa: E402
 from eval.manifest import load_manifest                                # noqa: E402
 from eval.partition import load_partition_contract, require_binding    # noqa: E402
@@ -223,8 +223,11 @@ def cmd_holdout_score(args, read_matrix) -> int:
     contract = load_partition_contract(args.contract)
     dev_manifest = load_manifest(args.dev_manifest)
     holdout_manifest = load_manifest(args.holdout_manifest)
-    require_binding(dev_manifest, contract, "development")
-    require_binding(holdout_manifest, contract, "holdout")
+    # EVERY data-free frozen-pin check runs before any matrix is opened: a validated
+    # transaction with a wrong/stale build must not be able to re-open the holdout
+    # matrix through repeated failing invocations.
+    preflight_holdout_inputs(freeze, contract=contract, dev_manifest=dev_manifest,
+                             holdout_manifest=holdout_manifest)
     dev_matrix = read_matrix(args.dev_matrix)
     holdout_matrix = read_matrix(args.holdout_matrix)
     res = score_fixed_holdout(freeze_artifact=freeze, records_dir=args.records_dir,

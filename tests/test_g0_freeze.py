@@ -154,7 +154,8 @@ def test_freeze_recomputes_solo_gate_from_pinned_ledger():
                         "net_pnl": row["net_pnl"]}
     scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
              "dataset_id": "synthetic-xv-pilot", "build_id": "holdout-seeded-combined"}
-    with pytest.raises(ValueError, match="recomputed from the pinned trial ledger"):
+    # the pinned ledger verdict (registered at study time) refuses the forged pass
+    with pytest.raises(ValueError, match="not a pass"):
         build_freeze_artifact(forged, contract=w["contract"], ledger=led,
                               trade_validation_thresholds={"min_rows": 10},
                               holdout_scope=scope,
@@ -209,6 +210,51 @@ def test_freeze_rejects_verdict_flip_when_pbo_failed_closed(g0_world, monkeypatc
                               trade_validation_thresholds={"min_rows": 10},
                               holdout_scope=scope,
                               generated_at="2026-07-10T12:00:00+00:00")
+
+
+def test_freeze_with_append_only_ledger_across_studies(g0_world):
+    """Codex PR#60 round-4 P2/P3: a ledger carrying a PRIOR study's g0xv trials and
+    verdict entries (imported as search history) must neither poison the winner's DSR
+    reconciliation (dispersion is over the verdict-pinned study pool, multiplicity over
+    the full history) nor resolve the freeze to the stale study's verdict."""
+    from eval.g0 import run_g0xv_development
+    from eval.ledger import TrialLedger
+    from eval.synthetic import make_g0_world
+
+    # dsr_thresh 0.9: study B carries study A's 12 imported trials (n_eff 24), so its
+    # candidates deflate below the default 0.95 — this test needs B to PASS to prove the
+    # freeze reconciles under an appended history (the deflation itself is the point of
+    # the unified count and is pinned by test_armwise_false_pass_is_caught_by_unified_ledger).
+    xv_gate = {"n_groups": 4, "k": 2, "min_trades": 5, "min_eff_trades": 3.0,
+               "noise_band_n_boot": 500, "dsr_thresh": 0.9}
+    w_a = make_g0_world(n_dev_bars=300, n_holdout_bars=10, cb_signal=4.0, bn_signal=4.0,
+                        seed=3, dataset_id="synthetic-xv-pilot-a")
+    led_a = TrialLedger()
+    run_g0xv_development([{"name": n, **w_a["dev"]["arms"][n]}
+                          for n in ("coinbase_only", "binance_only", "combined")],
+                         w_a["contract"], gate=xv_gate, ledger=led_a)
+
+    arms_b = [{"name": n,
+               "manifest": copy.deepcopy(g0_world["dev"]["arms"][n]["manifest"]),
+               "matrix": g0_world["dev"]["arms"][n]["matrix"].copy()}
+              for n in ("coinbase_only", "binance_only", "combined")]
+    led_b = TrialLedger()
+    res_b = run_g0xv_development(arms_b, g0_world["contract"], gate=xv_gate,
+                                 ledger=led_b, prior_ledgers=[led_a])
+    assert res_b["g0xv_dev_pass"] and res_b["winner"]
+    verdicts_10s = [e for e in led_b.entries()
+                    if e["identity"]["protocol"] == "g0xv-verdict"
+                    and e["identity"]["horizon"] == "10s"]
+    assert len(verdicts_10s) == 2                     # stale + current pinned verdicts
+    scope = {"days": list(g0_world["holdout_days"]), "venues": ["coinbase"],
+             "dataset_id": "synthetic-xv-pilot",
+             "build_id": f"holdout-seeded-{res_b['winner']['arm']}"}
+    art = build_freeze_artifact(res_b, contract=g0_world["contract"], ledger=led_b,
+                                trade_validation_thresholds={"min_rows": 10},
+                                holdout_scope=scope,
+                                generated_at="2026-07-10T12:00:00+00:00")
+    assert verify_freeze(art)
+    assert art["trial_history"]["n_effective_trials"] == 24   # full multiplicity kept
 
 
 def test_freeze_rejects_ledger_drift(g0_pipeline):

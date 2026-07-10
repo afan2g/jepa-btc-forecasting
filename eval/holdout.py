@@ -73,6 +73,34 @@ def _utc_days(t_event: pd.Series) -> list[str]:
                   .dt.strftime("%Y-%m-%d").unique().tolist())
 
 
+def preflight_holdout_inputs(freeze_artifact: dict, *, contract: dict,
+                             dev_manifest: dict, holdout_manifest: dict) -> None:
+    """Every frozen-pin check that needs NO matrix data: contract pin, partition
+    bindings, the frozen winner-arm dev build, the holdout dataset/build scope, and the
+    winner's feature availability. Callers (the CLI in particular) run this BEFORE
+    opening any matrix file, so a validated transaction with mismatched inputs cannot
+    repeatedly re-open the holdout matrix through failing invocations."""
+    verify_freeze(freeze_artifact)
+    if contract_hash(contract) != freeze_artifact["sources"]["partition_contract_sha256"]:
+        raise ValueError("partition contract does not match the frozen source pin")
+    winner = freeze_artifact["winner"]
+    require_binding(dev_manifest, contract, "development")
+    require_binding(holdout_manifest, contract, "holdout")
+    frozen_dev_manifest = freeze_artifact["sources"]["arm_manifests"][winner["arm"]]
+    if hash_obj(dev_manifest) != frozen_dev_manifest:
+        raise ValueError(f"dev manifest is not the frozen {winner['arm']!r} arm build "
+                         "the winner was selected on")
+    scope = freeze_artifact["holdout_scope"]
+    if (holdout_manifest["dataset_id"] != scope["dataset_id"]
+            or holdout_manifest["build_id"] != scope["build_id"]):
+        raise ValueError("holdout manifest dataset/build does not match the frozen "
+                         "holdout scope")
+    missing = [c for c in winner["feature_cols"]
+               if c not in feature_list(holdout_manifest)]
+    if missing:
+        raise ValueError(f"holdout build lacks frozen winner features: {missing}")
+
+
 def score_fixed_holdout(*, freeze_artifact: dict, records_dir, contract: dict,
                         dev_matrix: pd.DataFrame, dev_manifest: dict,
                         holdout_matrix: pd.DataFrame, holdout_manifest: dict,
@@ -105,24 +133,11 @@ def score_fixed_holdout(*, freeze_artifact: dict, records_dir, contract: dict,
             "holdout scoring requires the one-time transaction in the 'validated' state "
             f"(exact-scope trade validation PASSed); it is {record['state']!r}")
 
-    if contract_hash(contract) != freeze_artifact["sources"]["partition_contract_sha256"]:
-        raise ValueError("partition contract does not match the frozen source pin")
+    preflight_holdout_inputs(freeze_artifact, contract=contract,
+                             dev_manifest=dev_manifest,
+                             holdout_manifest=holdout_manifest)
     winner = freeze_artifact["winner"]
-    require_binding(dev_manifest, contract, "development")
-    require_binding(holdout_manifest, contract, "holdout")
-    frozen_dev_manifest = freeze_artifact["sources"]["arm_manifests"][winner["arm"]]
-    if hash_obj(dev_manifest) != frozen_dev_manifest:
-        raise ValueError(f"dev manifest is not the frozen {winner['arm']!r} arm build "
-                         "the winner was selected on")
     scope = freeze_artifact["holdout_scope"]
-    if (holdout_manifest["dataset_id"] != scope["dataset_id"]
-            or holdout_manifest["build_id"] != scope["build_id"]):
-        raise ValueError("holdout manifest dataset/build does not match the frozen "
-                         "holdout scope")
-    missing = [c for c in winner["feature_cols"]
-               if c not in feature_list(holdout_manifest)]
-    if missing:
-        raise ValueError(f"holdout build lacks frozen winner features: {missing}")
 
     validate_frame(dev_matrix, dev_manifest)
     validate_frame(holdout_matrix, holdout_manifest)

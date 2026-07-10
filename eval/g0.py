@@ -492,6 +492,10 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
             "pbo_n_rows": h["pbo_n_rows"],
             "pbo_candidates_sha256": hash_obj(list(h["pbo_candidates"])),
             "solo_pass_cross_venue_sha256": hash_obj(sorted(h["solo_pass_cross_venue"])),
+            # The horizon's exact candidate pool: the freeze recomputes the winner's DSR
+            # dispersion over THESE trials, so an append-only ledger reused across
+            # builds cannot poison (or be poisoned by) another study's pool.
+            "pool": sorted(h["candidates"]),
             "noise_band": dict(h["noise_band"]),
             "gate_sha256": hash_obj(gate),
             "matched_row_sha256": matched["row_content_sha256"],

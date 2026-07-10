@@ -19,7 +19,7 @@ import tempfile
 import numpy as np
 
 from eval.hashing import hash_obj
-from eval.ledger import TrialLedger, _json_safe
+from eval.ledger import TrialLedger, _json_safe, identity_hash, trial_identity
 from eval.partition import contract_hash, validate_partition_contract
 from eval.stats import deflated_sharpe
 from eval.study import LGBM_RUNGS
@@ -136,55 +136,28 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
         raise ValueError("frozen winner is the control arm; only cross-venue candidates "
                          "can authorize the archive")
 
-    # Re-derive the solo gate from the PINNED ledger, not the editable verdict fields.
-    res = entry["result"]
-    for k in ("net_pnl", "trade_sharpe", "sample_sharpe", "n_trades", "t_eff"):
-        if not _close(row[k], res[k]):
-            raise ValueError(f"winner candidate row {k} does not reconcile to the pinned "
-                             "ledger result")
-    twin = next(
-        (e for e in ledger.entries()
-         if e["identity"]["protocol"] == "g0xv"
-         and e["identity"]["config"] == "naive"
-         and e["identity"]["variant"] == "base"
-         and all(e["identity"][k] == ident[k]
-                 for k in ("arm", "horizon", "dataset_id", "build_id"))), None)
-    if twin is None:
-        raise ValueError("no naive benchmark trial for the winner's arm/horizon in the "
-                         "pinned ledger")
-    pool = [e for e in ledger.entries()
-            if e["identity"]["protocol"] == "g0xv"
-            and e["identity"]["horizon"] == ident["horizon"]]
-    sr_std = float(np.array([e["result"]["trade_sharpe"] for e in pool]).std() + 1e-9)
-    gate = dev_result["gate"]
-    dsr = deflated_sharpe(sr_hat=res["trade_sharpe"], sr_trials_std=sr_std,
-                          n_trials=max(2, ledger.n_effective_trials()),
-                          T=max(int(round(res["t_eff"])), 2),
-                          skew=res["skew"], kurt=res["kurt"])
-    solo = bool(res["net_pnl"] > 0 and dsr > gate["dsr_thresh"]
-                and res["n_trades"] >= gate["min_trades"]
-                and res["t_eff"] >= gate["min_eff_trades"]
-                and res["sample_sharpe"] >= gate["min_sample_sharpe"]
-                and res["net_pnl"] > twin["result"]["net_pnl"])
-    if not solo:
-        raise ValueError("frozen winner does not clear the solo gate recomputed from the "
-                         "pinned trial ledger (DSR with the full effective trial count, "
-                         "trade floors, and the naive benchmark); an edited pass verdict "
-                         "cannot authorize the holdout")
-
     # The matrix-level verdicts (PBO availability/value, noise band, pass) are NOT
     # recomputable from per-trial results, so the study pins them into the ledger as
-    # g0xv-verdict entries at run time. The freeze requires the pinned verdict for the
-    # winner's horizon to be a PASS and the dev result to reconcile with it — flipping
-    # verdict fields in a saved JSON (e.g. a study that failed only on unavailable PBO
-    # or the noise band) cannot authorize the holdout.
-    v = next((e for e in ledger.entries()
-              if e["identity"]["protocol"] == "g0xv-verdict"
-              and e["identity"]["horizon"] == ident["horizon"]), None)
+    # g0xv-verdict entries at run time. The verdict identity is RECONSTRUCTED from the
+    # dev result's arm/build echo, so an append-only ledger reused across builds cannot
+    # resolve to a stale verdict for a different study.
+    arms_echo = dev_result["arms"]
+    control = dev_result.get("control_arm")
+    if control not in arms_echo:
+        raise ValueError("dev result control_arm is not among its arms")
+    verdict_ident = trial_identity(
+        protocol="g0xv-verdict", arm="unified",
+        dataset_id=arms_echo[control]["dataset_id"],
+        build_id=hash_obj({a: e["build_id"] for a, e in arms_echo.items()}),
+        feature_cols=sorted(arms_echo), config="horizon_verdict",
+        horizon=ident["horizon"])
+    verdict_id = identity_hash(verdict_ident)
+    by_id = {e["identity_sha256"]: e for e in ledger.entries()}
+    v = by_id.get(verdict_id)
     if v is None:
-        raise ValueError("no pinned g0xv-verdict entry for the winner's horizon in the "
-                         "trial ledger; re-run the development study (horizon verdicts "
-                         "are ledger-pinned at study time)")
+        raise ValueError("no pinned g0xv-verdict entry matching this study's arms/builds "
+                         "and the winner's horizon; re-run the development study "
+                         "(horizon verdicts are ledger-pinned at study time)")
     vr = v["result"]
     if not vr["pass"]:
         raise ValueError("the pinned ledger verdict for the winner's horizon is not a "
@@ -194,6 +167,7 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
         "pbo_available": bool(h.get("pbo_available")) == bool(vr["pbo_available"]),
         "solo_pass_cross_venue": hash_obj(sorted(h.get("solo_pass_cross_venue", [])))
             == vr["solo_pass_cross_venue_sha256"],
+        "candidate_pool": sorted(h.get("candidates", {})) == vr["pool"],
         "gate": hash_obj(_json_safe(dict(dev_result["gate"]))) == vr["gate_sha256"],
         "noise_band_beats_control": bool(h["noise_band"]["beats_control"])
             == bool(vr["noise_band"]["beats_control"]),
@@ -204,6 +178,50 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
     if bad:
         raise ValueError(f"dev result does not reconcile to the pinned ledger horizon "
                          f"verdict: {bad}")
+
+    # Re-derive the solo gate from the PINNED ledger, over the verdict's pinned study
+    # pool (NOT every historical same-horizon entry — an append-only ledger reused
+    # across builds must neither poison nor be poisoned by another study's dispersion).
+    # n_trials stays the FULL effective count: multiplicity spans the whole history.
+    res = entry["result"]
+    for k in ("net_pnl", "trade_sharpe", "sample_sharpe", "n_trades", "t_eff"):
+        if not _close(row[k], res[k]):
+            raise ValueError(f"winner candidate row {k} does not reconcile to the pinned "
+                             "ledger result")
+    pool = []
+    for pid in vr["pool"]:
+        pe = by_id.get(pid)
+        if pe is None:
+            raise ValueError("pinned verdict pool references a trial missing from the "
+                             "ledger (truncated or mismatched ledger)")
+        pool.append(pe)
+    twin = next(
+        (e for e in pool
+         if e["identity"]["config"] == "naive" and e["identity"]["variant"] == "base"
+         and e["identity"]["arm"] == ident["arm"]), None)
+    if twin is None:
+        raise ValueError("no naive benchmark trial for the winner's arm in the pinned "
+                         "study pool")
+    sr_std = float(np.array([e["result"]["trade_sharpe"] for e in pool]).std() + 1e-9)
+    gate = dev_result["gate"]
+    dsr = deflated_sharpe(sr_hat=res["trade_sharpe"], sr_trials_std=sr_std,
+                          n_trials=max(2, ledger.n_effective_trials()),
+                          T=max(int(round(res["t_eff"])), 2),
+                          skew=res["skew"], kurt=res["kurt"])
+    if not _close(dsr, row["dsr"]):
+        raise ValueError("winner DSR does not reconcile: recomputing over the pinned "
+                         "study pool with the full effective trial count does not "
+                         "reproduce the reported value")
+    solo = bool(res["net_pnl"] > 0 and dsr > gate["dsr_thresh"]
+                and res["n_trades"] >= gate["min_trades"]
+                and res["t_eff"] >= gate["min_eff_trades"]
+                and res["sample_sharpe"] >= gate["min_sample_sharpe"]
+                and res["net_pnl"] > twin["result"]["net_pnl"])
+    if not solo:
+        raise ValueError("frozen winner does not clear the solo gate recomputed from the "
+                         "pinned trial ledger (DSR with the full effective trial count, "
+                         "trade floors, and the naive benchmark); an edited pass verdict "
+                         "cannot authorize the holdout")
 
 
 def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedger,
