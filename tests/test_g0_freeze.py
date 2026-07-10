@@ -212,6 +212,23 @@ def test_freeze_rejects_verdict_flip_when_pbo_failed_closed(g0_world, monkeypatc
                               generated_at="2026-07-10T12:00:00+00:00")
 
 
+def test_freeze_rejects_edited_evidence_values(g0_pipeline):
+    """Codex PR#60 round-7: evidence VALUES reconcile against the pinned verdict too —
+    an edited PBO (or noise-band number) on an otherwise-passing result must not be
+    frozen into dev_result_sha256, even though the pass verdicts agree."""
+    for mutate, field in (
+            (lambda h: h.update(pbo=0.001), "pbo"),
+            (lambda h: h["noise_band"].update(band_low=999.0), "noise_band_values")):
+        edited = copy.deepcopy(g0_pipeline["res_xv"])
+        mutate(edited["horizons"]["10s"])
+        with pytest.raises(ValueError, match=field):
+            build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                                  ledger=g0_pipeline["led_xv"],
+                                  trade_validation_thresholds=g0_pipeline["thresholds"],
+                                  holdout_scope=g0_pipeline["scope"],
+                                  generated_at="2026-07-10T12:00:00+00:00")
+
+
 def test_freeze_pins_arm_matrix_hashes_to_ledger_verdict(g0_pipeline):
     """Codex PR#60 round-5 P1: the per-arm full matrix hashes the freeze copies into
     sources (and the holdout refit verifies against) must be the LEDGER-pinned ones — an

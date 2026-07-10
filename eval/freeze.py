@@ -94,6 +94,14 @@ def _close(a, b) -> bool:
     return abs(float(a) - float(b)) <= 1e-9 * max(1.0, abs(float(a)), abs(float(b)))
 
 
+def _same_num(a, b) -> bool:
+    """Null-safe numeric equality: NaN is stored as null in both the strict-JSON dev
+    result and the sanitized ledger results."""
+    if a is None or b is None:
+        return a is None and b is None
+    return _close(a, b)
+
+
 def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
     """Reconcile the claimed winner against the evidence it must have come from: a
     PASSING horizon's solo-passing cross-venue candidate whose reported row AND pinned
@@ -164,14 +172,27 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
         raise ValueError("the pinned ledger verdict for the winner's horizon is not a "
                          "pass (its PBO/noise-band/solo gates failed closed at study "
                          "time); an edited dev result cannot authorize the holdout")
+    nb, vnb = h["noise_band"], vr["noise_band"]
     checks = {
         "pbo_available": bool(h.get("pbo_available")) == bool(vr["pbo_available"]),
+        # VALUES too, not just verdicts: the freeze pins dev_result_sha256, so an edited
+        # PBO/noise number would misstate the frozen development evidence even when the
+        # pass verdict agrees.
+        "pbo": _same_num(h.get("pbo"), vr["pbo"]),
+        "pbo_n_rows": h.get("pbo_n_rows") == vr["pbo_n_rows"],
+        "pbo_candidates": hash_obj(list(h.get("pbo_candidates", [])))
+            == vr["pbo_candidates_sha256"],
         "solo_pass_cross_venue": hash_obj(sorted(h.get("solo_pass_cross_venue", [])))
             == vr["solo_pass_cross_venue_sha256"],
         "candidate_pool": sorted(h.get("candidates", {})) == vr["pool"],
         "gate": hash_obj(_json_safe(dict(dev_result["gate"]))) == vr["gate_sha256"],
-        "noise_band_beats_control": bool(h["noise_band"]["beats_control"])
-            == bool(vr["noise_band"]["beats_control"]),
+        "noise_band_beats_control": bool(nb["beats_control"])
+            == bool(vnb["beats_control"]),
+        "noise_band_values": (
+            all(_same_num(nb.get(k), vnb.get(k))
+                for k in ("band_low", "band_high", "delta_net_pnl"))
+            and nb.get("combined_candidate") == vnb.get("combined_candidate")
+            and nb.get("control_candidate") == vnb.get("control_candidate")),
         "matched_rows": dev_result["matched"]["row_content_sha256"]
             == vr["matched_row_sha256"],
         # The per-arm FULL content hashes the freeze copies into sources (and the
