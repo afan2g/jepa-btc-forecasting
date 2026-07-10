@@ -97,9 +97,15 @@ SCHEMA = pa.schema([
 # this change), so the executor validates the header before parsing, normalizes either time
 # form, and FAILS CLOSED on anything else rather than writing wrong data.
 TRADES_DATA_TYPE = "TRADES"
+# the six columns a trades file MUST carry to normalize at all (fail-closed otherwise) …
+TRADES_REQUIRED = ("time_exchange", "time_coinapi", "guid", "price", "base_amount", "taker_side")
+# … plus the documented trailing exchange/order identifiers: preserved losslessly when present
+# (dedupe/audit/replay evidence), null when a file omits them — never fabricated, never required.
+TRADES_ID_COLUMNS = ("id_exch_guid", "id_exch_int_inc", "order_id_maker", "order_id_taker")
 TRADES_READ_DTYPE = {
     "time_exchange": str, "time_coinapi": str, "guid": str,
     "price": "float64", "base_amount": "float64", "taker_side": str,
+    **{c: str for c in TRADES_ID_COLUMNS},
 }
 TRADES_SCHEMA = pa.schema([
     ("seq", pa.int64()),
@@ -109,6 +115,7 @@ TRADES_SCHEMA = pa.schema([
     ("price", pa.float64()),
     ("base_amount", pa.float64()),
     ("taker_side", pa.string()),
+    *[(c, pa.string()) for c in TRADES_ID_COLUMNS],
 ])
 
 
@@ -186,6 +193,10 @@ def trades_to_table(df: pd.DataFrame, seq_start: int, day: str) -> pa.Table:
         "price": df["price"].astype("float64"),
         "base_amount": df["base_amount"].astype("float64"),
         "taker_side": df["taker_side"].fillna("").astype(str),
+        # optional identifiers: nullable ("string" dtype keeps NA -> arrow null), absent -> null
+        **{c: (df[c].astype("string") if c in df.columns
+               else pd.array([None] * n, dtype="string"))
+           for c in TRADES_ID_COLUMNS},
     })
     return pa.Table.from_pandas(out, schema=TRADES_SCHEMA, preserve_index=False)
 
@@ -195,10 +206,11 @@ def trades_to_table(df: pd.DataFrame, seq_start: int, day: str) -> pa.Table:
 # the faithful read/write schemas, and a day-bound normalizer factory (`make_to_table(day)`) —
 # vendor schema knowledge stays here at the ingestion boundary.
 HANDLERS = {
-    bf.PRODUCT_BOOK: {"data_type": DATA_TYPE, "read_dtype": READ_DTYPE, "schema": SCHEMA,
+    bf.PRODUCT_BOOK: {"data_type": DATA_TYPE, "read_dtype": READ_DTYPE,
+                      "required": tuple(READ_DTYPE), "schema": SCHEMA,
                       "make_to_table": lambda day: to_table, "dict_cols": ("update_type",)},
     bf.PRODUCT_TRADES: {"data_type": TRADES_DATA_TYPE, "read_dtype": TRADES_READ_DTYPE,
-                        "schema": TRADES_SCHEMA,
+                        "required": TRADES_REQUIRED, "schema": TRADES_SCHEMA,
                         "make_to_table": lambda day: (
                             lambda df, seq: trades_to_table(df, seq, day)),
                         "dict_cols": ("taker_side",)},
@@ -340,9 +352,13 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
     resume = bf.unit_resume_status(args.out, manifest_sha256, unit, final,
                                    overwrite=args.overwrite)
     if resume == "done":
+        # carry the FULL audit trail from state (rows, src bytes/hash) so a resumed report stays
+        # auditable from the report alone; billed_bytes stays 0 — nothing was billed THIS run
         st = bf.load_state(bf.state_path(args.out, manifest_sha256, product, day)) or {}
-        res.update(status="done", key=st.get("key"), out_bytes=st.get("out_bytes") or 0,
-                   out_sha256=st.get("out_sha256"), out_path=final)
+        res.update(status="done", key=st.get("key"), src_bytes=st.get("src_bytes") or 0,
+                   src_sha256=st.get("src_sha256"), rows=st.get("rows") or 0,
+                   out_bytes=st.get("out_bytes") or 0, out_sha256=st.get("out_sha256"),
+                   out_path=final)
         print(f"  {day}  {product}  done (state + output bytes re-verified for this manifest)")
         return res
     if resume == "conflict":
@@ -397,7 +413,7 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
             got, src_sha = stream_to_file(s3, bucket, key, gz_path)
             if got != src_bytes:
                 raise ValueError(f"size mismatch {got} != {src_bytes}")
-            _validate_csv_columns(gz_path, list(handler["read_dtype"]), f"{product} {day}")
+            _validate_csv_columns(gz_path, list(handler["required"]), f"{product} {day}")
             chunks = pd.read_csv(gz_path, compression="gzip", sep=";", chunksize=CHUNK_ROWS,
                                  dtype=handler["read_dtype"])
             rows, _ = write_parquet(chunks, tmp_parq, schema=handler["schema"],

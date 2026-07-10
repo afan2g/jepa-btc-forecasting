@@ -24,7 +24,9 @@ dl = fx.load_by_path("download_coinapi", "ingest/download_coinapi.py")
 dl.ff.RL.interval = 0.0                       # no throttling sleeps in tests
 
 BOOK_HEADER = "time_exchange;time_coinapi;update_type;is_buy;entry_px;entry_sx;order_id"
-TRADES_HEADER = "time_exchange;time_coinapi;guid;price;base_amount;taker_side"
+# documented flat-file TRADES header: the four trailing identifier columns follow taker_side
+TRADES_HEADER = ("time_exchange;time_coinapi;guid;price;base_amount;taker_side;"
+                 "id_exch_guid;id_exch_int_inc;order_id_maker;order_id_taker")
 
 
 def book_gz(n=3):
@@ -32,10 +34,15 @@ def book_gz(n=3):
     return gzip.compress(("\n".join([BOOK_HEADER] + rows) + "\n").encode())
 
 
+def trades_row(i, time_exchange, time_coinapi):
+    return (f"{time_exchange};{time_coinapi};g-{i};100.5;0.2{i};BUY;"
+            f"eg-{i};{i};mk-{i};tk-{i}")
+
+
 def trades_gz(n=2, header=TRADES_HEADER, day="2025-01-10"):
     # CoinAPI flat-file TRADES time columns are FULL datetimes (docs show
     # 2025-02-14T13:30:03.5851480), unlike the book's time-of-day offsets
-    rows = [f"{day}T12:00:0{i}.0000000;{day}T12:00:0{i}.0100000;g-{i};100.5;0.2{i};BUY"
+    rows = [trades_row(i, f"{day}T12:00:0{i}.0000000", f"{day}T12:00:0{i}.0100000")
             for i in range(n)]
     return gzip.compress(("\n".join([header] + rows) + "\n").encode())
 
@@ -179,14 +186,37 @@ def test_trades_parquet_is_normalized(ready):
     # ParquetFile reads the file alone (read_table would infer hive partition cols from the path)
     t = pq.ParquetFile(_final(ready, "trades", "2025-01-10")).read()
     assert t.column_names == ["seq", "time_exchange_ns", "time_coinapi_ns", "guid", "price",
-                              "base_amount", "taker_side"]
+                              "base_amount", "taker_side", "id_exch_guid", "id_exch_int_inc",
+                              "order_id_maker", "order_id_taker"]
     assert t.column("seq").to_pylist() == [0, 1]
     assert t.column("guid").to_pylist() == ["g-0", "g-1"]
     assert t.column("taker_side").to_pylist() == ["BUY", "BUY"]
     assert t.column("price").to_pylist() == [100.5, 100.5]
     assert t.column("base_amount").to_pylist() == [0.20, 0.21]
+    # the documented exchange/order identifiers ride along losslessly
+    assert t.column("id_exch_guid").to_pylist() == ["eg-0", "eg-1"]
+    assert t.column("id_exch_int_inc").to_pylist() == ["0", "1"]
+    assert t.column("order_id_maker").to_pylist() == ["mk-0", "mk-1"]
+    assert t.column("order_id_taker").to_pylist() == ["tk-0", "tk-1"]
     # "2025-01-10T12:00:00.0000000" -> ns since the partition day's midnight UTC
     assert t.column("time_exchange_ns").to_pylist()[0] == 12 * 3600 * 10**9
+
+
+def test_trades_without_identifier_columns_normalizes_with_nulls(ready):
+    # only the six core columns are REQUIRED; a file lacking the documented identifier columns
+    # still normalizes, with the identifier fields null (never fabricated)
+    import pyarrow.parquet as pq
+    objs = default_objects()
+    core = "time_exchange;time_coinapi;guid;price;base_amount;taker_side"
+    rows = [f"2025-01-11T12:00:0{i}.0000000;2025-01-11T12:00:0{i}.0100000;g-{i};100.5;0.2{i};BUY"
+            for i in range(2)]
+    objs[_key("TRADES", "2025-01-11")] = gzip.compress(("\n".join([core] + rows) + "\n").encode())
+    fake = FakeS3(objs)
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    t = pq.ParquetFile(_final(ready, "trades", "2025-01-11")).read()
+    assert t.column("guid").to_pylist() == ["g-0", "g-1"]
+    assert t.column("id_exch_guid").to_pylist() == [None, None]
+    assert t.column("order_id_taker").to_pylist() == [None, None]
 
 
 def test_trades_time_of_day_offset_form_also_normalizes(ready):
@@ -194,7 +224,7 @@ def test_trades_time_of_day_offset_form_also_normalizes(ready):
     # ns-since-partition-midnight normalization
     import pyarrow.parquet as pq
     objs = default_objects()
-    rows = [f"12:00:0{i}.0000000;12:00:0{i}.0100000;g-{i};100.5;0.2{i};BUY" for i in range(3)]
+    rows = [trades_row(i, f"12:00:0{i}.0000000", f"12:00:0{i}.0100000") for i in range(3)]
     objs[_key("TRADES", "2025-01-11")] = gzip.compress(
         ("\n".join([TRADES_HEADER] + rows) + "\n").encode())
     fake = FakeS3(objs)
@@ -209,8 +239,8 @@ def test_trades_datetime_outside_partition_day_is_preserved(ready):
     # offset (>= DAY_NS) rather than being clamped or wrapped — recon owns day-boundary logic
     import pyarrow.parquet as pq
     objs = default_objects()
-    rows = ["2025-01-11T23:59:59.0000000;2025-01-11T23:59:59.0100000;g-0;100.5;0.20;BUY",
-            "2025-01-12T00:00:00.0000000;2025-01-12T00:00:00.0100000;g-1;100.5;0.21;SELL"]
+    rows = [trades_row(0, "2025-01-11T23:59:59.0000000", "2025-01-11T23:59:59.0100000"),
+            trades_row(1, "2025-01-12T00:00:00.0000000", "2025-01-12T00:00:00.0100000")]
     objs[_key("TRADES", "2025-01-11")] = gzip.compress(
         ("\n".join([TRADES_HEADER] + rows) + "\n").encode())
     fake = FakeS3(objs)
@@ -226,8 +256,15 @@ def test_execute_resume_skips_done_units_without_vendor_calls(ready):
     rc = run_cli(ready, execute_args(ready), s3_factory=lambda: (fake2, "coinapi"))
     assert rc == 0
     assert fake2.calls == []
-    rec = _report(ready)["reconciliation"]
+    rep = _report(ready)
+    rec = rep["reconciliation"]
     assert rec["done_prior"] == 5 and rec["ok"] == 0 and rec["complete"] is True
+    # a resumed report stays auditable from the report alone: the done units carry the audit
+    # fields (rows, src bytes/hash) recorded in state — but bill nothing this run
+    done = {(u["product"], u["day"]): u for u in rep["units"]}[("trades", "2025-01-11")]
+    assert done["rows"] == 3 and done["src_sha256"] and done["src_bytes"] > 0
+    assert done["out_sha256"] and done.get("billed_bytes", 0) == 0
+    assert rec["bytes_downloaded"] == 0
 
 
 def test_foreign_output_is_a_conflict_and_never_overwritten(ready):
