@@ -418,6 +418,26 @@ class TestOnDemandReseedArm:
         assert m1["frame_hash"] == m2["frame_hash"]
         assert m1["on_demand"]["request_log"] == m2["on_demand"]["request_log"]
 
+    def test_early_stamped_snapshot_is_injected_at_the_trigger_not_before(self):
+        # A provider may return state STAMPED at an earlier cadence point (e.g. the
+        # last stored grid second). Injecting it at that earlier stamp would repair
+        # samples BEFORE the trigger that authorized the request — a retroactive
+        # lookahead. The arm must inject at the trigger time; the pre-trigger sample
+        # stays crossed exactly as a live causal system would have seen it.
+        def early_stamp_provider(requested_ts):
+            snap = _true_state_snapshot(requested_ts - s(15))  # stamped 15 s earlier
+            return snap, {"vendor": "synthetic", "at_ts": requested_ts}
+
+        # trigger window 45 s is deliberately OFF the 30 s grid: trig = 210+45 = 255 s
+        frame, meta = self._run(early_stamp_provider, trigger_after_crossed_s=45.0)
+        log = meta["on_demand"]["request_log"]
+        assert log and log[0]["requested_ts"] == DAY_OPEN + s(255)
+        assert meta["candidates"]["accepted"][0]["ts"] == DAY_OPEN + s(255)
+        at_240 = frame[frame["sample_ts"] == DAY_OPEN + s(240)].iloc[0]
+        assert at_240["bid_0_price"] >= at_240["ask_0_price"]  # still crossed pre-trigger
+        at_270 = frame[frame["sample_ts"] == DAY_OPEN + s(270)].iloc[0]
+        assert at_270["bid_0_price"] < at_270["ask_0_price"]   # repaired after trigger
+
 
 # ----------------------------------------------------------------- arm parity evaluation
 class TestEvaluateArmParity:
@@ -440,16 +460,35 @@ class TestEvaluateArmParity:
                                   injection_guard_s=60.0)
         assert set(rep) >= {"day_quality", "parity", "parity_guarded", "since_ts",
                             "excluded_crossed_ts", "injection_guard"}
-        # the seed accepted at 300s clamps the compared window (no pre-seed samples)
-        assert rep["since_ts"] == DAY_OPEN + s(300)
+        # A MID-DAY seed (here 300 s in) does NOT clamp the compared window: the
+        # pre-seed established cold-start book is the strategy's genuine output and
+        # must be scored (documented deviation from run_parity_core, which only ever
+        # clamps day-open bootstrap seeds). The warm-up cutoff still applies.
+        assert rep["since_ts"] == DAY_OPEN + s(90)  # 3rd consecutive valid sample
         assert rep["parity"]["n_grid_full"] == len(GRID)
         dq = rep["day_quality"]
         assert {"crossed_rate", "missing_book_fraction", "thin_depth_fraction",
-                "crossed_duration_s"} <= set(dq)
+                "crossed_duration_s", "seed_accepted"} <= set(dq)
         # guarded variant additionally masks the 60 s after the injection at 300s
         g = rep["injection_guard"]
         assert g["guard_s"] == 60.0
         assert g["n_guard_excluded"] >= 1  # the 300s and 330s samples fall in the guard
+
+    def test_day_open_seed_still_clamps_to_seed_ts(self):
+        from experiments.snapshot_seed import (SnapshotAcceptance, evaluate_arm_parity,
+                                               seed_lake_replay)
+        from recon.coinapi import reconstruct_coinapi_l2_at_samples
+        acceptance = SnapshotAcceptance(min_levels_per_side=2, max_age_s=600.0,
+                                        tick_scale=100)
+        seed = _true_state_snapshot(DAY_OPEN)  # a true day-open bootstrap
+        arm_frame, arm_meta = seed_lake_replay(
+            synthetic_lake_day(), [(seed, {})], grid=GRID, k=2, acceptance=acceptance)
+        ref, _ = reconstruct_coinapi_l2_at_samples(
+            synthetic_l3_day(), k=2, day=DAY, sample_ts=GRID, size_policy="decrement")
+        rep = evaluate_arm_parity(arm_frame, arm_meta, ref, k=2, grid_s=30.0)
+        # production clamp semantics: max(warm-up cutoff, seed_ts); warm-up needs 3
+        # consecutive good samples, so the cutoff is the 60 s sample
+        assert rep["since_ts"] == DAY_OPEN + s(60)
 
     def test_parity_carries_required_metrics(self):
         from experiments.snapshot_seed import evaluate_arm_parity
@@ -481,34 +520,85 @@ class TestPreregistration:
         assert artifact["thresholds"] == PREREGISTERED["thresholds"]
         assert artifact["fixture_days"] == PREREGISTERED["fixture_days"]
 
+    def _dq(self, **kw):
+        d = {"crossed_rate": 0.0001, "missing_book_fraction": 0.001,
+             "thin_depth_fraction": 0.01, "crossed_duration_s": 10.0,
+             "seed_accepted": True}
+        d.update(kw)
+        return d
+
+    def _parity(self, **kw):
+        p = {"mid_diff": {"median": 0.0, "signed_mean": 0.05, "corr": 0.99999,
+                          "p95": 0.5, "p99": 4.0},
+             "spike_fraction": {">50": 0.00002},
+             "label_agreement": {"2": {"agreement": 0.95},
+                                 "10": {"agreement": 0.98},
+                                 "60": {"agreement": 0.995}}}
+        p.update(kw)
+        return p
+
     def test_passing_metrics_pass(self):
         from experiments.snapshot_seed import evaluate_preregistered
-        verdict = evaluate_preregistered(
-            day_quality={"crossed_rate": 0.0001, "missing_book_fraction": 0.001,
-                         "thin_depth_fraction": 0.01, "crossed_duration_s": 10.0},
-            parity={"mid_diff": {"median": 0.0, "signed_mean": 0.05, "corr": 0.99999,
-                                 "p95": 0.5, "p99": 4.0},
-                    "spike_fraction": {">50": 0.00002},
-                    "label_agreement": {"2": {"agreement": 0.95},
-                                        "10": {"agreement": 0.98},
-                                        "60": {"agreement": 0.995}}})
+        verdict = evaluate_preregistered(day_quality=self._dq(), parity=self._parity())
         assert verdict["pass"] is True
         assert verdict["failed"] == []
 
     def test_failing_metrics_name_the_criterion(self):
         from experiments.snapshot_seed import evaluate_preregistered
         verdict = evaluate_preregistered(
-            day_quality={"crossed_rate": 0.05, "missing_book_fraction": 0.001,
-                         "thin_depth_fraction": 0.01, "crossed_duration_s": 10.0},
-            parity={"mid_diff": {"median": 0.0, "signed_mean": 0.05, "corr": 0.9990,
-                                 "p95": 0.5, "p99": 4.0},
-                    "spike_fraction": {">50": 0.00002},
-                    "label_agreement": {"2": {"agreement": 0.95},
-                                        "10": {"agreement": 0.98},
-                                        "60": {"agreement": 0.995}}})
+            day_quality=self._dq(crossed_rate=0.05),
+            parity=self._parity(mid_diff={"median": 0.0, "signed_mean": 0.05,
+                                          "corr": 0.9990, "p95": 0.5, "p99": 4.0}))
         assert verdict["pass"] is False
         assert "day_quality.crossed_rate" in verdict["failed"]
         assert "parity.mid_corr" in verdict["failed"]
+
+    def test_unseeded_arm_fails_crossed_duration_closed(self):
+        from experiments.snapshot_seed import evaluate_preregistered
+        # crossed_duration_s only accumulates after a seed lands (recon.reseed
+        # update_crossed), so a never-seeded arm reporting 0.0 has NOT measured the
+        # bar — fail closed rather than pass on an unmeasured metric.
+        verdict = evaluate_preregistered(
+            day_quality=self._dq(seed_accepted=False, crossed_duration_s=0.0),
+            parity=self._parity())
+        assert "day_quality.crossed_duration_s" in verdict["failed"]
+
+    def test_prereg_arm_names_are_runnable(self):
+        import json
+        import pathlib
+        import importlib
+        runner = importlib.import_module("scripts.run_snapshot_seed_experiment")
+        artifact = json.loads(
+            (pathlib.Path(__file__).parent.parent / "experiments" /
+             "preregistration_54.json").read_text())
+        specs = runner.arm_specs_from_names(artifact["arms"])  # must not raise
+        assert len(specs) == len(artifact["arms"])
+        assert artifact["emulated_variants"]  # documented separately from arms
+
+
+# --------------------------------------------------------------------- economics verdict
+class TestEvaluateEconomics:
+    def test_passing_band_passes(self):
+        from experiments.snapshot_seed import evaluate_economics, project_strategy_costs
+        costs = project_strategy_costs(full_day_book_gb=2.0, on_demand_requests=1)
+        v = evaluate_economics(costs=costs)
+        assert v["pass"] is True and v["failed"] == []
+        assert "economics.rest_on_demand" in v["checked"]
+
+    def test_band_worse_than_bar_fails_conservatively(self):
+        from experiments.snapshot_seed import evaluate_economics, project_strategy_costs
+        # 200 requests at the 10-credit cap on a small day: the HIGH cost end busts
+        # the <=25%-of-full-day bar even though the LOW end passes -> fail (bands are
+        # resolved conservatively, never optimistically).
+        costs = project_strategy_costs(full_day_book_gb=0.8, on_demand_requests=200)
+        v = evaluate_economics(costs=costs)
+        assert v["pass"] is False
+        assert "economics.rest_on_demand" in v["failed"]
+
+    def test_missing_band_fails_closed(self):
+        from experiments.snapshot_seed import evaluate_economics
+        v = evaluate_economics(costs={"full_day_fill": {"usd": 2.0}})
+        assert v["pass"] is False and v["failed"] == ["economics.no_strategy_band"]
 
 
 # ------------------------------------------------------------------------ cost projection
@@ -689,6 +779,34 @@ class TestRunExperimentDay:
         for name in ("coinapi_day_open_L2", "coinapi_stream_L2"):
             assert rep["arms"][name]["non_regression"] is not None
 
+    def test_day_open_arm_is_seed_only_and_keeps_residual_crossed(self):
+        rep = self._run()
+        arm = rep["arms"]["coinapi_day_open_L2"]
+        # production --no-reseed A/B semantics: a single day-open snapshot with no
+        # intraday repair; residual crossed samples surface in parity, never excluded
+        assert arm["meta"]["policy"]["enabled"] is False
+        assert arm["evaluation"]["n_excluded_crossed"] == 0
+
+    def test_guarded_verdict_scored_and_gates_shared_source_arms(self):
+        rep = self._run()
+        for name, arm in rep["arms"].items():
+            ev = arm["evaluation"]
+            assert "preregistered_guarded" in ev, name
+            kind = arm["spec"]["kind"]
+            if kind in ("day_open", "stream", "on_demand"):
+                assert ev["preregistered_guarded"] is not None, name
+                expected = bool(ev["preregistered"]["pass"]
+                                and ev["preregistered_guarded"]["pass"])
+                assert arm["prereg_pass_effective"] == expected, name
+            else:
+                assert arm["prereg_pass_effective"] == ev["preregistered"]["pass"], name
+
+    def test_economics_verdict_attached_to_priced_arms(self):
+        rep = self._run()
+        assert rep["arms"]["coinapi_on_demand_L2"]["economics"] is not None
+        assert rep["arms"]["coinapi_stream_L2"]["economics"] is not None
+        assert rep["arms"]["cold_control"]["economics"] is None
+
     def test_report_is_deterministic_and_json_safe(self):
         import json
         r1 = self._run()
@@ -730,6 +848,16 @@ class TestFrameSnapshotProvider:
 
 # ----------------------------------------------------------------------------- CLI shell
 class TestRunnerScript:
+    def test_k_ref_covers_every_reference_backed_arm(self):
+        import importlib
+        runner = importlib.import_module("scripts.run_snapshot_seed_experiment")
+        specs = runner.arm_specs_from_names(
+            ["cold_control", "coinapi_on_demand_L20", "coinapi_stream_L5"])
+        # on_demand reads the reference frame too — omitting it would crash the
+        # frame provider on a k=10 reference
+        assert runner.k_ref_for(specs, k=10) == 20
+        assert runner.k_ref_for(runner.arm_specs_from_names(["cold_control"]), k=10) == 10
+
     def test_arm_specs_from_names(self):
         import importlib
         runner = importlib.import_module("scripts.run_snapshot_seed_experiment")

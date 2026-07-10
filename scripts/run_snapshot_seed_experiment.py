@@ -70,6 +70,14 @@ def arm_specs_from_names(names) -> list[dict]:
     return specs
 
 
+def k_ref_for(arm_specs: list[dict], *, k: int) -> int:
+    """Reference-frame depth: must cover the parity k AND every arm that reads the
+    reference frame (stream candidates AND the on-demand frame provider)."""
+    frame_backed = [sp["levels"] for sp in arm_specs
+                    if sp["kind"] in ("stream", "on_demand") and sp.get("levels")]
+    return max([k] + frame_backed)
+
+
 def full_day_gb_from_manifest(manifest_path, day: str):
     """Billable GB for the day's vendor csv.gz from the decode manifest (`status=ok`
     rows carry `src_bytes` = the size CoinAPI actually billed at $1/GB)."""
@@ -140,6 +148,9 @@ def arm_summary_rows(report: dict) -> list[dict]:
             "label_10s": (la.get("10") or {}).get("agreement"),
             "label_60s": (la.get("60") or {}).get("agreement"),
             "prereg_pass": pre.get("pass"),
+            "prereg_guarded_pass": (ev.get("preregistered_guarded") or {}).get("pass"),
+            "prereg_pass_effective": arm.get("prereg_pass_effective"),
+            "econ_pass": (arm.get("economics") or {}).get("pass"),
             "prereg_failed": ";".join(pre.get("failed", [])),
             "n_grid": ev["parity"].get("n_grid"),
         }
@@ -220,9 +231,7 @@ def main(argv=None) -> int:
         return 3
 
     grid = build_grid(day, args.grid_ms)
-    stream_levels = [sp["levels"] for sp in arm_specs
-                     if sp["kind"] == "stream" and sp.get("levels")]
-    k_ref = max([args.k] + stream_levels)
+    k_ref = k_ref_for(arm_specs, k=args.k)
 
     src_sha = "skipped" if args.no_input_hash else sha256_file(capi_path)
     print(f"CoinAPI parquet: {capi_path}\n  sha256: {src_sha}")
@@ -314,7 +323,10 @@ def main(argv=None) -> int:
         p99 = f"{row['mid_p99']:.2f}" if row.get("mid_p99") is not None else "n/a"
         print(f"  {row['arm']:<28} crossed {row['crossed_rate'] if row['crossed_rate'] is not None else float('nan'):.4%} "
               f"| p99 ${p99} | corr {corr} | 2s {row['label_2s']}"
-              f" | prereg {'PASS' if row['prereg_pass'] else 'fail'}"
+              f" | prereg {'PASS' if row['prereg_pass_effective'] else 'fail'}"
+              f" (guarded {'ok' if row['prereg_guarded_pass'] else '—'})"
+              + (f" | econ {'ok' if row['econ_pass'] else 'FAIL'}"
+                 if row["econ_pass"] is not None else "")
               + (f" | req {row['n_requests']}" if "n_requests" in row else ""))
     print(f"\n  wrote {jpath}\n        {cpath}")
     return 0

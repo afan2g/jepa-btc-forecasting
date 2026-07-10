@@ -295,6 +295,9 @@ def seed_lake_replay(lake_df: pd.DataFrame, candidates, *, grid, k: int,
             ledger["rejected"].append({**entry, "reason": reason})
     ledger["n_accepted"] = len(accepted)
 
+    if engine == "native" and price_scale is None:
+        raise ValueError("native engine requires a non-None price_scale "
+                         "(resolve via recon.native.resolve_engine)")
     policy = ReseedPolicy(enabled=reseed,
                           min_levels_per_side=acceptance.min_levels_per_side,
                           reseed_after_crossed_s=reseed_after_crossed_s,
@@ -339,7 +342,16 @@ def evaluate_arm_parity(arm_frame: pd.DataFrame, arm_meta: dict,
     seed_accepted = bool(arm_meta.get("seed_accepted"))
     seed_ts = arm_meta.get("seed_ts")
     cutoff = lake_warmup_cutoff(arm_frame)
-    if seed_accepted and seed_ts is not None:
+    # Clamp the compared window to the seed ONLY for a day-open bootstrap (production
+    # run_parity_core semantics: pre-seed cold-start is warm-up, not the arm). A
+    # MID-DAY first injection (the on-demand strategy) does NOT clamp: everything the
+    # strategy produced before its first request — the established cold-start book —
+    # is its genuine output and stays scored. This is a deliberate, documented
+    # deviation from run_parity_core, which never faces mid-day initial seeds.
+    day_start = int(arm_frame["sample_ts"].astype("int64").min())
+    grid_ns = int(grid_s * 1e9)
+    if (seed_accepted and seed_ts is not None
+            and int(seed_ts) <= day_start + grid_ns):
         cutoff = int(seed_ts) if cutoff is None else max(int(cutoff), int(seed_ts))
     reseed_enabled = bool(arm_meta.get("policy", {}).get("enabled", False))
     excluded = (set(arm_meta.get("crossed_sample_ts", []))
@@ -375,6 +387,7 @@ def evaluate_arm_parity(arm_frame: pd.DataFrame, arm_meta: dict,
             "missing_book_fraction": arm_meta.get("missing_book_fraction"),
             "thin_depth_fraction": arm_meta.get("thin_depth_fraction"),
             "crossed_duration_s": arm_meta.get("crossed_duration_s"),
+            "seed_accepted": seed_accepted,
         },
         "since_ts": (int(cutoff) if cutoff is not None else None),
         "excluded_crossed_ts": sorted(excluded)[:100],
@@ -424,7 +437,13 @@ def evaluate_preregistered(*, day_quality: dict, parity: dict) -> dict:
                      ("thin_depth_fraction", dq["thin_depth_fraction_max"]),
                      ("crossed_duration_s", dq["crossed_duration_s_max"])):
         v = day_quality.get(key)
-        check(f"day_quality.{key}", v, v is not None and v <= bar)
+        ok = v is not None and v <= bar
+        if key == "crossed_duration_s" and day_quality.get("seed_accepted") is not True:
+            # crossed duration only accumulates once a seed lands (recon.reseed
+            # update_crossed): a never-seeded arm reporting 0.0 has not MEASURED the
+            # bar — fail closed on an unmeasured metric.
+            ok = False
+        check(f"day_quality.{key}", v, ok)
 
     pa = th["parity"]
     md = parity.get("mid_diff", {})
@@ -463,8 +482,11 @@ def emulate_degradation(lake_df: pd.DataFrame, kind: str, *, start_ts: int | Non
       * `leading_gap`  — drop every delta before `start_ts` (a day whose Lake coverage
         starts mid-day: the #33 `leading_partial_fill` shape, e.g. 2025-01-07);
       * `sparse`       — keep only rows with `row_index % keep_mod != 0` (deterministic
-        index-based thinning, no RNG; emulates upstream row loss, which also strands
-        levels whose clears fall on dropped rows).
+        index-based uniform row loss, no RNG). Note this is a benign-dominated mix:
+        most dropped rows are quickly overwritten by later updates to the same level;
+        a level is stranded only when its FINAL clear happens to land on a dropped
+        index. The stranded-level failure mode proper is covered by the real
+        crossed-seed fixture days, not by this emulation.
     """
     etc = engine_time_col or shared_engine_time_col(lake_df)
     info = {"kind": kind, "rows_before": int(len(lake_df))}
@@ -520,6 +542,29 @@ def evaluate_control_non_regression(*, arm: dict, control: dict) -> dict:
     check("non_regression.label_2s", a_l,
           None not in (a_l, c_l) and c_l - a_l <= th["label2_delta_max"])
     return {"pass": not failed, "failed": failed, "checked": checked, "thresholds": th}
+
+
+def evaluate_economics(*, costs: dict | None) -> dict:
+    """Score an arm's projected cost band against the preregistered economics bar:
+    the CONSERVATIVE end of the saving band (`saving_vs_full_day["low"]`, i.e. the
+    HIGH cost estimate) must still leave the strategy at <= `max_fraction_of_full_day
+    _cost` of the full-day fill. Bands are never resolved optimistically; an arm with
+    no priced strategy band fails closed."""
+    bar = PREREGISTERED["thresholds"]["economics"]["max_fraction_of_full_day_cost"]
+    failed: list[str] = []
+    checked: dict = {}
+    strategies = [k for k in ("rest_on_demand", "flatfile_snapshot_stream")
+                  if k in (costs or {})]
+    if not strategies:
+        return {"pass": False, "failed": ["economics.no_strategy_band"],
+                "checked": {}, "threshold": bar}
+    for key in strategies:
+        sv = (costs[key].get("saving_vs_full_day") or {}).get("low")
+        ok = sv is not None and sv >= 1.0 - bar
+        checked[f"economics.{key}"] = {"saving_low": sv, "ok": bool(ok)}
+        if not ok:
+            failed.append(f"economics.{key}")
+    return {"pass": not failed, "failed": failed, "checked": checked, "threshold": bar}
 
 
 def project_strategy_costs(*, full_day_book_gb: float,
@@ -725,15 +770,18 @@ def run_experiment_day(*, day, lake_df: pd.DataFrame, coinapi_chunks_factory,
         elif kind == "lake_book":
             cands = [(sn, {"vendor": "lake", "product": "book"})
                      for sn in (lake_book_snapshots or [])]
-            frame, meta = seed_lake_replay(lake_df, cands, grid=grid, k=k,
-                                           acceptance=acceptance, engine=engine,
-                                           price_scale=price_scale)
+            frame, meta = seed_lake_replay(
+                lake_df, cands, grid=grid, k=k, acceptance=acceptance,
+                reseed_after_crossed_s=trigger_after_crossed_s, engine=engine,
+                price_scale=price_scale)
         elif kind == "day_open":
             snap, prov = coinapi_snapshot_at(coinapi_chunks_factory(), day=day,
                                              at_ts=day_open, max_levels=levels)
+            # seed-only semantics (production --no-reseed A/B): one bootstrap, no
+            # intraday repair, residual crossed samples SURFACE in parity.
             frame, meta = seed_lake_replay(lake_df, [(snap, prov)], grid=grid, k=k,
-                                           acceptance=acceptance, engine=engine,
-                                           price_scale=price_scale)
+                                           acceptance=acceptance, reseed=False,
+                                           engine=engine, price_scale=price_scale)
             if full_day_book_gb is not None:
                 costs = project_strategy_costs(full_day_book_gb=full_day_book_gb,
                                                on_demand_requests=1)
@@ -769,9 +817,25 @@ def run_experiment_day(*, day, lake_df: pd.DataFrame, coinapi_chunks_factory,
                                          injection_guard_s=injection_guard_s)
         evaluation["preregistered"] = evaluate_preregistered(
             day_quality=evaluation["day_quality"], parity=evaluation["parity"])
+        evaluation["preregistered_guarded"] = (
+            evaluate_preregistered(day_quality=evaluation["day_quality"],
+                                   parity=evaluation["parity_guarded"])
+            if evaluation.get("parity_guarded") is not None else None)
+        # Shared-source arms (snapshots derived from the SAME file as the reference)
+        # must pass BOTH the plain and the injection-guarded verdicts; a missing
+        # guarded verdict fails closed.
+        if kind in ("day_open", "stream", "on_demand"):
+            pg = evaluation["preregistered_guarded"]
+            effective = bool(evaluation["preregistered"]["pass"]
+                             and pg is not None and pg["pass"])
+        else:
+            effective = bool(evaluation["preregistered"]["pass"])
         frames[name] = frame
         arms_out[name] = {"spec": dict(spec), "meta": _slim_meta(meta),
                           "evaluation": evaluation, "costs": costs,
+                          "prereg_pass_effective": effective,
+                          "economics": (evaluate_economics(costs=costs)
+                                        if costs is not None else None),
                           "non_regression": None}
 
     control = arms_out.get("lake_book_control")
@@ -883,7 +947,13 @@ def on_demand_reseed_arm(lake_df: pd.DataFrame, provider, *, grid, k: int,
         request_log.append({"requested_ts": int(trig), "snap_ts": int(snap.ts),
                             "reason": reason, "injected": reason == "ok"})
         if reason == "ok":
-            injected.append((snap, prov))
+            # Inject at the TRIGGER time, never at the (possibly earlier) cadence
+            # stamp the provider returned: applying state before the trigger that
+            # authorized the request would retroactively repair samples a live causal
+            # system would still have seen crossed. The state itself stays as-of the
+            # provider's stamp; only the injection time moves forward.
+            injected.append((book_snapshot(trig, snap.bids, snap.asks),
+                             {**prov, "state_as_of_ts": int(snap.ts)}))
     meta = dict(meta)
     meta["on_demand"] = {"request_log": request_log, "terminated": terminated,
                          "n_requests": len(request_log),

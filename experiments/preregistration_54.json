@@ -41,15 +41,12 @@
     "cold_control",
     "lake_book_control",
     "coinapi_day_open_L20",
-    "coinapi_day_open_full_depth",
+    "coinapi_day_open_full",
     "coinapi_stream_L5",
     "coinapi_stream_L10",
     "coinapi_stream_L20",
     "coinapi_stream_L50",
-    "coinapi_on_demand_L20",
-    "emulated_no_lake_book",
-    "emulated_leading_gap",
-    "emulated_sparse"
+    "coinapi_on_demand_L20"
   ],
   "thresholds": {
     "day_quality": {
@@ -96,5 +93,16 @@
       "leading_gap_seam",
       "sparse_deltas"
     ]
-  }
+  },
+  "emulated_variants": [
+    "leading_gap",
+    "sparse",
+    "no_lake_book_snapshots"
+  ],
+  "amendments": [
+    {
+      "utc": "2026-07-10",
+      "note": "Machine-enforcement amendment BEFORE any crossed-seed-day result was inspected (only the 2025-06-01 clean control had run): (1) shared-source arms must ALSO pass the injection-guarded parity verdict; (2) the economics bar is machine-evaluated on the conservative end of the cost band; (3) arm-name vocabulary reconciled with the runner. Thresholds unchanged; strictly tightening."
+    }
+  ]
 }
