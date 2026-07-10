@@ -2,6 +2,10 @@
 
 This repo is set up for multiple local Claude Code workers and Codex PR review.
 
+GitHub issues are the durable backlog and status record. Branches and worktrees
+are temporary execution environments created only for ready implementation work.
+The linked specs/plans remain authoritative for technical behavior.
+
 ## Roles
 
 - Claude worker: implements one task on one branch in one worktree.
@@ -19,9 +23,46 @@ This repo is set up for multiple local Claude Code workers and Codex PR review.
 Never share a worker branch between worktrees. Git branches are mutable refs and
 should have one active owner at a time.
 
+## Issues And Milestones
+
+Use an issue to record the objective, acceptance criteria, dependencies, linked
+plans/specs, validation expectations, and live/vendor constraints. Assign it to
+the relevant phase milestone and area label.
+
+An issue is ready for a worker only when it is unblocked and small enough for one
+reviewable PR. Split broad umbrella issues into subissues; keep the umbrella open
+until all acceptance criteria are complete. A worktree is not a placeholder for
+backlog work.
+
+Use these linkage forms in PR bodies:
+
+- `Closes #N` when the PR completes every acceptance criterion.
+- `Part of #N` or `Refs #N` for a partial PR or umbrella issue.
+
+Operational work such as approved downloads, quality-map runs, and report
+generation normally runs from the clean main checkout and does not need a branch.
+Record the command, artifact location, measured cost/usage, outcome, and blockers
+on the issue. Create a worker branch only when tracked code or documentation must
+change.
+
 ## Labels
 
 Use these labels in GitHub:
+
+Issue planning:
+
+- `phase:0-data`
+- `phase:1-baseline`
+- `area:coinbase`
+- `area:binance`
+- `area:modeling-data`
+- `operations`
+- `priority:high`
+- `status:ready`
+- `status:in-progress`
+- `blocked`
+
+PR/review routing:
 
 - `agent:claude`
 - `codex-blocked`
@@ -36,11 +77,29 @@ trigger. Keep `needs-codex-review` only as an exception label for PRs where the
 automatic review did not run or where you want to request a manual `@codex
 review`.
 
+Use exactly one of `status:ready`, `status:in-progress`, or `blocked` on active
+implementation issues. Remove status labels when an issue closes. Milestones
+represent phase ownership, not execution status.
+
+## Issue Lifecycle
+
+1. Create or refine the issue from the task issue form.
+2. Link the relevant plans/specs and make dependencies explicit.
+3. Assign phase/area/priority labels and a milestone.
+4. Mark it `blocked` or `status:ready`.
+5. When a worker starts, replace `status:ready` with `status:in-progress` and
+   create one branch/worktree.
+6. Link the PR with `Closes`, `Part of`, or `Refs` as appropriate.
+7. Record material blockers and live/manual results on the issue.
+8. After merge, remove the worktree/branch and close the issue only if all
+   acceptance criteria are complete.
+
 ## Worker Flow
 
 1. Create a worktree.
 
    ```bash
+   gh issue view <number>
    scripts/new_claude_worktree.sh feat/<topic>
    cd ../jepa-agent-worktrees/feat-<topic>
    claude
@@ -50,8 +109,9 @@ review`.
 
    ```text
    You are working on branch feat/<topic>.
+   Your assigned issue is #<number>. Read it and every linked plan/spec first.
    Read CLAUDE.md and AGENTS.md first.
-   Keep the change scoped to <task>.
+   Keep the change scoped to the issue's acceptance criteria.
    Run relevant checks.
    Commit, push, and open a PR.
    Do not merge.
@@ -128,3 +188,17 @@ default fast pass.
 - Human review is required after Codex review and CI.
 - Squash or rebase merge is fine, but preserve PR discussion and validation in
   the final merge record.
+- Delete the merged worker worktree and branch.
+- Close an issue only when its acceptance criteria are complete; partial PRs
+  update but do not close their parent issue.
+
+## Local Resource Scheduling
+
+- Prefer at most two implementation agents on this workstation. Run one live
+  data job alongside them only while their active checks are lightweight.
+- Do not run multiple full test suites or other CPU/RAM-heavy checks
+  concurrently.
+- Pause broad vendor downloads while agents run intensive integration or native
+  reconstruction tests.
+- Give paid/live operations priority over speculative background checks so
+  failures and spend remain attributable.

@@ -68,14 +68,31 @@ file as the durable reviewer and repository-contract guidance.
 
 ## Builder Rules
 
+- GitHub issues are the durable work backlog. Plans and specs remain the
+  technical source of truth; an issue tracks scope, dependencies, acceptance
+  criteria, and status without silently overriding those documents.
+- Start implementation only from an unblocked issue whose scope and acceptance
+  criteria are clear. Split umbrella issues into reviewable subissues before
+  assigning workers.
 - One agent, one task, one branch.
 - Use Conventional Branch purpose-prefixed names like `feat/<topic>`, `fix/<topic>`, or `chore/<topic>`; do not use agent/vendor prefixes such as `ai/`, `claude/`, or `codex/` for worker branches.
 - Keep work in the branch's own worktree. Do not edit another agent's worktree.
+- Read the assigned issue and every linked plan/spec before editing. Keep the PR
+  within that issue's acceptance criteria and call out any necessary scope
+  change before implementing it.
+- Link every worker PR to its issue. Use `Closes #N` only when the PR satisfies
+  the whole issue; use `Part of #N` or `Refs #N` for partial work or umbrella
+  issues.
+- Operational work such as approved vendor downloads or report generation does
+  not need a branch/worktree unless it also changes tracked code or docs. Record
+  commands, results, costs, and blockers on the issue.
 - Do not merge your own PR.
 - Do not force-push a branch after review unless the PR explicitly says why.
 - PRs must include summary, validation, risks, and follow-ups.
 - If Codex or CI finds an issue, fix it with the smallest scoped commit and
   request re-review.
+- After merge, remove the worktree and branch. Close the issue only when all
+  acceptance criteria are met; otherwise update it with remaining work.
 
 ## Review Guidelines
 
