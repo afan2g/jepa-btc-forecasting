@@ -22,3 +22,7 @@ def test_baseline_packages_are_shipped():
     include = pp["tool"]["setuptools"]["packages"]["find"]["include"]
     assert any(p.startswith("eval") for p in include), include
     assert any(p.startswith("data") for p in include), include
+    # The bar producer (bars/, T1+) must ship too, or a non-editable install / CLI
+    # import of the producer fails while repo-root test runs keep passing (Codex #B,
+    # plan §Module layout).
+    assert any(p.startswith("bars") for p in include), include
