@@ -50,6 +50,15 @@ data/raw/limitbook_full/exchange=COINBASE/symbol=BTC-USD/dt=YYYY-MM-DD/data.parq
 # gates pass; pass --allow-backfill to override (with CoinAPI Spend Management on — docs/data.md §8).
 .venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-06-30 --allow-backfill
 .venv/bin/python ingest/download_coinapi.py --start 2025-01-01 --end 2025-01-31 --allow-backfill --keep-raw
+
+# REVIEWED-MANIFEST mode (issue #53): executes EXACTLY the reviewed backfill manifest's sparse
+# book (limitbook_full) + trade (TRADES) fill units — never intervening dates. DRY-RUN plan by
+# default (no vendor I/O, no credentials); a live run needs every authorization flag below and
+# still trips the §5a gate on a multi-day span without --allow-backfill.
+.venv/bin/python ingest/download_coinapi.py --manifest data/reports/backfill/coinbase_backfill_manifest.json
+.venv/bin/python ingest/download_coinapi.py --manifest data/reports/backfill/coinbase_backfill_manifest.json \
+    --execute --manifest-sha256 <hex> --approve-usd 97 --spend-evidence "issue #33 approval" \
+    --allow-backfill [--pilot-start 2024-12-01 --pilot-end 2024-12-31]
 ```
 Key properties:
 - **Throttled**: every S3 call via the shared 8/min `RateLimiter`; one `get_object`
@@ -67,6 +76,12 @@ Key properties:
 - **Backfill-gated**: a multi-day full pull (or a `--sample-mb` > 64 MB) exits 4 until the §5a
   recon-parity + reseed gates pass (`check_backfill_gate`, `docs/data.md` §5a/§8). A single
   parity day and small smoke samples are always allowed; `--allow-backfill` overrides.
+- **Manifest mode is fail-closed** (`ingest/coinapi_backfill.py`): accepts only a `ready`,
+  scope-complete, hash-valid, non-stale reviewed manifest whose sections/costs reconcile; resume
+  is keyed on source/product/day + the manifest sha256 (an output without a matching state record
+  is a CONFLICT, never adopted); every run writes a reconciled execution report (units, bytes,
+  rows, sha256s, spend evidence) under `data/reports/backfill/`. Partial-day fills pull the whole
+  vendor day-file, with the manifest's stitch segments/seams carried verbatim for the recon layer.
 
 > Heads-up: BTC-USD `limitbook_full` is ~1.9 GB/day compressed (L3) → ~1 TB / 18 mo.
 > See `coinapi-coinbase-fit` memory for the size mitigation options.
