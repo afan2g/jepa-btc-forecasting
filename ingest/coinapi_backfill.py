@@ -552,10 +552,15 @@ def build_execution_report(plan: dict, results: list, *, spend: dict, generated_
         key = (r.get("product"), r.get("day"))
         seen[key] = seen.get(key, 0) + 1
         if s == "ok":
-            bytes_dl += int(r.get("src_bytes") or 0)
             rows += int(r.get("rows") or 0)
-            prod_bytes[r.get("product")] = (prod_bytes.get(r.get("product"), 0)
-                                            + int(r.get("src_bytes") or 0))
+        # spend accounting uses BILLED bytes: a unit whose GET ran but failed afterwards
+        # (header drift, parse error) was still delivered — and charged — by the vendor
+        billed = int(r.get("billed_bytes") or 0)
+        if not billed and s == "ok":
+            billed = int(r.get("src_bytes") or 0)
+        if billed:
+            bytes_dl += billed
+            prod_bytes[r.get("product")] = prod_bytes.get(r.get("product"), 0) + billed
     provenance = {(u["product"], u["day"]): u["provenance"] for u in plan["units"]}
     planned_keys = set(provenance)
     unaccounted = sorted(f"{p}/{d}" for p, d in planned_keys - set(seen))

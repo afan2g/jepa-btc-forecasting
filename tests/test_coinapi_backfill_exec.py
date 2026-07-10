@@ -484,6 +484,46 @@ def test_execution_report_units_carry_provenance(ready):
     assert unit["provenance"]["fill"] == day["2025-01-03"]["book_fill"]   # stitch plan verbatim
 
 
+def test_cli_process_exit_code_propagates_refusals(tmp_path):
+    # the module footer must exit with main()'s return value: a refusal must reach the SHELL as
+    # exit 3, not be swallowed into exit 0 (Codex P1)
+    import subprocess
+    mpath, _ = fx.blocking_manifest(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, str(_pl.Path(dl.__file__)), "--manifest", mpath,
+         "--plan-out", str(tmp_path / "p.json"), "--generated-utc", "2026-07-10T03:00:00Z"],
+        capture_output=True, text=True, cwd=str(_pl.Path(dl.__file__).resolve().parents[1]))
+    assert proc.returncode == 3, (proc.returncode, proc.stderr[-500:])
+    assert "REFUSED" in proc.stderr
+
+
+def test_post_get_failure_still_counts_against_the_spend_cap(ready):
+    # once the GET ran, CoinAPI billed the bytes: a header/parse failure afterwards must still
+    # accrue to the budget (and the report), or later units get budgeted as if it cost $0
+    class LyingS3(FakeS3):
+        def list_objects_v2(self, Bucket, Prefix, **kw):
+            resp = super().list_objects_v2(Bucket, Prefix, **kw)
+            if "20250102" in Prefix or "20250103" in Prefix:
+                for o in resp["Contents"]:
+                    o["Size"] = 4_000_000_000      # $4 projected per unit at $1/GB
+            return resp
+
+    fake = LyingS3(default_objects())
+    # unit 01-02: passes the guard (4 <= 5.69), GET runs, then fails post-GET (size mismatch) ->
+    # $4 must be committed. unit 01-03: 4 + 4 = 8 > 5.69 -> refused BEFORE its GET.
+    rc = run_cli(ready, execute_args(ready, approve="5.69"),
+                 s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 1
+    assert not any(c[0] == "get" and "20250103" in c[1] for c in fake.calls)
+    rep = _report(ready)
+    by_key = {(u["product"], u["day"]): u for u in rep["units"]}
+    assert by_key[("limitbook_full", "2025-01-02")]["status"] == "error"
+    assert by_key[("limitbook_full", "2025-01-03")]["status"] == "refused_budget"
+    # the billed-but-failed unit's bytes are visible in the reconciled spend figures
+    assert rep["reconciliation"]["bytes_downloaded"] >= 4_000_000_000
+    assert rep["spend"]["measured_usd_at_model_rates"] >= 4.0
+
+
 def test_manifest_mode_refuses_market_overrides(ready):
     # the reviewed manifest is pinned COINBASE/BTC-USD; a CLI override would download another
     # market's files and record them as Coinbase fills

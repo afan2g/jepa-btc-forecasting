@@ -316,8 +316,9 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
                             f"symbol={args.symbol_out}", f"dt={day}")
     final = os.path.join(part_dir, "data.parquet")
     res = {"source": bf.SOURCE, "product": product, "day": day, "kind": unit.get("kind"),
-           "status": None, "key": None, "src_bytes": 0, "src_sha256": None, "rows": 0,
-           "out_bytes": 0, "out_sha256": None, "out_path": None, "secs": 0.0, "error": None}
+           "status": None, "key": None, "src_bytes": 0, "src_sha256": None, "billed_bytes": 0,
+           "rows": 0, "out_bytes": 0, "out_sha256": None, "out_path": None, "secs": 0.0,
+           "error": None}
 
     resume = bf.unit_resume_status(args.out, manifest_sha256, unit, final,
                                    overwrite=args.overwrite)
@@ -352,7 +353,6 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
         return res
     key, src_bytes = located
 
-    rate = None
     if budget is not None:
         rate = budget["rates"][product]
         projected = src_bytes / 1e9 * rate
@@ -364,6 +364,11 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
                 "GET; raise the approval or narrow the window"))
             print(f"  {day}  {product}  REFUSED (budget: projected ${projected:.2f} over cap)")
             return res
+        # commit the projection NOW: once the GET below starts, CoinAPI bills these bytes
+        # whether or not header validation / parsing / publishing succeeds afterwards —
+        # later units must be budgeted against money already spent (Codex P1)
+        budget["spent_usd"] += projected
+    res["billed_bytes"] = src_bytes   # the GET is now committed; report it as billed even on error
 
     os.makedirs(part_dir, exist_ok=True)
     tmp_parq = final + ".tmp"
@@ -416,8 +421,6 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
     secs = round((dt.datetime.now() - t0).total_seconds(), 1)
     res.update(status="ok", key=key, src_bytes=src_bytes, src_sha256=src_sha, rows=rows,
                out_bytes=out_bytes, out_sha256=out_sha, out_path=final, secs=secs)
-    if budget is not None:
-        budget["spent_usd"] += src_bytes / 1e9 * rate
     manifest_append(args.out, {"dt": day, "product": product, "status": "ok", "key": key,
                                "src_bytes": src_bytes, "rows": rows, "out_bytes": out_bytes,
                                "manifest_sha256": manifest_sha256, "secs": secs,
@@ -653,4 +656,5 @@ def main(argv=None, s3_factory=None):
 
 
 if __name__ == "__main__":
-    main()
+    # propagate manifest-mode exit codes (2/3/4/5/1) to the process; range mode returns None -> 0
+    raise SystemExit(main())
