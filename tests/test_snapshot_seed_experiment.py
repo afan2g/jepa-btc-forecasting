@@ -817,10 +817,13 @@ class TestRunExperimentDay:
             if kind in ("day_open", "stream", "on_demand"):
                 assert ev["preregistered_guarded"] is not None, name
                 econ = arm["economics"]
+                nr = arm["non_regression"]
                 expected = bool(ev["preregistered"]["pass"]
                                 and ev["preregistered_guarded"]["pass"]
-                                and econ is not None and econ["pass"])
+                                and econ is not None and econ["pass"]
+                                and (nr is None or nr["pass"]))
                 assert arm["prereg_pass_effective"] == expected, name
+                assert nr is not None, name  # control arm present in this run
             else:
                 assert arm["prereg_pass_effective"] == ev["preregistered"]["pass"], name
 
@@ -836,6 +839,11 @@ class TestRunExperimentDay:
         assert effective_prereg_pass("on_demand", ok, ok, None) is False  # fail-closed
         assert effective_prereg_pass("day_open", ok, bad, ok) is False
         assert effective_prereg_pass("stream", bad, ok, ok) is False
+        # the preregistered clean-control non-regression gate feeds the verdict when
+        # a control arm exists; absent control (partial-arm run) it cannot gate
+        assert effective_prereg_pass("stream", ok, ok, ok, non_regression=bad) is False
+        assert effective_prereg_pass("stream", ok, ok, ok, non_regression=ok) is True
+        assert effective_prereg_pass("stream", ok, ok, ok, non_regression=None) is True
         # controls: no snapshot injected, no cost — plain verdict only
         assert effective_prereg_pass("cold", ok, None, None) is True
         assert effective_prereg_pass("lake_book", bad, None, None) is False

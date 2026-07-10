@@ -752,17 +752,21 @@ def _rest_purchasable(levels: int | None) -> bool:
 
 def effective_prereg_pass(kind: str, preregistered: dict,
                           preregistered_guarded: dict | None,
-                          economics: dict | None) -> bool:
+                          economics: dict | None, *,
+                          non_regression: dict | None = None) -> bool:
     """The arm's automated preregistration verdict. Snapshot arms (day_open, stream,
     on_demand) must pass ALL machine-gated preregistered bars: the plain parity
-    verdict, the injection-guarded verdict (shared-source honesty), and the economics
-    band — a missing guarded verdict or cost band fails closed. Controls carry only
-    the plain verdict (they inject no vendor snapshot and have no price)."""
+    verdict, the injection-guarded verdict (shared-source honesty), the economics
+    band — a missing guarded verdict or cost band fails closed — and, whenever a
+    `lake_book_control` ran alongside (every decision run), the clean-control
+    non-regression deltas. Controls carry only the plain verdict (they inject no
+    vendor snapshot and have no price)."""
     if kind in ("day_open", "stream", "on_demand"):
         return bool(preregistered["pass"]
                     and preregistered_guarded is not None
                     and preregistered_guarded["pass"]
-                    and economics is not None and economics["pass"])
+                    and economics is not None and economics["pass"]
+                    and (non_regression is None or non_regression["pass"]))
     return bool(preregistered["pass"])
 
 
@@ -868,6 +872,12 @@ def run_experiment_day(*, day, lake_df: pd.DataFrame, coinapi_chunks_factory,
             if arm["spec"]["kind"] in ("day_open", "stream", "on_demand"):
                 arm["non_regression"] = evaluate_control_non_regression(
                     arm=arm["evaluation"], control=control["evaluation"])
+                # the non-regression gate is preregistered: fold it into the
+                # automated verdict now that the control evaluation exists
+                arm["prereg_pass_effective"] = effective_prereg_pass(
+                    arm["spec"]["kind"], arm["evaluation"]["preregistered"],
+                    arm["evaluation"]["preregistered_guarded"], arm["economics"],
+                    non_regression=arm["non_regression"])
 
     report = {
         "issue": 54,
