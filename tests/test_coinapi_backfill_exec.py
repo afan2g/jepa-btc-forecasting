@@ -16,6 +16,12 @@ import sys
 
 import pytest
 
+# the downloader imports pyarrow/botocore at module import time; neither is in pyproject's base
+# dependencies (they ride the [lake]/[baseline] extras), so skip — not error — in a light install.
+# The stdlib-only planning tests live in test_coinapi_backfill_plan.py and deliberately do NOT skip.
+pytest.importorskip("pyarrow")
+pytest.importorskip("botocore")
+
 sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
 import coinapi_backfill_fixtures as fx  # noqa: E402
 
