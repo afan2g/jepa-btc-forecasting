@@ -53,6 +53,9 @@ April integrity-only transfer/schema/footer/hash/row-count/coverage/reconstructi
 and logged; they do not consume the holdout. Access to April feature/label/cost/forecast/PnL/model
 results or outcome-driven manual analysis does consume it and is forbidden during G0-CB and before
 the #52 G0-XV candidate ledger and selection artifact are frozen.
+`ingest/validate_trade_feeds.py` is not integrity-only: its full price/size/notional/interarrival/lag/
+side report is outcome-bearing. Generic live April runs are rejected before vendor access; #48/#52
+must authorize the exact one-time post-freeze scope.
 
 ---
 
@@ -1174,7 +1177,7 @@ Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
       Plan: `docs/superpowers/plans/2026-07-02-trade-validation-breadth-plan.md` (validator
       `ingest/validate_trade_feeds.py` + pure `ingest/trade_checks.py`; per-day/per-venue
-      pass/warn/fail JSON report, timestamp/sort policy, gating + 4-phase rollout).
+      pass/warn/fail JSON report, timestamp/sort policy, gating + staged rollout).
       **Phase 1a landed:** the pure, source-agnostic checks module `ingest/trade_checks.py`
       (engine-clock/`received_time` fallback + stable sort, monotonicity, dup-ts/dup-id, price/size
       sanity, sparse/missing-hour coverage, inter-arrival, calendar routing + gate booleans, GB/quota
@@ -1182,10 +1185,14 @@ Other open items:
       vendor calls.
       **Phase 1b landed:** the thin Lake CLI wrapper `ingest/validate_trade_feeds.py` over the pure
       module unchanged (bounded day/venue selection §3, calendar fill/excluded routing, GB/quota gate
-      reusing the pure helpers with an injectable load seam, `--dry-run`/`--strict`, the exit-code
-      contract `0`/`5`/`7`) with synthetic tests `tests/test_validate_trade_feeds.py` — **no live
-      vendor calls run** (import + synthetic paths stay vendor-free). Still open: the bounded live
-      run (Phase 2, ask-first) and calendar/CoinAPI-fill/bar-builder enforcement (Phase 3/3b/4).
+      reusing the pure helpers with an injectable load seam, `--dry-run`/`--strict`, exit codes
+      `0`/`2`/`5`/`7`) with synthetic tests `tests/test_validate_trade_feeds.py` — **no live vendor
+      calls run** (import + synthetic paths stay vendor-free). The default/cohort/random samples
+      exclude April 2026, and an explicit live April full-metric request fails before Lake session or
+      partition access; outcome-blind April integrity checks stay on the staged #36 path. Still open:
+      bounded non-holdout live validation (Phase 2, ask-first), calendar/CoinAPI-fill integration,
+      #48/#52's manifest-authorized one-time April validation, and bar-builder enforcement
+      (Phase 3/3b/3c/4).
 - [x] **Within-timestamp ordering for CoinAPI** — resolved 2026-07-02: file/`seq` order is
       canonical, ties break by original row index, `order_id` is never an ordering key
       (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,

@@ -158,6 +158,13 @@ development-only selection/PBO, freezes the selection artifact, fits pre-April, 
 first and only April modeling score. T10 may prepare inputs but cannot report G0-CB/G0-XV by running
 each manifest independently.
 
+T10 has two milestones, not a closure-level cycle. **T10-A** emits G0-CB and matched G0-XV
+development inputs; #52 then freezes the ledger, thresholds, exact April scope, and selection.
+#48 starts the one-time holdout transaction and runs the manifest-authorized full April trade check.
+Only if that fixed check passes may **T10-B** materialize April features/labels for the exact frozen
+scope and #52 score them. A trade-check failure makes G0-XV blocking/inconclusive; it cannot change
+producer parameters, remove selected April days, or choose a replacement holdout.
+
 **Span-safe partition boundary (deep-review P2):** assigning a row by `t_event` date is not enough:
 its forward label can read the next partition. For each horizon, T9/T10 must apply a conservative
 prefilter **before label generation or adjacent-day loading**. A development candidate survives only
@@ -869,13 +876,15 @@ Coinbase-default schedule); **τ measurement** (E1.1) to set the real horizon la
 **time-per-bar histogram** artifact; G0-CB and matched G0-XV with real regime stratification,
 the complete pilot-driven DSR trial count, and PBO over the preregistered pilot splits.
 **Pilot OOS held out FIRST:** G0-CB completes from its development build without opening April 2026.
-For G0-XV, April is **partitioned into a separate immutable build and scored once, last** — T10 calibrates thresholds,
+For G0-XV, T10-A calibrates thresholds,
 measures τ, and does all model/config selection on the **pre-OOS** data only, with labels/CV/metrics
 **pre-registered** before the OOS is read (experiment-plan:27-29). The runner just evaluates whatever
 rows it is given (`eval/runner.py:60-62`), so the producer/T10 must **exclude April from the
 calibration/selection matrix**, not merely annotate it, and #52 must fit the frozen winner on
-pre-April matched rows before loading/scoring the April build. These are gated on backfill unlock and
-are **not** part of the code-complete producer. April is consumed after G0-XV and cannot be reused as
+pre-April matched rows before any outcome-bearing April read. #48 then runs the fixed, exact-scope
+April trade check as the first holdout-consuming action. On pass, T10-B emits April as a separate
+immutable build and #52 scores it once, last. These are gated on backfill unlock and are **not** part
+of the code-complete producer. April is consumed after G0-XV and cannot be reused as
 formal G1 OOS; the full-data run freezes a separate holdout outside the pilot.
 
 ---
@@ -896,7 +905,7 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker + slippage, fee-tier param; **slippage includes the `coinbase_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable Coinbase book at `coinbase_read_ts` (one-sided book → drop, #4) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; staged `dataset_id`/`build_id`/`venues`/`sources`; emit Coinbase-only plus matched Coinbase/Binance/combined manifest views; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection + feature-subset identity tests | Pre |
 | **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; explicit `coinbase_only` / `cross_venue` source modes; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); apply the **pre-label span-safe partition cutoff before adjacent-day reads** and emit its hash-pinned contract/drop counts; `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: Coinbase-only opens no Binance inputs; no surviving row crosses a seam or pilot holdout boundary; the three cross-venue arms have identical row/split/label/cost hashes; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + partition-boundary + mode/matched-arm + determinism tests | Pre (synthetic seams) |
-| **T10** `feat/producer-calibration` (Post) | Consume the reviewed pilot seam list; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; emit a span-contained pre-April G0-CB development build, then separate matched G0-XV development and April holdout builds. G0-CB cannot open April, including for boundary labels; April holdout labels cannot open May. Freeze the G0-XV candidates after importing G0-CB trial history and before April access. #52, not the producer or three independent `run_from_manifest` calls, owns unified DSR/PBO selection, pre-April fit, and the sole April holdout score. Formal G1 is a later full-data run with a separate holdout. **Acceptance: partition-contract counts reconcile; seam masking holds; pilot arms share row/split/label/cost hashes; development/holdout source hashes are disjoint and immutable** | T9, pilot backfilled data + reviewed stitch plan, #52 evaluator | E0.3/E0.5 artifacts + frozen G0 input builds; #52 emits G0 results | **Post** (pilot backfill + evaluator unlock) |
+| **T10** `feat/producer-calibration` (Post) | **T10-A:** consume the reviewed pilot seam list; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; emit span-contained G0-CB and matched G0-XV development builds. G0-CB cannot open April, including for boundary labels. Freeze all G0-XV candidates, trade thresholds, and exact April scope after importing G0-CB trial history. **#48/#52 boundary:** run manifest-authorized full April trade validation once; fail ⇒ blocking/inconclusive with no scope/threshold change. **T10-B on pass only:** emit the exact separate April holdout builds; labels cannot open May. #52, not the producer or independent `run_from_manifest` calls, owns unified DSR/PBO selection, pre-April fit, and sole April model scoring. Formal G1 uses a later separate holdout. **Acceptance: milestone hashes reconcile; partition-contract counts reconcile; seam masking holds; pilot arms share row/split/label/cost hashes; development/holdout source hashes are disjoint and immutable** | T9, pilot backfilled data + reviewed stitch plan, #52 evaluator; T10-B additionally requires #48's frozen April trade-validation PASS | E0.3/E0.5 artifacts + frozen development inputs; then exact April holdout inputs; #52 emits G0 results | **Post** (pilot backfill + evaluator unlock) |
 
 ---
 

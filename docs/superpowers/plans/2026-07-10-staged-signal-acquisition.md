@@ -125,7 +125,7 @@ must land before G0-CB/G0-XV execution. Its minimum contract is:
 |---|---|---|
 | Six-month pilot | `2025-11-01` through `2026-04-30` | Six complete calendar months; all pilot vendor acquisition is bounded to this range. |
 | Development/CPCV | `2025-11-01` through `2026-03-31` | Training, CPCV, calibration, and registered trials; only rows whose complete guarded support stays before April. |
-| Pilot OOS | `2026-04-01` through `2026-04-30` | No outcome-bearing access in G0-CB; first and only modeling score occurs in G0-XV after its complete ledger/selection freeze, then the month is consumed. |
+| Pilot OOS | `2026-04-01` through `2026-04-30` | No outcome-bearing access in G0-CB; after complete freeze, one G0-XV workflow runs fixed data validation and one model score, then the month is consumed. |
 
 These are **support-span partitions**, not filters on `t_event`'s calendar date. Let
 `holdout_start_ns` be `2026-04-01T00:00:00Z` and `guard_ns` be the consumed stitch
@@ -155,6 +155,12 @@ vendor transfer, path/size/footer/schema/hash/row-count checks, coverage routing
 deterministic reconstruction certification whose thresholds were already fixed. They
 must not emit or inspect modeling outcomes. The completed `2026-04-01` Stage-1 smoke
 performed only these permitted integrity checks, so it did not consume the pilot OOS.
+The full `ingest/validate_trade_feeds.py` report is **not** an integrity-only check: its
+price, size, notional, interarrival, lag, and side summaries are outcome-bearing. Its
+generic live CLI therefore rejects April before vendor access. After #52's freeze, #48
+may consume April once through a separate hash-pinned exact-scope path with fixed
+thresholds; any validation failure makes the gate blocking/inconclusive and cannot
+justify retuning, selective exclusions, or replacing the holdout.
 
 The formal G1 holdout must:
 

@@ -49,7 +49,7 @@ the full Binance archive is not pulled before the primary premise has bounded OO
    `t_event + horizon_ns + guard_ns < 2026-04-01T00:00:00Z`; event-date filtering alone is invalid.
 2. **Six-month acquisition:** bound Coinbase fills and Binance Stage-1/Stage-2 work to
    `2025-11-01` through `2026-04-30`. Development/CPCV ends `2026-03-31`; April 2026 is reserved as
-   the G0-XV pilot OOS month and is consumed after that one modeling evaluation.
+   the G0-XV pilot OOS month and is consumed by one frozen data-validation/model-scoring workflow.
 3. **G0-XV (matched cross-venue):** compare Coinbase-only, Binance-only, and combined feature
    manifests over identical rows, labels, costs, horizons, and splits. The full Binance pull is
    authorized only when a cross-venue arm clears the preregistered net/DSR/PBO block and combined
@@ -65,7 +65,9 @@ Every pilot-driven variation enters the later trial ledger. G0-XV is a spend gat
 final E2.3; six post-ETF months cannot establish the required pre/post-ETF result.
 Operational acquisition/schema/hash/coverage/reconstruction checks in April are allowed when they
 are outcome-blind and use already-frozen integrity thresholds; feature, label, cost, forecast, PnL,
-or model-result access consumes the holdout.
+or model-result access consumes the holdout. Full trade-feed distribution metrics (price, size,
+notional, interarrival, lag, and side summaries) are outcome-bearing, not integrity-only, and remain
+blocked until G0-XV freeze.
 
 ---
 
