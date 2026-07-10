@@ -334,6 +334,42 @@ def test_refuses_tampered_stitch_segments(tmp_path, mutator, match):
         _plan(path, verify_inputs=False)
 
 
+def test_refuses_non_integer_seam_entries(tmp_path):
+    # 1735884000000000000.0 == 1735884000000000000 in Python, so equality alone would accept a
+    # float seam; the contract says seams are verbatim int-ns, and a float at that magnitude
+    # cannot even represent exact nanoseconds — precision drift inside a leakage guard
+    path, _ = fx.ready_manifest(tmp_path)
+    def float_seam(m):
+        for r in m["days"]:
+            if r["day"] == "2025-01-03":
+                r["book_fill"]["seams"] = [float(s) for s in r["book_fill"]["seams"]]
+    fx.mutate_manifest(path, float_seam)
+    with pytest.raises(bf.BackfillRefusal, match="seam"):
+        _plan(path, verify_inputs=False)
+
+
+def test_refuses_per_unit_usd_not_matching_gb_and_rate(tmp_path):
+    # totals reconcile from gb, so a tampered per-unit usd row would otherwise ride into the
+    # plan while the summary and spend gate still balance
+    path, _ = fx.ready_manifest(tmp_path)
+    def cheapen(m):
+        for r in m["days"]:
+            if r["day"] == "2025-01-02":
+                r["book_fill"]["usd"] = 0.01          # gb stays 2.27 at $1/GB
+    fx.mutate_manifest(path, cheapen)
+    with pytest.raises(bf.BackfillRefusal, match="usd"):
+        _plan(path, verify_inputs=False)
+    (tmp_path / "t2").mkdir()
+    path2, _ = fx.ready_manifest(tmp_path / "t2")
+    def cheapen_trade(m):
+        for r in m["days"]:
+            if r["day"] == "2025-01-11":
+                r["trade_fill"]["usd"] = 0.0          # gb stays 0.02 at $3/GB
+    fx.mutate_manifest(path2, cheapen_trade)
+    with pytest.raises(bf.BackfillRefusal, match="usd"):
+        _plan(path2, verify_inputs=False)
+
+
 def test_refuses_full_day_fill_with_non_coinapi_segment(tmp_path):
     path, _ = fx.ready_manifest(tmp_path)
     def poison(m):

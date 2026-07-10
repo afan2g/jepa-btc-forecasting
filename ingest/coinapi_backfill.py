@@ -296,13 +296,19 @@ def _fill_segments_issues(day: str, segments: list, seams) -> list:
         prev_end = en
     if day_end is not None and prev_end is not None and prev_end != day_end:
         issues.append(f"fill_segments_end_ne_day_close:{day}")
-    # seams must be exactly the source-change boundaries (right segment's start_ts); a stale or
-    # emptied seams list would drop the guard bands a consumer applies at a Lake<->CoinAPI switch
-    expected_seams = [cur.get("start_ts") for prev, cur in zip(segments, segments[1:])
-                      if isinstance(prev, dict) and isinstance(cur, dict)
-                      and prev.get("source") != cur.get("source")]
-    if isinstance(seams, list) and seams != expected_seams:
-        issues.append(f"seams_mismatch:{day}:expected={expected_seams}:got={seams}")
+    # seams must be exactly the source-change boundaries (right segment's start_ts) as VERBATIM
+    # int-ns: a float compares == to the int boundary but cannot represent exact nanoseconds at
+    # this magnitude — precision/type drift inside a leakage guard — and a stale or emptied
+    # seams list would drop the guard bands a consumer applies at a Lake<->CoinAPI switch
+    if isinstance(seams, list):
+        if not all(isinstance(s, int) and not isinstance(s, bool) for s in seams):
+            issues.append(f"seams_non_int:{day}:{seams!r}")
+        else:
+            expected_seams = [cur.get("start_ts") for prev, cur in zip(segments, segments[1:])
+                              if isinstance(prev, dict) and isinstance(cur, dict)
+                              and prev.get("source") != cur.get("source")]
+            if seams != expected_seams:
+                issues.append(f"seams_mismatch:{day}:expected={expected_seams}:got={seams}")
     return issues
 
 
@@ -338,10 +344,11 @@ def _seam_policy_issues(day: str, policy: dict) -> list:
     return issues
 
 
-def _fill_unit_issues(day: str, fill: dict, product: str) -> list:
+def _fill_unit_issues(day: str, fill: dict, product: str, rate=None) -> list:
     """A fill unit must be executable and costable: a valid kind, a verbatim stitch plan that
-    actually partitions the day and pulls from CoinAPI (book), and finite non-negative GB/$
-    figures."""
+    actually partitions the day and pulls from CoinAPI (book), finite non-negative GB/$ figures,
+    and a usd row that actually equals gb x the reviewed rate (totals reconcile from gb, so a
+    tampered per-unit usd would otherwise ride into the plan while the summary still balances)."""
     issues = []
     kind = fill.get("kind") if product == PRODUCT_BOOK else "full_day"
     if product == PRODUCT_BOOK:
@@ -371,6 +378,11 @@ def _fill_unit_issues(day: str, fill: dict, product: str) -> list:
         issues.append(f"fill_bad_gb_basis:{product}:{day}:{fill.get('gb_basis')!r}")
     if not _is_num(fill.get("usd")) or float(fill.get("usd")) < 0:
         issues.append(f"fill_bad_usd:{product}:{day}:{fill.get('usd')!r}")
+    elif rate is not None and _is_num(fill.get("gb")):
+        expected = round(float(fill["gb"]) * rate, 4)   # the reviewer's per-day usd formula
+        if abs(float(fill["usd"]) - expected) > _RECON_TOL:
+            issues.append(f"fill_usd_mismatch:{product}:{day}:usd={fill.get('usd')!r}:"
+                          f"expected={expected!r} (gb x rate)")
     return issues
 
 
@@ -379,6 +391,11 @@ def derive_units(manifest: dict) -> tuple:
     (day, product) order. Only days[] records with an affirmative fill produce units — an excluded
     or unresolved day, or any day between fills, never does."""
     units, issues, seen = [], [], set()
+    cm = _as_dict(_as_dict(manifest.get("meta")).get("cost_model"))
+    # rates are acceptance-validated (positive numbers) before derive_units runs in build_plan;
+    # None here just skips the per-unit usd cross-check for a direct malformed-input call
+    book_rate = float(cm["book_usd_per_gb"]) if _is_num(cm.get("book_usd_per_gb")) else None
+    trades_rate = float(cm["trades_usd_per_gb"]) if _is_num(cm.get("trades_usd_per_gb")) else None
     for rec in manifest.get("days") or []:
         day = rec.get("day")
         try:
@@ -405,13 +422,13 @@ def derive_units(manifest: dict) -> tuple:
         prov_base = {"classification": rec.get("classification"),
                      "sources": rec.get("sources"), "resolution": rec.get("resolution")}
         if book.get("needed") is True:
-            issues.extend(_fill_unit_issues(day, book, PRODUCT_BOOK))
+            issues.extend(_fill_unit_issues(day, book, PRODUCT_BOOK, rate=book_rate))
             units.append({"source": SOURCE, "product": PRODUCT_BOOK, "day": day,
                           "kind": book.get("kind"), "gb": book.get("gb"),
                           "gb_basis": book.get("gb_basis"), "usd": book.get("usd"),
                           "provenance": {**prov_base, "fill": book}})
         if trade.get("needed") is True:
-            issues.extend(_fill_unit_issues(day, trade, PRODUCT_TRADES))
+            issues.extend(_fill_unit_issues(day, trade, PRODUCT_TRADES, rate=trades_rate))
             units.append({"source": SOURCE, "product": PRODUCT_TRADES, "day": day,
                           "kind": "full_day", "gb": trade.get("gb"),
                           "gb_basis": trade.get("gb_basis"), "usd": trade.get("usd"),
