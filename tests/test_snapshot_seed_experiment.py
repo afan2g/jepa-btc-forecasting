@@ -538,3 +538,236 @@ class TestCostProjection:
                                        stream_stats=None)
         od = costs["rest_on_demand"]
         assert od["saving_vs_full_day"]["low"] > 0.9  # >=90% cheaper even at band high
+
+
+# ------------------------------------------------------------------ degraded-day fixtures
+class TestEmulateDegradation:
+    def test_leading_gap_drops_rows_before_start(self):
+        from experiments.snapshot_seed import emulate_degradation
+        out, info = emulate_degradation(synthetic_lake_day(), "leading_gap",
+                                        start_ts=DAY_OPEN + s(150))
+        assert (out["origin_time"] >= DAY_OPEN + s(150)).all()
+        assert info["kind"] == "leading_gap"
+        assert info["rows_before"] == 8 and info["rows_after"] == 3
+
+    def test_sparse_drops_deterministic_fraction(self):
+        from experiments.snapshot_seed import emulate_degradation
+        out1, info1 = emulate_degradation(synthetic_lake_day(), "sparse", keep_mod=2)
+        out2, _ = emulate_degradation(synthetic_lake_day(), "sparse", keep_mod=2)
+        pd.testing.assert_frame_equal(out1, out2)  # deterministic, no RNG
+        assert 0 < len(out1) < 8
+        assert info1["rows_after"] == len(out1)
+
+    def test_input_frame_is_not_mutated(self):
+        from experiments.snapshot_seed import emulate_degradation
+        df = synthetic_lake_day()
+        before = df.copy()
+        emulate_degradation(df, "leading_gap", start_ts=DAY_OPEN + s(150))
+        pd.testing.assert_frame_equal(df, before)
+
+    def test_unknown_kind_fails_loudly(self):
+        from experiments.snapshot_seed import emulate_degradation
+        with pytest.raises(ValueError, match="unknown degradation"):
+            emulate_degradation(synthetic_lake_day(), "bogus")
+
+
+# --------------------------------------------------------- clean-control non-regression
+class TestControlNonRegression:
+    def _metrics(self, crossed=0.0001, p99=4.0, corr=0.99999, label2=0.95):
+        return {"day_quality": {"crossed_rate": crossed},
+                "parity": {"mid_diff": {"p99": p99, "corr": corr},
+                           "label_agreement": {"2": {"agreement": label2}}}}
+
+    def test_matching_control_passes(self):
+        from experiments.snapshot_seed import evaluate_control_non_regression
+        v = evaluate_control_non_regression(arm=self._metrics(),
+                                            control=self._metrics())
+        assert v["pass"] is True and v["failed"] == []
+
+    def test_regression_names_the_criterion(self):
+        from experiments.snapshot_seed import evaluate_control_non_regression
+        v = evaluate_control_non_regression(
+            arm=self._metrics(crossed=0.01, p99=8.0, corr=0.9990, label2=0.90),
+            control=self._metrics())
+        assert v["pass"] is False
+        assert set(v["failed"]) == {"non_regression.crossed_rate",
+                                    "non_regression.mid_p99",
+                                    "non_regression.mid_corr",
+                                    "non_regression.label_2s"}
+
+
+# ---------------------------------------------------------------- cached-day Lake loader
+class TestLoadLakeCachedDay:
+    def _make_cache(self, tmp_path, url, df):
+        import hashlib as _h
+        import json
+        import joblib
+        d = (tmp_path / "joblib" / "lakeapi" / "main" / "_download_one" /
+             _h.md5(url.encode()).hexdigest())
+        d.mkdir(parents=True)
+        (d / "metadata.json").write_text(
+            json.dumps({"duration": 1.0, "input_args": {"url": f"'{url}'"}}))
+        joblib.dump(df, d / "output.pkl")
+
+    def test_loads_and_concats_matching_day_files(self, tmp_path):
+        from experiments.snapshot_seed import load_lake_cached_day
+        base = ("https://data.crypto-lake.com/market-data/cryptofeed/book_delta_v2/"
+                "exchange=COINBASE/symbol=BTC-USD/dt=2025-06-01/")
+        df1 = pd.DataFrame({"timestamp": [1, 2], "sequence_number": [1, 2],
+                            "side_is_bid": [True, False], "price": [1.0, 2.0],
+                            "size": [1.0, 1.0]})
+        df2 = pd.DataFrame({"timestamp": [3], "sequence_number": [3],
+                            "side_is_bid": [True], "price": [3.0], "size": [1.0]})
+        self._make_cache(tmp_path, base + "2.snappy.parquet", df2)
+        self._make_cache(tmp_path, base + "1.snappy.parquet", df1)
+        out, info = load_lake_cached_day(tmp_path, table="book_delta_v2",
+                                         exchange="COINBASE", symbol="BTC-USD",
+                                         day="2025-06-01")
+        assert list(out["timestamp"]) == [1, 2, 3]  # file order by url
+        assert info["n_files"] == 2 and len(info["files"]) == 2
+
+    def test_missing_day_fails_loudly(self, tmp_path):
+        from experiments.snapshot_seed import load_lake_cached_day
+        (tmp_path / "joblib" / "lakeapi" / "main" / "_download_one").mkdir(parents=True)
+        with pytest.raises(FileNotFoundError, match="2025-06-01"):
+            load_lake_cached_day(tmp_path, table="book_delta_v2", exchange="COINBASE",
+                                 symbol="BTC-USD", day="2025-06-01")
+
+
+# ------------------------------------------------------------------- day orchestration
+class TestRunExperimentDay:
+    def _run(self, **kw):
+        from experiments.snapshot_seed import SnapshotAcceptance, run_experiment_day
+        from recon.coinapi import reconstruct_coinapi_l2_at_samples
+        ref, _ = reconstruct_coinapi_l2_at_samples(
+            synthetic_l3_day(), k=2, day=DAY, sample_ts=GRID, size_policy="decrement")
+        defaults = dict(
+            day=DAY, lake_df=synthetic_lake_day(),
+            coinapi_chunks_factory=lambda: synthetic_l3_day(),
+            reference_frame=ref, grid=GRID, k=2,
+            acceptance=SnapshotAcceptance(min_levels_per_side=2, max_age_s=600.0,
+                                          tick_scale=100),
+            arm_specs=[{"name": "cold_control", "kind": "cold"},
+                       {"name": "lake_book_control", "kind": "lake_book"},
+                       {"name": "coinapi_day_open_L2", "kind": "day_open", "levels": 2},
+                       {"name": "coinapi_stream_L2", "kind": "stream", "levels": 2},
+                       {"name": "coinapi_on_demand_L2", "kind": "on_demand",
+                        "levels": 2}],
+            lake_book_snapshots=[_true_state_snapshot(DAY_OPEN + s(60))],
+            trigger_after_crossed_s=30.0,
+            full_day_book_gb=2.0,
+            input_info={"coinapi_parquet_sha256": "deadbeef"},
+        )
+        defaults.update(kw)
+        return run_experiment_day(**defaults)
+
+    def test_report_covers_all_arms_with_evaluations(self):
+        rep = self._run()
+        assert set(rep["arms"]) == {"cold_control", "lake_book_control",
+                                    "coinapi_day_open_L2", "coinapi_stream_L2",
+                                    "coinapi_on_demand_L2"}
+        for name, arm in rep["arms"].items():
+            assert "evaluation" in arm and "meta" in arm, name
+            assert arm["meta"]["frame_hash"], name
+            assert "preregistered" in arm["evaluation"], name
+        assert rep["inputs"]["coinapi_parquet_sha256"] == "deadbeef"
+        assert rep["preregistration"]["thresholds"] == __import__(
+            "experiments.snapshot_seed", fromlist=["PREREGISTERED"]
+        ).PREREGISTERED["thresholds"]
+
+    def test_on_demand_arm_carries_request_log_and_costs(self):
+        rep = self._run()
+        od = rep["arms"]["coinapi_on_demand_L2"]
+        assert od["meta"]["on_demand"]["n_requests"] >= 1
+        assert "rest_on_demand" in od["costs"]
+        st = rep["arms"]["coinapi_stream_L2"]
+        assert "flatfile_snapshot_stream" in st["costs"]
+        assert st["costs"]["flatfile_snapshot_stream"]["rows"] > 0
+
+    def test_non_regression_computed_against_lake_book_control(self):
+        rep = self._run()
+        for name in ("coinapi_day_open_L2", "coinapi_stream_L2"):
+            assert rep["arms"][name]["non_regression"] is not None
+
+    def test_report_is_deterministic_and_json_safe(self):
+        import json
+        r1 = self._run()
+        r2 = self._run()
+        assert r1["report_hash"] == r2["report_hash"]
+        json.dumps(r1, allow_nan=False)  # strict JSON, no NaN leakage
+
+    def test_large_sample_lists_are_capped_in_report(self):
+        rep = self._run()
+        for arm in rep["arms"].values():
+            meta = arm["meta"]
+            assert "crossed_sample_ts" not in meta
+            assert len(meta.get("reseed_ts", [])) <= 100
+
+
+# ------------------------------------------------------------- frame snapshot provider
+class TestFrameSnapshotProvider:
+    def test_returns_state_at_last_sample_at_or_before_request(self):
+        from experiments.snapshot_seed import frame_snapshot_provider
+        provider = frame_snapshot_provider(_topk_frame(), max_levels=2)
+        snap, prov = provider(DAY_OPEN + int(2.5 * NS))
+        assert snap.ts == DAY_OPEN + s(2)  # last grid second <= request; causal
+        assert snap.asks == ((101.0, 0.5), (102.0, 2.5))
+        assert prov["at_ts"] == DAY_OPEN + int(2.5 * NS)
+        assert prov["vendor"] == "coinapi"
+
+    def test_truncates_to_max_levels(self):
+        from experiments.snapshot_seed import frame_snapshot_provider
+        provider = frame_snapshot_provider(_topk_frame(), max_levels=1)
+        snap, _ = provider(DAY_OPEN + s(1))
+        assert snap.bids == ((100.0, 1.0),) and snap.asks == ((101.0, 1.5),)
+
+    def test_request_before_first_sample_yields_empty_candidate(self):
+        from experiments.snapshot_seed import frame_snapshot_provider
+        provider = frame_snapshot_provider(_topk_frame(), max_levels=2)
+        snap, _ = provider(DAY_OPEN - 1)
+        assert snap.bids == () and snap.asks == ()  # classify -> one_sided, rejected
+
+
+# ----------------------------------------------------------------------------- CLI shell
+class TestRunnerScript:
+    def test_arm_specs_from_names(self):
+        import importlib
+        runner = importlib.import_module("scripts.run_snapshot_seed_experiment")
+        specs = runner.arm_specs_from_names(
+            ["cold_control", "lake_book_control", "coinapi_day_open_L20",
+             "coinapi_day_open_full", "coinapi_stream_L5", "coinapi_on_demand_L20"])
+        by_name = {sp["name"]: sp for sp in specs}
+        assert by_name["cold_control"]["kind"] == "cold"
+        assert by_name["lake_book_control"]["kind"] == "lake_book"
+        assert by_name["coinapi_day_open_L20"] == {
+            "name": "coinapi_day_open_L20", "kind": "day_open", "levels": 20}
+        assert by_name["coinapi_day_open_full"]["levels"] is None
+        assert by_name["coinapi_stream_L5"] == {
+            "name": "coinapi_stream_L5", "kind": "stream", "levels": 5}
+        assert by_name["coinapi_on_demand_L20"]["kind"] == "on_demand"
+        with pytest.raises(ValueError, match="unrecognized arm"):
+            runner.arm_specs_from_names(["bogus_arm"])
+
+    def test_full_day_gb_from_manifest(self, tmp_path):
+        import importlib
+        import json
+        runner = importlib.import_module("scripts.run_snapshot_seed_experiment")
+        mf = tmp_path / "_manifest.jsonl"
+        rows = [{"dt": "2025-06-01", "status": "sample", "src_bytes": 1},
+                {"dt": "2025-06-01", "status": "ok", "src_bytes": 799_598_234},
+                {"dt": "2026-04-01", "status": "ok", "src_bytes": 2_371_844_307}]
+        mf.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        gb, basis = runner.full_day_gb_from_manifest(mf, "2025-06-01")
+        assert gb == pytest.approx(0.799598234)
+        assert basis == "measured_src_bytes"
+        gb2, basis2 = runner.full_day_gb_from_manifest(mf, "1999-01-01")
+        assert gb2 is None and basis2 == "missing"
+
+    def test_missing_coinapi_parquet_exits_3(self, tmp_path, capsys):
+        import importlib
+        runner = importlib.import_module("scripts.run_snapshot_seed_experiment")
+        rc = runner.main(["--day", "2025-06-01", "--coinapi-root", str(tmp_path),
+                          "--lake-cache-root", str(tmp_path),
+                          "--out-dir", str(tmp_path / "out"), "--engine", "python"])
+        assert rc == 3
+        assert "not found" in capsys.readouterr().err

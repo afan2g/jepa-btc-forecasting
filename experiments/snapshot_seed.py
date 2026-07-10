@@ -450,6 +450,78 @@ def evaluate_preregistered(*, day_quality: dict, parity: dict) -> dict:
             "thresholds": th}
 
 
+def emulate_degradation(lake_df: pd.DataFrame, kind: str, *, start_ts: int | None = None,
+                        keep_mod: int | None = None,
+                        engine_time_col: str | None = None) -> tuple[pd.DataFrame, dict]:
+    """Derive a DEGRADED variant of a real Lake delta day (pure; input untouched).
+
+    The locally-available CoinAPI reference days do not include a no-Lake-snapshot day,
+    a sparse day, or a seam day, so those fixture classes are EMULATED on a real day
+    (preregistration_54.json `emulated_degradations`) and labeled as emulations in the
+    report — never presented as the real degraded days.
+
+      * `leading_gap`  — drop every delta before `start_ts` (a day whose Lake coverage
+        starts mid-day: the #33 `leading_partial_fill` shape, e.g. 2025-01-07);
+      * `sparse`       — keep only rows with `row_index % keep_mod != 0` (deterministic
+        index-based thinning, no RNG; emulates upstream row loss, which also strands
+        levels whose clears fall on dropped rows).
+    """
+    etc = engine_time_col or shared_engine_time_col(lake_df)
+    info = {"kind": kind, "rows_before": int(len(lake_df))}
+    if kind == "leading_gap":
+        if start_ts is None:
+            raise ValueError("leading_gap needs start_ts")
+        out = lake_df[lake_df[etc].astype("int64") >= int(start_ts)].copy()
+        info["start_ts"] = int(start_ts)
+    elif kind == "sparse":
+        if not keep_mod or keep_mod < 2:
+            raise ValueError("sparse needs keep_mod >= 2")
+        keep = np.arange(len(lake_df)) % int(keep_mod) != 0
+        out = lake_df.iloc[keep].copy()
+        info["keep_mod"] = int(keep_mod)
+    else:
+        raise ValueError(f"unknown degradation kind {kind!r}")
+    out = out.reset_index(drop=True)
+    info["rows_after"] = int(len(out))
+    return out, info
+
+
+def evaluate_control_non_regression(*, arm: dict, control: dict) -> dict:
+    """Clean-control check: the snapshot-seeded arm must not regress the SAME day's
+    production Lake-book-seeded control beyond the preregistered deltas."""
+    th = PREREGISTERED["thresholds"]["clean_control_non_regression"]
+    failed: list[str] = []
+    checked: dict = {}
+
+    def get(d, *path):
+        for p in path:
+            d = (d or {}).get(p)
+        return d
+
+    def check(name, value, ok):
+        checked[name] = {"value": value, "ok": bool(ok)}
+        if not ok:
+            failed.append(name)
+
+    a_cr = get(arm, "day_quality", "crossed_rate")
+    c_cr = get(control, "day_quality", "crossed_rate")
+    check("non_regression.crossed_rate", a_cr,
+          None not in (a_cr, c_cr) and a_cr - c_cr <= th["crossed_rate_delta_max"])
+    a_p99 = get(arm, "parity", "mid_diff", "p99")
+    c_p99 = get(control, "parity", "mid_diff", "p99")
+    check("non_regression.mid_p99", a_p99,
+          None not in (a_p99, c_p99) and a_p99 - c_p99 <= th["mid_p99_delta_usd_max"])
+    a_c = get(arm, "parity", "mid_diff", "corr")
+    c_c = get(control, "parity", "mid_diff", "corr")
+    check("non_regression.mid_corr", a_c,
+          None not in (a_c, c_c) and c_c - a_c <= th["mid_corr_delta_max"])
+    a_l = get(arm, "parity", "label_agreement", "2", "agreement")
+    c_l = get(control, "parity", "label_agreement", "2", "agreement")
+    check("non_regression.label_2s", a_l,
+          None not in (a_l, c_l) and c_l - a_l <= th["label2_delta_max"])
+    return {"pass": not failed, "failed": failed, "checked": checked, "thresholds": th}
+
+
 def project_strategy_costs(*, full_day_book_gb: float,
                            on_demand_requests: int | None = None,
                            stream_stats: dict | None = None) -> dict:
@@ -521,6 +593,211 @@ def project_strategy_costs(*, full_day_book_gb: float,
                 "rows = changed top-X seconds measured from the emulated stream",
             ]}
     return out
+
+
+def frame_snapshot_provider(reference_frame: pd.DataFrame, *, max_levels: int):
+    """On-demand snapshot provider backed by the day's reference frame.
+
+    `provider(requested_ts)` returns the top-`max_levels` book state at the LAST grid
+    sample <= `requested_ts` — causal by construction (never a later sample), stamped at
+    that sample's ts so the acceptance staleness bar sees the true sub-second age. This
+    emulates a REST snapshot response at its stored cadence without re-streaming the
+    multi-GB L3 file per request. A request before the first sample returns an empty
+    candidate (rejected as `one_sided` by acceptance, never fabricated).
+    """
+    f = reference_frame.sort_values("sample_ts").reset_index(drop=True)
+    ts = f["sample_ts"].astype("int64").to_numpy()
+    for i in range(max_levels):
+        for c in (f"bid_{i}_price", f"ask_{i}_price"):
+            if c not in f.columns:
+                raise ValueError(f"reference frame lacks {c}; built with too small k?")
+
+    def provider(requested_ts: int):
+        requested_ts = int(requested_ts)
+        idx = int(np.searchsorted(ts, requested_ts, side="right")) - 1
+        prov = {"vendor": "coinapi", "product_emulated": "rest_orderbook_history",
+                "method": "reference_frame_asof", "max_levels": int(max_levels),
+                "at_ts": requested_ts}
+        if idx < 0:
+            return book_snapshot(requested_ts - 1, [], []), prov
+        row = f.iloc[idx]
+        bids = [(float(row[f"bid_{i}_price"]), float(row[f"bid_{i}_size"]))
+                for i in range(max_levels)
+                if isfinite(row[f"bid_{i}_price"]) and isfinite(row[f"bid_{i}_size"])]
+        asks = [(float(row[f"ask_{i}_price"]), float(row[f"ask_{i}_size"]))
+                for i in range(max_levels)
+                if isfinite(row[f"ask_{i}_price"]) and isfinite(row[f"ask_{i}_size"])]
+        return book_snapshot(int(ts[idx]), bids, asks), prov
+
+    return provider
+
+
+def load_lake_cached_day(cache_root, *, table: str, exchange: str, symbol: str,
+                         day: str) -> tuple[pd.DataFrame, dict]:
+    """Load one Coinbase Lake day from an EXISTING lakeapi joblib download cache,
+    read-only and network-free.
+
+    The main checkout's `.lake_cache/joblib/lakeapi/main/_download_one/<hash>/` entries
+    each hold `metadata.json` (with the exact vendor URL: `.../{table}/exchange=.../
+    symbol=.../dt=.../N.snappy.parquet`) and `output.pkl` (the joblib-pickled RAW
+    DataFrame body). We match on the URL path, load bodies in URL order (file 1, 2, …)
+    and concat. The raw column names (`timestamp`, `receipt_timestamp`) are accepted
+    engine-time aliases by `recon.ingest.shared_engine_time_col`, so no rename is
+    needed. Never writes to the cache; raises FileNotFoundError when the day is not
+    fully cached rather than falling back to a network pull.
+    """
+    import json
+    import pathlib
+
+    import joblib
+
+    root = pathlib.Path(cache_root) / "joblib" / "lakeapi" / "main" / "_download_one"
+    needle = f"{table}/exchange={exchange}/symbol={symbol}/dt={day}/"
+    hits: list[tuple[str, pathlib.Path]] = []
+    for meta_path in sorted(root.glob("*/metadata.json")):
+        try:
+            url = json.loads(meta_path.read_text())["input_args"]["url"].strip("'\"")
+        except (KeyError, ValueError):
+            continue
+        if needle in url:
+            body = meta_path.parent / "output.pkl"
+            if body.exists():
+                hits.append((url, body))
+    if not hits:
+        raise FileNotFoundError(
+            f"no cached lakeapi body for {table} {exchange} {symbol} dt={day} under "
+            f"{root} — this experiment never downloads; run it on a cached day")
+    hits.sort(key=lambda h: h[0])
+    frames = [joblib.load(body) for _, body in hits]
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    info = {"n_files": len(hits), "files": [u for u, _ in hits],
+            "rows": int(len(df))}
+    return df, info
+
+
+def _slim_meta(meta: dict) -> dict:
+    """Report-sized copy of a replay meta: unbounded per-sample lists dropped/capped
+    (counts and hashes — computed over the FULL meta — are kept)."""
+    m = dict(meta)
+    m.pop("crossed_sample_ts", None)
+    if "reseed_ts" in m:
+        m["reseed_ts"] = list(m["reseed_ts"])[:100]
+    cov = m.get("coverage")
+    if isinstance(cov, dict) and "invalid_runs_idx" in cov:
+        cov = dict(cov)
+        cov["invalid_runs_idx"] = list(cov["invalid_runs_idx"])[:100]
+        m["coverage"] = cov
+    return m
+
+
+def run_experiment_day(*, day, lake_df: pd.DataFrame, coinapi_chunks_factory,
+                       reference_frame: pd.DataFrame, arm_specs: list[dict],
+                       acceptance: SnapshotAcceptance, grid, k: int,
+                       lake_book_snapshots: list[BookSnapshot] | None = None,
+                       injection_guard_s: float = 60.0,
+                       trigger_after_crossed_s: float = 2.0, max_requests: int = 24,
+                       engine: str = "python", price_scale: int | None = None,
+                       full_day_book_gb: float | None = None,
+                       input_info: dict | None = None) -> dict:
+    """Run every experiment arm for one day and assemble the JSON-safe day report.
+
+    `coinapi_chunks_factory` returns a FRESH iterable of downloader-schema chunks per
+    call (day-open / on-demand extractions re-stream the file and stop early);
+    `reference_frame` is the day's full CoinAPI L3→L2 reference on `grid` (built once
+    by the caller, reused for parity and for stream-candidate emulation — it must carry
+    at least `max(levels)` and `k` levels). Controls (`cold`, `lake_book`) and CoinAPI
+    arms run through the identical replay/evaluation path.
+    """
+    grid = [int(t) for t in grid]
+    grid_s = (grid[1] - grid[0]) / 1e9 if len(grid) > 1 else 1.0
+    day_open = grid[0]
+    arms_out: dict = {}
+    frames: dict = {}
+
+    for spec in arm_specs:
+        name, kind = spec["name"], spec["kind"]
+        levels = spec.get("levels")
+        costs: dict | None = None
+        if kind == "cold":
+            frame, meta = seed_lake_replay(lake_df, [], grid=grid, k=k,
+                                           acceptance=acceptance, engine=engine,
+                                           price_scale=price_scale)
+        elif kind == "lake_book":
+            cands = [(sn, {"vendor": "lake", "product": "book"})
+                     for sn in (lake_book_snapshots or [])]
+            frame, meta = seed_lake_replay(lake_df, cands, grid=grid, k=k,
+                                           acceptance=acceptance, engine=engine,
+                                           price_scale=price_scale)
+        elif kind == "day_open":
+            snap, prov = coinapi_snapshot_at(coinapi_chunks_factory(), day=day,
+                                             at_ts=day_open, max_levels=levels)
+            frame, meta = seed_lake_replay(lake_df, [(snap, prov)], grid=grid, k=k,
+                                           acceptance=acceptance, engine=engine,
+                                           price_scale=price_scale)
+            if full_day_book_gb is not None:
+                costs = project_strategy_costs(full_day_book_gb=full_day_book_gb,
+                                               on_demand_requests=1)
+        elif kind == "stream":
+            cands_snaps, stream_stats = snapshots_from_topk_frame(
+                reference_frame, max_levels=levels)
+            cands = [(sn, {"vendor": "coinapi",
+                           "product_emulated": f"limitbook_snapshot_{levels}"})
+                     for sn in cands_snaps]
+            frame, meta = seed_lake_replay(
+                lake_df, cands, grid=grid, k=k, acceptance=acceptance,
+                reseed_after_crossed_s=trigger_after_crossed_s, engine=engine,
+                price_scale=price_scale)
+            meta["stream_stats"] = stream_stats
+            if full_day_book_gb is not None:
+                costs = project_strategy_costs(full_day_book_gb=full_day_book_gb,
+                                               stream_stats=stream_stats)
+        elif kind == "on_demand":
+            provider = frame_snapshot_provider(reference_frame, max_levels=levels)
+            frame, meta = on_demand_reseed_arm(
+                lake_df, provider, grid=grid, k=k, acceptance=acceptance,
+                trigger_after_crossed_s=trigger_after_crossed_s,
+                max_requests=max_requests, engine=engine, price_scale=price_scale)
+            if full_day_book_gb is not None:
+                costs = project_strategy_costs(
+                    full_day_book_gb=full_day_book_gb,
+                    on_demand_requests=meta["on_demand"]["n_requests"])
+        else:
+            raise ValueError(f"unknown arm kind {kind!r}")
+
+        evaluation = evaluate_arm_parity(frame, meta, reference_frame, k=k,
+                                         grid_s=grid_s,
+                                         injection_guard_s=injection_guard_s)
+        evaluation["preregistered"] = evaluate_preregistered(
+            day_quality=evaluation["day_quality"], parity=evaluation["parity"])
+        frames[name] = frame
+        arms_out[name] = {"spec": dict(spec), "meta": _slim_meta(meta),
+                          "evaluation": evaluation, "costs": costs,
+                          "non_regression": None}
+
+    control = arms_out.get("lake_book_control")
+    if control is not None:
+        for name, arm in arms_out.items():
+            if arm["spec"]["kind"] in ("day_open", "stream", "on_demand"):
+                arm["non_regression"] = evaluate_control_non_regression(
+                    arm=arm["evaluation"], control=control["evaluation"])
+
+    report = {
+        "issue": 54,
+        "day": str(day),
+        "k": int(k),
+        "grid": {"n": len(grid), "grid_s": grid_s, "start_ts": grid[0],
+                 "end_ts": grid[-1]},
+        "engine": engine,
+        "acceptance": acceptance.as_dict(),
+        "injection_guard_s": float(injection_guard_s),
+        "trigger_after_crossed_s": float(trigger_after_crossed_s),
+        "preregistration": PREREGISTERED,
+        "inputs": dict(input_info or {}),
+        "arms": arms_out,
+    }
+    report = _json_safe(report)
+    report["report_hash"] = hash_obj(report, exclude_keys=("report_hash",))
+    return report
 
 
 def _sustained_cross_trigger(frame: pd.DataFrame, *, trigger_ns: int,
