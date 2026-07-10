@@ -1059,7 +1059,10 @@ def _load_rerun_report(path: str) -> dict:
     present-but-malformed report is a structural input error (exit 2), never a crash downstream."""
     report = load_json_object(path, what="resolution rerun report")
     days = report.get("days")
-    if days is not None and not isinstance(days, list):
+    # same shape check as load_batch_reports: a PRESENT non-list 'days' (incl. null) is a
+    # structural malformation (exit 2, --out untouched); an ABSENT 'days' key stays a
+    # missing-keys report issue recorded by check_rerun_report (blocking verdict).
+    if not isinstance(days, list) and "days" in report:
         raise ReviewInputError(f"{path}: report 'days' must be a list of objects")
     for rec in days or []:
         if not isinstance(rec, dict):

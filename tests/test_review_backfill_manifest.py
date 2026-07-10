@@ -2113,6 +2113,27 @@ def test_resolution_rerun_corrupt_record_blocks(tmp_path):
     assert _day_rec(m, "2025-01-01")["classification"] == "inconclusive"
 
 
+def test_resolution_rerun_report_null_days_is_structural(tmp_path):
+    # deep-review P2 (parity with load_batch_reports): a PRESENT "days": null in a rerun report
+    # is a malformed report — exit-2 structural input error, --out untouched — not a semantic
+    # rerun_day_absent blocker that still writes a manifest
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])
+    rep = json.loads(_pl.Path(rerun).read_text())
+    rep["days"] = None
+    _pl.Path(rerun).write_text(json.dumps(rep))
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    with pytest.raises(rv.ReviewInputError, match="days"):
+        _build(plan_path, cal_path, res)
+    out = tmp_path / "m.json"
+    out.write_text('{"prior": "good manifest"}')
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(out), "--resolutions", res,
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.INPUT_ERROR_EXIT
+    assert json.loads(out.read_text()) == {"prior": "good manifest"}
+
+
 def test_resolutions_file_structural_errors_exit_2(tmp_path):
     plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
     bad_files = [
