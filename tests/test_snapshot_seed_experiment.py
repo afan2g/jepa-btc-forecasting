@@ -474,6 +474,27 @@ class TestEvaluateArmParity:
         assert g["guard_s"] == 60.0
         assert g["n_guard_excluded"] >= 1  # the 300s and 330s samples fall in the guard
 
+    def test_pre_seed_crossed_samples_stay_scored_for_mid_day_seeds(self):
+        # On-demand-style arm: the first accepted snapshot lands MID-DAY (300 s), and
+        # every crossed sample precedes it (cold-start output at 210..270 s). Those
+        # samples are observable strategy behavior: they must NOT enter the
+        # crossed-exclusion set, which exists only for residual crossings AWAITING a
+        # reseed under an active repair regime (ts >= seed_ts).
+        from experiments.snapshot_seed import (SnapshotAcceptance, evaluate_arm_parity,
+                                               seed_lake_replay)
+        from recon.coinapi import reconstruct_coinapi_l2_at_samples
+        acceptance = SnapshotAcceptance(min_levels_per_side=2, max_age_s=600.0,
+                                        tick_scale=100)
+        snap = _true_state_snapshot(DAY_OPEN + s(300))
+        arm_frame, arm_meta = seed_lake_replay(
+            synthetic_lake_day(), [(snap, {})], grid=GRID, k=2, acceptance=acceptance)
+        assert arm_meta["crossed_sample_ts"]  # crossed samples exist, all pre-seed
+        ref, _ = reconstruct_coinapi_l2_at_samples(
+            synthetic_l3_day(), k=2, day=DAY, sample_ts=GRID, size_policy="decrement")
+        rep = evaluate_arm_parity(arm_frame, arm_meta, ref, k=2, grid_s=30.0)
+        assert rep["n_excluded_crossed"] == 0
+        assert rep["parity"]["crossed_rate"]["lake"] > 0  # scored, not hidden
+
     def test_day_open_seed_still_clamps_to_seed_ts(self):
         from experiments.snapshot_seed import (SnapshotAcceptance, evaluate_arm_parity,
                                                seed_lake_replay)
@@ -795,11 +816,36 @@ class TestRunExperimentDay:
             kind = arm["spec"]["kind"]
             if kind in ("day_open", "stream", "on_demand"):
                 assert ev["preregistered_guarded"] is not None, name
+                econ = arm["economics"]
                 expected = bool(ev["preregistered"]["pass"]
-                                and ev["preregistered_guarded"]["pass"])
+                                and ev["preregistered_guarded"]["pass"]
+                                and econ is not None and econ["pass"])
                 assert arm["prereg_pass_effective"] == expected, name
             else:
                 assert arm["prereg_pass_effective"] == ev["preregistered"]["pass"], name
+
+    def test_effective_pass_gates_on_economics_for_priced_arms(self):
+        # The preregistered GO gate includes the <=25%-of-full-day economics bar:
+        # a snapshot arm that passes parity + guarded parity but is uneconomic (or
+        # has no computable band — fail-closed) must not be an effective pass.
+        from experiments.snapshot_seed import effective_prereg_pass
+        ok = {"pass": True}
+        bad = {"pass": False}
+        assert effective_prereg_pass("stream", ok, ok, ok) is True
+        assert effective_prereg_pass("stream", ok, ok, bad) is False
+        assert effective_prereg_pass("on_demand", ok, ok, None) is False  # fail-closed
+        assert effective_prereg_pass("day_open", ok, bad, ok) is False
+        assert effective_prereg_pass("stream", bad, ok, ok) is False
+        # controls: no snapshot injected, no cost — plain verdict only
+        assert effective_prereg_pass("cold", ok, None, None) is True
+        assert effective_prereg_pass("lake_book", bad, None, None) is False
+        # fail-closed integration: priced arms without a cost band never pass
+        rep = self._run(full_day_book_gb=None)
+        for name in ("coinapi_day_open_L2", "coinapi_stream_L2",
+                     "coinapi_on_demand_L2"):
+            arm = rep["arms"][name]
+            assert arm["economics"] is None, name
+            assert arm["prereg_pass_effective"] is False, name
 
     def test_economics_verdict_attached_to_priced_arms(self):
         rep = self._run()

@@ -354,8 +354,14 @@ def evaluate_arm_parity(arm_frame: pd.DataFrame, arm_meta: dict,
             and int(seed_ts) <= day_start + grid_ns):
         cutoff = int(seed_ts) if cutoff is None else max(int(cutoff), int(seed_ts))
     reseed_enabled = bool(arm_meta.get("policy", {}).get("enabled", False))
-    excluded = (set(arm_meta.get("crossed_sample_ts", []))
-                if (seed_accepted and reseed_enabled) else set())
+    # Exclude only residual crossings AWAITING a reseed, i.e. under the active repair
+    # regime (ts >= seed_ts). Crossed samples BEFORE a mid-day first injection are
+    # cold-start output the strategy actually produced — they stay scored, matching
+    # the mid-day no-clamp rule above.
+    excluded = (set(int(t) for t in arm_meta.get("crossed_sample_ts", [])
+                    if int(t) >= int(seed_ts))
+                if (seed_accepted and reseed_enabled and seed_ts is not None)
+                else set())
 
     parity = compare_topk(arm_frame, reference_frame, k=k, grid_s=grid_s,
                           horizons_s=horizons_s, band_bps=band_bps,
@@ -735,6 +741,22 @@ def _slim_meta(meta: dict) -> dict:
     return m
 
 
+def effective_prereg_pass(kind: str, preregistered: dict,
+                          preregistered_guarded: dict | None,
+                          economics: dict | None) -> bool:
+    """The arm's automated preregistration verdict. Snapshot arms (day_open, stream,
+    on_demand) must pass ALL machine-gated preregistered bars: the plain parity
+    verdict, the injection-guarded verdict (shared-source honesty), and the economics
+    band — a missing guarded verdict or cost band fails closed. Controls carry only
+    the plain verdict (they inject no vendor snapshot and have no price)."""
+    if kind in ("day_open", "stream", "on_demand"):
+        return bool(preregistered["pass"]
+                    and preregistered_guarded is not None
+                    and preregistered_guarded["pass"]
+                    and economics is not None and economics["pass"])
+    return bool(preregistered["pass"])
+
+
 def run_experiment_day(*, day, lake_df: pd.DataFrame, coinapi_chunks_factory,
                        reference_frame: pd.DataFrame, arm_specs: list[dict],
                        acceptance: SnapshotAcceptance, grid, k: int,
@@ -821,21 +843,14 @@ def run_experiment_day(*, day, lake_df: pd.DataFrame, coinapi_chunks_factory,
             evaluate_preregistered(day_quality=evaluation["day_quality"],
                                    parity=evaluation["parity_guarded"])
             if evaluation.get("parity_guarded") is not None else None)
-        # Shared-source arms (snapshots derived from the SAME file as the reference)
-        # must pass BOTH the plain and the injection-guarded verdicts; a missing
-        # guarded verdict fails closed.
-        if kind in ("day_open", "stream", "on_demand"):
-            pg = evaluation["preregistered_guarded"]
-            effective = bool(evaluation["preregistered"]["pass"]
-                             and pg is not None and pg["pass"])
-        else:
-            effective = bool(evaluation["preregistered"]["pass"])
+        economics = evaluate_economics(costs=costs) if costs is not None else None
         frames[name] = frame
         arms_out[name] = {"spec": dict(spec), "meta": _slim_meta(meta),
                           "evaluation": evaluation, "costs": costs,
-                          "prereg_pass_effective": effective,
-                          "economics": (evaluate_economics(costs=costs)
-                                        if costs is not None else None),
+                          "prereg_pass_effective": effective_prereg_pass(
+                              kind, evaluation["preregistered"],
+                              evaluation["preregistered_guarded"], economics),
+                          "economics": economics,
                           "non_regression": None}
 
     control = arms_out.get("lake_book_control")
