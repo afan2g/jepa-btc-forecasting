@@ -702,7 +702,12 @@ def load_lake_cached_day(cache_root, *, table: str, exchange: str, symbol: str,
     and concat. The raw column names (`timestamp`, `receipt_timestamp`) are accepted
     engine-time aliases by `recon.ingest.shared_engine_time_col`, so no rename is
     needed. Never writes to the cache; raises FileNotFoundError when the day is not
-    fully cached rather than falling back to a network pull.
+    fully cached rather than falling back to a network pull: a matched shard with a
+    missing body, and any gap in the numbered shard sequence (`1.snappy.parquet`,
+    `2...`, — must be contiguous from 1), both fail closed. Residual limitation: a
+    missing TRAILING shard is not offline-detectable (the true shard count comes from
+    a vendor listing this loader never performs); the shard numbers loaded are
+    recorded in `info["shards"]` so reports carry the basis.
     """
     import json
     import pathlib
@@ -732,9 +737,23 @@ def load_lake_cached_day(cache_root, *, table: str, exchange: str, symbol: str,
             f"no cached lakeapi body for {table} {exchange} {symbol} dt={day} under "
             f"{root} — this experiment never downloads; run it on a cached day")
     hits.sort(key=lambda h: h[0])
+    import re
+    shards = []
+    for url, _ in hits:
+        m = re.search(r"/(\d+)\.snappy\.parquet$", url)
+        shards.append(int(m.group(1)) if m else None)
+    if all(s is not None for s in shards):
+        expected = list(range(1, max(shards) + 1))
+        if sorted(shards) != expected:
+            raise FileNotFoundError(
+                f"cached lakeapi shard sequence for {table} {exchange} {symbol} "
+                f"dt={day} has gaps: found shards {sorted(shards)}, expected "
+                f"{expected} — interrupted cache population; refusing a "
+                "partial-day load")
     frames = [joblib.load(body) for _, body in hits]
     df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     info = {"n_files": len(hits), "files": [u for u, _ in hits],
+            "shards": sorted(s for s in shards if s is not None),
             "rows": int(len(df))}
     return df, info
 

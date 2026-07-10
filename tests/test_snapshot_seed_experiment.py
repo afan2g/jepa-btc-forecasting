@@ -798,6 +798,28 @@ class TestLoadLakeCachedDay:
             load_lake_cached_day(tmp_path, table="book_delta_v2", exchange="COINBASE",
                                  symbol="BTC-USD", day="2025-06-01")
 
+    def test_shard_sequence_gaps_fail_instead_of_partial_load(self, tmp_path):
+        # Numbered shards must be contiguous from 1: a day cached as only shard 2
+        # (missing 1), or 1+3 (missing 2), means an interrupted cache population —
+        # loading what remains would replay a partial day. A missing TRAILING shard
+        # is not offline-detectable (no vendor list); that residual limitation is
+        # documented on the loader.
+        import json
+        from experiments.snapshot_seed import load_lake_cached_day
+        base = ("https://data.crypto-lake.com/market-data/cryptofeed/book_delta_v2/"
+                "exchange=COINBASE/symbol=BTC-USD/dt=2025-06-01/")
+        df = pd.DataFrame({"timestamp": [1], "sequence_number": [1],
+                           "side_is_bid": [True], "price": [1.0], "size": [1.0]})
+        self._make_cache(tmp_path, base + "2.snappy.parquet", df)
+        with pytest.raises(FileNotFoundError, match="shard"):
+            load_lake_cached_day(tmp_path, table="book_delta_v2", exchange="COINBASE",
+                                 symbol="BTC-USD", day="2025-06-01")
+        self._make_cache(tmp_path, base + "1.snappy.parquet", df)
+        self._make_cache(tmp_path, base + "4.snappy.parquet", df)
+        with pytest.raises(FileNotFoundError, match="shard"):
+            load_lake_cached_day(tmp_path, table="book_delta_v2", exchange="COINBASE",
+                                 symbol="BTC-USD", day="2025-06-01")
+
     def test_evidence_index_commits_are_resolvable_shas(self):
         import json
         import pathlib
