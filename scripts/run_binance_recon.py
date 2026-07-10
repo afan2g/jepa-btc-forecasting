@@ -430,7 +430,12 @@ def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
       * `inconclusive` — done, UNLESS it lacked seed candidates (`book` product absent or empty)
         and the seed parquet has since appeared/been refilled with rows (a later Stage-1 pull
         unblocks it);
-      * `missing` — done only while the raw partition is STILL absent (new raw data re-runs it);
+      * `missing` on a SPARSE feed (liquidations quiet day) — done while the raw partition is
+        STILL absent (new raw data re-runs it);
+      * `missing` on a REQUIRED feed — never done: every resume re-verifies the hole and keeps
+        the run exiting 3 until Stage-1 supplies the partition, so a retry orchestration can
+        never mark the day successful without the required output (mirrors Stage-1's
+        pending_units/sparse_accepted split);
       * `error`, no record, or an `ok` record whose output vanished — always re-run."""
     if cfg.overwrite:
         return False
@@ -448,6 +453,8 @@ def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
             return False
         return True
     if status == "missing":
+        if feed_miss_is_fatal(u.feed):
+            return False   # a required hole stays pending — resume must keep exiting 3
         return not os.path.exists(
             lb.raw_parquet_path(cfg.raw_root, u.feed, u.exchange, u.symbol, u.day))
     return False

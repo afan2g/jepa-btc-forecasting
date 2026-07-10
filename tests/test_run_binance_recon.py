@@ -279,12 +279,26 @@ def test_missing_seed_product_inconclusive_then_reruns_when_seed_appears(tmp_pat
 
 # --------------------------------------------------------------------------- missing raw inputs
 def test_missing_required_feed_exits_partial(tmp_path):
-    rc, out, rep = run_cli(tmp_path, write_store(tmp_path, {"trades": None}))
+    raw = write_store(tmp_path, {"trades": None})
+    rc, out, rep = run_cli(tmp_path, raw)
     assert rc == rbr.PARTIAL_EXIT
     t = last_by_output(out)["trades"]
     assert t["status"] == "missing" and t["sparse_ok"] is False
     assert read_report(rep)["counts"]["missing_required"] == 1
     assert not os.path.exists(outpath(out, "trades"))
+    # A required hole must stay pending on resume: the rerun re-verifies it and keeps exiting 3,
+    # so a retry orchestration can never mark the day successful without the required output.
+    rc2, _, _ = run_cli(tmp_path, raw)
+    assert rc2 == rbr.PARTIAL_EXIT
+    assert read_report(rep)["counts"]["missing_required"] == 1
+    assert read_report(rep)["counts"]["skip"] == 4               # only the produced units skip
+    # ...and it recovers once Stage-1 supplies the partition.
+    trades_path = lb.raw_parquet_path(raw, "trades", *PERP, DAY)
+    os.makedirs(os.path.dirname(trades_path), exist_ok=True)
+    pq.write_table(pa.Table.from_pandas(_trades_df(), preserve_index=False), trades_path)
+    rc3, _, _ = run_cli(tmp_path, raw)
+    assert rc3 == 0
+    assert last_by_output(out)["trades"]["status"] == "ok"
 
 
 def test_missing_liquidations_is_sparse_ok(tmp_path):
