@@ -126,6 +126,11 @@ def test_required_arms_and_unique_names(g0_world):
     with pytest.raises(ValueError, match="duplicate arm names"):
         run_g0xv_development(dup, g0_world["contract"], gate=XV_GATE,
                              ledger=TrialLedger())
+    # ... and a post-hoc FOURTH arm cannot enter the ledger as spend-gate evidence
+    fourth = dict(arms[1], name="binance_spot_only")
+    with pytest.raises(ValueError, match="unregistered G0-XV arms"):
+        run_g0xv_development(arms + [fourth], g0_world["contract"], gate=XV_GATE,
+                             ledger=TrialLedger())
 
 
 def test_combined_arm_must_union_component_features(g0_world):

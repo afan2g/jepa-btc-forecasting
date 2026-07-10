@@ -441,12 +441,19 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
     names = [a.get("name") for a in arms]
     if len(set(names)) != len(names):
         raise ValueError(f"duplicate arm names: {sorted(names)}")
-    for required in sorted({control_arm, BINANCE_ARM, combined_arm}):
+    registered = {control_arm, BINANCE_ARM, combined_arm}
+    for required in sorted(registered):
         if required not in names:
             raise ValueError(f"G0-XV requires arm {required!r}: the staged protocol "
                              "preregisters the coinbase_only control, binance_only, and "
                              "combined arms; omitting one removes its candidates from "
                              "the common PBO matrix and the effective DSR count")
+    extra = sorted(set(names) - registered)
+    if extra:
+        raise ValueError(f"unregistered G0-XV arms: {extra}; the staged protocol fixes "
+                         "the study to exactly the three preregistered arms — a post-hoc "
+                         "arm cannot enter the ledger or be frozen as spend-gate "
+                         "evidence")
     for a in arms:
         if a["name"] == control_arm:
             # The control must genuinely be the target-venue-only build, not any

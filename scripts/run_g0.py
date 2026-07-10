@@ -77,9 +77,14 @@ def _preflight_out(path) -> None:
     leaf — the holdout scorer consumes the one-time transaction before its result is
     persisted. A writable parent is not enough (the leaf may be a directory or otherwise
     unreplaceable), so this performs the same atomic write the result will use, leaving
-    a placeholder the result then replaces."""
+    a placeholder the result then replaces. The result is a NEW artifact: an EXISTING
+    file at --out (e.g. the consumption record itself, or a prior result) is never
+    clobbered."""
     if os.path.isdir(path):
         raise ValueError(f"output path {path} is a directory, not a writable file path")
+    if os.path.exists(path):
+        raise ValueError(f"output path {path} already exists; refusing to overwrite an "
+                         "existing artifact — choose a fresh result path")
     try:
         _write_json({"status": "preflight",
                      "note": "placeholder written before the one-time holdout "
@@ -87,6 +92,18 @@ def _preflight_out(path) -> None:
                     path, quiet=True)
     except OSError as e:
         raise ValueError(f"output path {path} is not writable: {e}") from None
+
+
+def _cleanup_preflight(path) -> None:
+    """Remove OUR preflight placeholder (only) after a failed scoring attempt, so a
+    corrected retry does not trip the no-overwrite rule on a file we created."""
+    try:
+        with open(path) as f:
+            leftover = json.load(f)
+        if isinstance(leftover, dict) and leftover.get("status") == "preflight":
+            os.unlink(path)
+    except (OSError, ValueError):
+        pass
 
 
 def _default_read_matrix(path):
@@ -221,26 +238,31 @@ def cmd_holdout_score(args, read_matrix) -> int:
         raise ValueError(f"holdout transaction is {record['state']!r}; this invocation "
                          f"requires {need!r} — refusing before any holdout data is read")
     _preflight_out(args.out)   # scoring consumes the transaction; --out must work
-    contract = load_partition_contract(args.contract)
-    dev_manifest = load_manifest(args.dev_manifest)
-    holdout_manifest = load_manifest(args.holdout_manifest)
-    # EVERY data-free frozen-pin check runs before any matrix is opened: a validated
-    # transaction with a wrong/stale build must not be able to re-open the holdout
-    # matrix through repeated failing invocations.
-    preflight_holdout_inputs(freeze, contract=contract, dev_manifest=dev_manifest,
-                             holdout_manifest=holdout_manifest)
-    dev_matrix = read_matrix(args.dev_matrix)
-    # The dev matrix's frozen content pins are verified BEFORE the holdout matrix is
-    # opened: tampered/stale dev rows must not re-open outcome-bearing holdout data
-    # through repeated failing invocations.
-    verify_frozen_dev_matrix(freeze, contract=contract, dev_matrix=dev_matrix,
-                             dev_manifest=dev_manifest)
-    holdout_matrix = read_matrix(args.holdout_matrix)
-    res = score_fixed_holdout(freeze_artifact=freeze, records_dir=args.records_dir,
-                              contract=contract, dev_matrix=dev_matrix,
-                              dev_manifest=dev_manifest, holdout_matrix=holdout_matrix,
-                              holdout_manifest=holdout_manifest,
-                              verify_only=args.verify_only)
+    try:
+        contract = load_partition_contract(args.contract)
+        dev_manifest = load_manifest(args.dev_manifest)
+        holdout_manifest = load_manifest(args.holdout_manifest)
+        # EVERY data-free frozen-pin check runs before any matrix is opened: a
+        # validated transaction with a wrong/stale build must not be able to re-open
+        # the holdout matrix through repeated failing invocations.
+        preflight_holdout_inputs(freeze, contract=contract, dev_manifest=dev_manifest,
+                                 holdout_manifest=holdout_manifest)
+        dev_matrix = read_matrix(args.dev_matrix)
+        # The dev matrix's frozen content pins are verified BEFORE the holdout matrix
+        # is opened: tampered/stale dev rows must not re-open outcome-bearing holdout
+        # data through repeated failing invocations.
+        verify_frozen_dev_matrix(freeze, contract=contract, dev_matrix=dev_matrix,
+                                 dev_manifest=dev_manifest)
+        holdout_matrix = read_matrix(args.holdout_matrix)
+        res = score_fixed_holdout(freeze_artifact=freeze, records_dir=args.records_dir,
+                                  contract=contract, dev_matrix=dev_matrix,
+                                  dev_manifest=dev_manifest,
+                                  holdout_matrix=holdout_matrix,
+                                  holdout_manifest=holdout_manifest,
+                                  verify_only=args.verify_only)
+    except BaseException:
+        _cleanup_preflight(args.out)     # a corrected retry must not trip no-overwrite
+        raise
     _write_json(res, args.out)
     if args.verify_only:
         print(f"verify-only: reproduces_recorded_score="

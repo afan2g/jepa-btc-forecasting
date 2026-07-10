@@ -228,7 +228,10 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
     score = json.loads(open(tmp_path / "score.json").read())
     assert score["consumed"] is True and score["protocol"] == "g0xv-holdout"
     assert rg.main(score_args, read_matrix=store) == 2            # one-time consumption
-    assert rg.main(score_args + ["--verify-only"], read_matrix=store) == 0
+    # verify-only writes its own fresh artifact (--out never overwrites existing files)
+    verify_args = [a if not a.endswith("score.json") else str(tmp_path / "verify.json")
+                   for a in score_args] + ["--verify-only"]
+    assert rg.main(verify_args, read_matrix=store) == 0
     # a second validation attempt is also rejected
     assert rg.main(["holdout-validate", "--freeze", freeze_path,
                     "--records-dir", str(records),
