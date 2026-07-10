@@ -146,12 +146,23 @@ def arm_summary_rows(report: dict) -> list[dict]:
         md = ev["parity"].get("mid_diff", {})
         la = ev["parity"].get("label_agreement", {})
         pre = ev.get("preregistered", {})
+        costs = arm.get("costs") or {}
+        # one priced strategy per arm kind (rest_on_demand for day_open/on_demand,
+        # flatfile_snapshot_stream for stream); controls have none
+        strategy = next((costs[k] for k in ("rest_on_demand",
+                                            "flatfile_snapshot_stream")
+                         if k in costs), None)
+        band = (strategy or {}).get("usd_band") or {}
+        od = arm["meta"].get("on_demand") or {}
         row = {
             "day": report["day"], "arm": name,
             "crossed_rate": ev["day_quality"].get("crossed_rate"),
             "missing_frac": ev["day_quality"].get("missing_book_fraction"),
             "thin_frac": ev["day_quality"].get("thin_depth_fraction"),
             "crossed_duration_s": ev["day_quality"].get("crossed_duration_s"),
+            "seed_accepted": arm["meta"].get("seed_accepted"),
+            "seed_ts": arm["meta"].get("seed_ts"),
+            "reseed_count": arm["meta"].get("reseed_count"),
             "mid_median": md.get("median"), "mid_p95": md.get("p95"),
             "mid_p99": md.get("p99"), "mid_corr": md.get("corr"),
             "spike_gt50_frac": ev["parity"].get("spike_fraction", {}).get(">50"),
@@ -162,12 +173,16 @@ def arm_summary_rows(report: dict) -> list[dict]:
             "prereg_guarded_pass": (ev.get("preregistered_guarded") or {}).get("pass"),
             "prereg_pass_effective": arm.get("prereg_pass_effective"),
             "econ_pass": (arm.get("economics") or {}).get("pass"),
+            "non_regression_pass": (arm.get("non_regression") or {}).get("pass"),
+            "n_requests": od.get("n_requests"),
+            "terminated": od.get("terminated"),
+            "cost_usd_low": band.get("low"),
+            "cost_usd_high": band.get("high"),
+            "full_day_usd": (costs.get("full_day_fill") or {}).get("usd"),
+            "stream_rows": (costs.get("flatfile_snapshot_stream") or {}).get("rows"),
             "prereg_failed": ";".join(pre.get("failed", [])),
             "n_grid": ev["parity"].get("n_grid"),
         }
-        od = arm["meta"].get("on_demand")
-        if od:
-            row["n_requests"] = od["n_requests"]
         rows.append(row)
     return rows
 
@@ -343,7 +358,8 @@ def main(argv=None) -> int:
               f" (guarded {'ok' if row['prereg_guarded_pass'] else '—'})"
               + (f" | econ {'ok' if row['econ_pass'] else 'FAIL'}"
                  if row["econ_pass"] is not None else "")
-              + (f" | req {row['n_requests']}" if "n_requests" in row else ""))
+              + (f" | req {row['n_requests']}" if row["n_requests"] is not None
+                 else ""))
     print(f"\n  wrote {jpath}\n        {cpath}")
     return 0
 

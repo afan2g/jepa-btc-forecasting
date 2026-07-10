@@ -1069,6 +1069,24 @@ class TestRunnerScript:
         assert out["totals"]["book_fill_days"] == 4
         assert out["totals"]["gross_usd"] == 10.0
 
+    def test_arm_summary_rows_carry_all_decision_bearing_fields(self):
+        # The tracked evidence CSVs must let a reviewer validate EVERY number the
+        # decision docs quote: reseed counts, seed acceptance, request counts and
+        # termination, and the projected cost bands — not just the parity metrics.
+        import importlib
+        runner = importlib.import_module("scripts.run_snapshot_seed_experiment")
+        rep = TestRunExperimentDay()._run()
+        rows = {r["arm"]: r for r in runner.arm_summary_rows(rep)}
+        st = rows["coinapi_stream_L2"]
+        assert st["reseed_count"] is not None
+        assert st["seed_accepted"] is True
+        assert st["cost_usd_low"] is not None and st["cost_usd_high"] is not None
+        assert st["full_day_usd"] is not None
+        od = rows["coinapi_on_demand_L2"]
+        assert od["n_requests"] >= 1 and od["terminated"]
+        assert od["cost_usd_low"] is not None
+        assert rows["cold_control"]["cost_usd_low"] is None  # unpriced control
+
     def test_missing_coinapi_parquet_exits_3(self, tmp_path, capsys):
         import importlib
         runner = importlib.import_module("scripts.run_snapshot_seed_experiment")

@@ -1,15 +1,15 @@
 {
   "issue": 54,
   "generated_utc": "2026-07-10",
-  "harness_commit": "c39fb3c1444cb4ac19f613ccf76e88893ee1db5f",
+  "harness_commit": "35948bd5ac837b2e536f353cf506bdbd50e705eb+evidence-refresh",
   "note": "Tracked audit bundle for the #54 NO-GO decision: per-arm metric CSVs and the #33-manifest reconciliation carry every decision-bearing number quoted in docs/data.md, issue #54, and PR #63. Full day-report JSONs stay git-ignored under data/reports/snapshot_seed/ (aggregate metrics only, <1 MB each) and are pinned here by sha256 + their internal report_hash; inputs pinned by the CoinAPI parquet sha256 and Lake cache file URLs.",
   "tracked_files": {
     "reconciliation_54.json": "ef329146102b47b095f75b96b30efc8f6374c82bdbef28d2d3c8b6d29cd5e1da",
-    "snapshot_seed_2024-12-04_arms.csv": "4812a7ba426189bc2cb80a3156c1809a379015268f313cff19da625a78962dc9",
-    "snapshot_seed_2025-06-01_arms.csv": "62675de923fd75c20b7e6e6780284c6d97c6fdb99ec4b110db00b0ac2277688f",
-    "snapshot_seed_2025-06-01_leading_gap_arms.csv": "7270f521df50955961be3c21c05f4fbce1a7899106b519c4ac1ec9a35e0bcc67",
-    "snapshot_seed_2025-06-01_sparse_arms.csv": "049e103de7a5488d31ab99f742289e3e9ef44b6bde5fa26a4208545c45a7fa9f",
-    "snapshot_seed_2026-04-01_arms.csv": "8a98a2c6f523aa1681cce447f3d2c1c314c8857bdec939a24c81fecc5ca03fb3"
+    "snapshot_seed_2024-12-04_arms.csv": "c292c739297c4b05238dad97912df4e3564a1abd0aba9efd827cf6cbc6b672ab",
+    "snapshot_seed_2025-06-01_arms.csv": "836c3272296ede44b4106c26624c17ce117660209bd2d4993a45001257d31b04",
+    "snapshot_seed_2025-06-01_leading_gap_arms.csv": "327d195e23df9da34628d349ac6f5fd81f57aecb8f1911daf745f30f0cc60636",
+    "snapshot_seed_2025-06-01_sparse_arms.csv": "c9b0e8f3d4737254d58e78a5f2741008a640bd4bdaa1a6e5fb6e2a3aab5bc708",
+    "snapshot_seed_2026-04-01_arms.csv": "fa616d8b62d53ddbabb56f550c684a8fce33fb35a8b94224fa56578da35417ae"
   },
   "ignored_reports_sha256": {
     "snapshot_seed_2024-12-04.json": "4652fe2f8f450880c5434f2298ff97e0747c2821e17ff2400c173217d7ad3d73",
