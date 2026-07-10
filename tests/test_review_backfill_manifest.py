@@ -1823,6 +1823,34 @@ def test_resolution_policy_fill_blocks_on_malformed_fill_status(tmp_path):
     assert m["blockers"]["unresolved_days"] == []
 
 
+def test_resolution_policy_fill_blocks_on_probe_error_evidence(tmp_path):
+    # deep-review P2: a day-level probe ERROR record ({'book': None, 'error': true}) or
+    # membership in fill_days_unfillable / fill_days_probe_error is positive unavailability
+    # evidence — the policy fill must route it through is_fillable, not read it as "never probed"
+    def _variant(cal, i):
+        if i == 0:
+            cal["fill_status"]["2025-01-01"] = {"book": None, "trades": None, "error": True,
+                                                "reason": "probe failed", "ok": False}
+        elif i == 1:
+            cal["fill_days_unfillable"] = ["2025-01-01"]
+        else:
+            cal["fill_days_probe_error"] = ["2025-01-01"]
+        return cal
+    for i in range(3):
+        d = tmp_path / f"v{i}"
+        d.mkdir()
+        plan_path, cal_path = _write_tree(d, cal=_variant(_calendar(), i),
+                                          reports=_reports_with_unresolved())
+        res = _resolutions_file(d, [_entry("2025-01-01", action="policy",
+                                           decision="coinapi_fill_full_day")])
+        m = _build(plan_path, cal_path, res)
+        assert m["meta"]["status"] == "blocking", f"variant {i}"
+        assert m["blockers"]["book_fill_unavailable"] == ["2025-01-01:calendar_book_not_ok"], \
+            f"variant {i}"
+        assert m["blockers"]["resolution_issues"] == [] and \
+            m["blockers"]["unresolved_days"] == [], f"variant {i}"
+
+
 def test_resolution_rerun_fill_judged_by_availability_checks(tmp_path):
     # pins the apply-BEFORE-checks ordering: check_report_fill_availability must judge the
     # SUPERSEDING rerun record — a rerun-introduced fill on a day whose calendar book status is

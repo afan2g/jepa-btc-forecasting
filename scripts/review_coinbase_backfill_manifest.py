@@ -1202,16 +1202,21 @@ def apply_resolutions(resolutions: dict, reports: list, day_index: dict, cal: di
             block["resolved"] = True
             if e["decision"] == "coinapi_fill_full_day":
                 # positive-unavailability evidence bar, deliberately STRICTER than
-                # check_report_fill_availability: only its measured not-ok calendar branch, no
+                # check_report_fill_availability: only its measured calendar branch, no
                 # local-parquet escape — a policy fill is a fresh human spend decision, not
                 # data-in-hand evidence. A mere ABSENCE of evidence (no per-day record, or a
-                # record without a book probe) must not block (pre-spend approval would be
-                # circular) — but a MALFORMED non-dict record is corrupt evidence and fails
-                # closed via is_fillable, like every other availability path.
+                # healthy record without a book probe) must not block (pre-spend approval
+                # would be circular) — but a MALFORMED non-dict record, a probe ERROR
+                # (error != False), or membership in the unfillable/probe-error day lists is
+                # corrupt/positive evidence and fails closed via is_fillable, like the
+                # calendar-day availability path.
                 fs = _fill_status(cal, d)
-                if (fs is not None
-                        and (not isinstance(fs, dict) or fs.get("book") is not None)
-                        and not is_fillable(cal, d, "book")):
+                bad_lists = (d in set(cal.get("fill_days_unfillable") or [])
+                             or d in set(cal.get("fill_days_probe_error") or []))
+                measured = fs is not None and (not isinstance(fs, dict)
+                                               or fs.get("book") is not None
+                                               or fs.get("error") is not False)
+                if (bad_lists or measured) and not is_fillable(cal, d, "book"):
                     blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
         out[d] = block
     return out
