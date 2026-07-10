@@ -310,6 +310,45 @@ def test_refuses_cost_summary_drift(tmp_path):
         _plan(path, verify_inputs=False)
 
 
+def _mutate_partial_segments(m, mutator):
+    for r in m["days"]:
+        if r["day"] == "2025-01-03":
+            mutator(r["book_fill"])
+
+
+@pytest.mark.parametrize("mutator,match", [
+    (lambda bf_: bf_["fill_segments"][1].update(start_ts=bf_["fill_segments"][1]["start_ts"] + 1),
+     "segment"),                                                   # gap between segments
+    (lambda bf_: bf_["fill_segments"][-1].update(end_ts=bf_["fill_segments"][-1]["end_ts"] - 1),
+     "segment"),                                                   # falls short of day close
+    (lambda bf_: bf_.update(seams=[]), "seam"),                    # seams drop the source change
+    (lambda bf_: bf_["fill_segments"][1].update(source="vendor"), "segment"),
+])
+def test_refuses_tampered_stitch_segments(tmp_path, mutator, match):
+    # the executor is the spend gate: sections/cost_summary do not cover segment internals, so a
+    # pinned-but-tampered stitch plan (gap/overlap, day-boundary miss, stale seams, bad source)
+    # must be re-validated here, not just carried forward verbatim
+    path, _ = fx.ready_manifest(tmp_path)
+    fx.mutate_manifest(path, lambda m: _mutate_partial_segments(m, mutator))
+    with pytest.raises(bf.BackfillRefusal, match=match):
+        _plan(path, verify_inputs=False)
+
+
+def test_refuses_full_day_fill_with_non_coinapi_segment(tmp_path):
+    path, _ = fx.ready_manifest(tmp_path)
+    def poison(m):
+        for r in m["days"]:
+            if r["day"] == "2025-01-02":                           # full-day fill
+                r["book_fill"]["fill_segments"][0]["source"] = "lake"
+    fx.mutate_manifest(path, poison)
+    with pytest.raises(bf.BackfillRefusal, match="segment"):
+        _plan(path, verify_inputs=False)
+
+
+def test_segment_sources_aligned_with_reviewer():
+    assert bf.SEGMENT_SOURCES == fx.rv.SEGMENT_SOURCES
+
+
 def test_refuses_fill_unit_without_executable_stitch_plan(tmp_path):
     path, _ = fx.ready_manifest(tmp_path)
     def strip_plan(m):

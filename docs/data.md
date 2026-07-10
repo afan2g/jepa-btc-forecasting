@@ -992,7 +992,11 @@ manifest whose bytes don't match the operator-pinned `--manifest-sha256`, whose 
 duplicate/conflicting day records, an excluded day carrying a fill, a fill without an executable
 stitch plan). It plans EXACT sparse units — one per needed book (`LIMITBOOK_FULL`) and trade
 (`TRADES`) fill day, through explicit product handlers — and never downloads a non-fill date
-lying between fills. A partial-day book fill pulls the vendor's whole day-file (that is the
+lying between fills. Trade units are emitted in the **normalized trade contract**
+(`origin_time`/`received_time` as datetime64[ns], `price`, `quantity`, `side`∈{buy,sell},
+`trade_id`, plus the vendor's `taker_side` and identifier columns preserved verbatim), so
+`ingest/trade_checks.py` validates a CoinAPI fill day unchanged (`vendor_source="coinapi"`,
+the Phase-3b reuse that clears `coinapi_fill_deferred`). A partial-day book fill pulls the vendor's whole day-file (that is the
 billing unit), while the day's `fill_segments`/`seams`/`seam_policy` and canonical provenance
 ride VERBATIM in the plan and execution report for the downstream stitcher — the executor never
 recomputes fill policy. The default run is a DRY-RUN plan

@@ -89,13 +89,19 @@ SCHEMA = pa.schema([
     ("order_id", pa.string()),
 ])
 
-# CoinAPI Flat Files `trades` (T-TRADES/D-YYYYMMDD daily csv.gz). Same faithful-lossless
-# discipline as the book: vendor columns preserved, times as int-ns since the partition day's
-# midnight UTC, seq = in-file row order. The column set and the FULL-DATETIME time fields
-# (e.g. 2025-02-14T13:30:03.5851480 — unlike the book's time-of-day offsets) follow the
-# flat-files trades docs; neither has been verified against a live file (no vendor calls in
-# this change), so the executor validates the header before parsing, normalizes either time
-# form, and FAILS CLOSED on anything else rather than writing wrong data.
+# CoinAPI Flat Files `trades` (T-TRADES/D-YYYYMMDD daily csv.gz), emitted in the NORMALIZED
+# trade contract the trade-validation plan and recon ingest consume unchanged
+# (docs/superpowers/plans/2026-07-02-trade-validation-breadth-plan.md Phase 3b; recon/ingest.py):
+#   origin_time/received_time  datetime64[ns] (Lake convention, naive UTC)
+#   price/quantity             float64
+#   side                       "buy"/"sell" (fail-closed on unmappable taker_side)
+#   trade_id                   vendor guid (string UUID; dup detection is dtype-agnostic)
+# plus the vendor columns preserved verbatim (taker_side incl. *_ESTIMATED, and the trailing
+# identifier columns). The vendor time fields are FULL datetimes per the flat-files docs
+# (e.g. 2025-02-14T13:30:03.5851480 — unlike the book's time-of-day offsets); the column set and
+# time form have NOT been verified against a live file (no vendor calls in this change), so the
+# executor validates the header before parsing, normalizes either time form, and FAILS CLOSED on
+# anything else rather than writing wrong data.
 TRADES_DATA_TYPE = "TRADES"
 # the six columns a trades file MUST carry to normalize at all (fail-closed otherwise) …
 TRADES_REQUIRED = ("time_exchange", "time_coinapi", "guid", "price", "base_amount", "taker_side")
@@ -109,11 +115,12 @@ TRADES_READ_DTYPE = {
 }
 TRADES_SCHEMA = pa.schema([
     ("seq", pa.int64()),
-    ("time_exchange_ns", pa.int64()),
-    ("time_coinapi_ns", pa.int64()),
-    ("guid", pa.string()),
+    ("origin_time", pa.timestamp("ns")),
+    ("received_time", pa.timestamp("ns")),
     ("price", pa.float64()),
-    ("base_amount", pa.float64()),
+    ("quantity", pa.float64()),
+    ("side", pa.string()),
+    ("trade_id", pa.string()),
     ("taker_side", pa.string()),
     *[(c, pa.string()) for c in TRADES_ID_COLUMNS],
 ])
@@ -183,15 +190,32 @@ def _vendor_time_to_ns(series: pd.Series, day: str) -> pd.Series:
     return pd.to_timedelta(s).astype("int64")
 
 
+def _trade_side(taker_side: pd.Series) -> pd.Series:
+    """Vendor taker_side -> normalized side ∈ {buy, sell} (BUY*/SELL* incl. *_ESTIMATED map to
+    their side; the raw value is preserved verbatim in its own column). Anything unmappable
+    raises, so the unit fails closed instead of writing a side the bar clock can't trust."""
+    up = taker_side.fillna("").astype(str).str.upper()
+    buy, sell = up.str.startswith("BUY"), up.str.startswith("SELL")
+    bad = ~(buy | sell)
+    if bad.any():
+        raise ValueError(f"unmappable taker_side value(s) {sorted(set(up[bad]))[:5]} — cannot "
+                         "normalize side to buy/sell (fail-closed)")
+    return buy.map({True: "buy", False: "sell"})
+
+
 def trades_to_table(df: pd.DataFrame, seq_start: int, day: str) -> pa.Table:
     n = len(df)
+    day_open_ns = int(pd.Timestamp(day, tz="UTC").value)
     out = pd.DataFrame({
         "seq": range(seq_start, seq_start + n),
-        "time_exchange_ns": _vendor_time_to_ns(df["time_exchange"], day),
-        "time_coinapi_ns": _vendor_time_to_ns(df["time_coinapi"], day),
-        "guid": df["guid"].fillna("").astype(str),
+        "origin_time": pd.to_datetime(
+            day_open_ns + _vendor_time_to_ns(df["time_exchange"], day), unit="ns"),
+        "received_time": pd.to_datetime(
+            day_open_ns + _vendor_time_to_ns(df["time_coinapi"], day), unit="ns"),
         "price": df["price"].astype("float64"),
-        "base_amount": df["base_amount"].astype("float64"),
+        "quantity": df["base_amount"].astype("float64"),
+        "side": _trade_side(df["taker_side"]),
+        "trade_id": df["guid"].fillna("").astype(str),
         "taker_side": df["taker_side"].fillna("").astype(str),
         # optional identifiers: nullable ("string" dtype keeps NA -> arrow null), absent -> null
         **{c: (df[c].astype("string") if c in df.columns
@@ -213,7 +237,7 @@ HANDLERS = {
                         "required": TRADES_REQUIRED, "schema": TRADES_SCHEMA,
                         "make_to_table": lambda day: (
                             lambda df, seq: trades_to_table(df, seq, day)),
-                        "dict_cols": ("taker_side",)},
+                        "dict_cols": ("side", "taker_side")},
 }
 
 
@@ -411,6 +435,9 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
     try:
         try:
             got, src_sha = stream_to_file(s3, bucket, key, gz_path)
+            # the GET is done: keep the source audit trail on EVERY later outcome, so a post-GET
+            # failure (header drift, parse error) still identifies the exact billed bytes
+            res.update(src_bytes=src_bytes, src_sha256=src_sha)
             if got != src_bytes:
                 raise ValueError(f"size mismatch {got} != {src_bytes}")
             _validate_csv_columns(gz_path, list(handler["required"]), f"{product} {day}")

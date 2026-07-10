@@ -41,6 +41,10 @@ EXPECTED_EXCHANGE = "COINBASE"
 EXPECTED_SYMBOL = "BTC-USD"
 BOOK_KINDS = ("full_day", "partial")
 GB_BASES = ("measured", "estimated")
+# Pinned copy of recon.stitch_policy.SOURCES (via the reviewer's SEGMENT_SOURCES; contract test).
+SEGMENT_SOURCES = ("lake", "coinapi", "excluded")
+NS_PER_S = 1_000_000_000
+DAY_NS = 86_400 * NS_PER_S
 SECTION_KEYS = ("full_day_book_fills", "partial_day_book_fills", "trade_fills",
                 "lake_usable_days", "lake_present_degraded_days", "excluded_days",
                 "unresolved_days")
@@ -241,9 +245,61 @@ def verify_pinned_inputs(manifest: dict) -> list:
 
 
 # ----------------------------------------------------------- unit derivation
+def _day_bounds_ns(day: str) -> tuple:
+    """(day_open_ts, day_end_ts) in int ns for a YYYY-MM-DD partition day (midnight UTC)."""
+    d = dt.date.fromisoformat(day)
+    open_ = int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp()) * NS_PER_S
+    return open_, open_ + DAY_NS
+
+
+def _fill_segments_issues(day: str, segments: list, seams) -> list:
+    """Ported from the reviewer's stitch-plan validation (contract-pinned enums): segments must
+    PARTITION [day_open, day_close) as ordered, contiguous, half-open int-ns spans with known
+    sources, and `seams` must be exactly the source-change boundaries. The executor re-validates
+    because it is the SPEND gate: sections/cost_summary do not cover these fields, so a
+    pinned-but-tampered/stale stitch plan would otherwise be executed and carried verbatim into
+    downstream seam masking."""
+    issues = []
+    try:
+        day_open, day_end = _day_bounds_ns(day)
+    except (TypeError, ValueError):
+        day_open = day_end = None
+    prev_end = None
+    for i, s in enumerate(segments):
+        if not isinstance(s, dict):
+            issues.append(f"fill_segment[{i}]_not_object:{day}")
+            continue
+        st, en, src = s.get("start_ts"), s.get("end_ts"), s.get("source")
+        if (not isinstance(st, int) or not isinstance(en, int)
+                or isinstance(st, bool) or isinstance(en, bool)):
+            issues.append(f"fill_segment[{i}]_non_int_bounds:{day}")
+            continue
+        if en <= st:
+            issues.append(f"fill_segment[{i}]_non_positive_span:{day}")
+        if src not in SEGMENT_SOURCES:
+            issues.append(f"fill_segment[{i}]_bad_source:{day}:{src!r}")
+        if prev_end is not None:
+            if st != prev_end:
+                issues.append(f"fill_segments_gap_or_overlap_at[{i}]:{day}")
+        elif day_open is not None and st != day_open:
+            issues.append(f"fill_segments_start_ne_day_open:{day}")
+        prev_end = en
+    if day_end is not None and prev_end is not None and prev_end != day_end:
+        issues.append(f"fill_segments_end_ne_day_close:{day}")
+    # seams must be exactly the source-change boundaries (right segment's start_ts); a stale or
+    # emptied seams list would drop the guard bands a consumer applies at a Lake<->CoinAPI switch
+    expected_seams = [cur.get("start_ts") for prev, cur in zip(segments, segments[1:])
+                      if isinstance(prev, dict) and isinstance(cur, dict)
+                      and prev.get("source") != cur.get("source")]
+    if isinstance(seams, list) and seams != expected_seams:
+        issues.append(f"seams_mismatch:{day}:expected={expected_seams}:got={seams}")
+    return issues
+
+
 def _fill_unit_issues(day: str, fill: dict, product: str) -> list:
     """A fill unit must be executable and costable: a valid kind, a verbatim stitch plan that
-    actually pulls from CoinAPI (book), and finite non-negative GB/$ figures."""
+    actually partitions the day and pulls from CoinAPI (book), and finite non-negative GB/$
+    figures."""
     issues = []
     kind = fill.get("kind") if product == PRODUCT_BOOK else "full_day"
     if product == PRODUCT_BOOK:
@@ -252,8 +308,15 @@ def _fill_unit_issues(day: str, fill: dict, product: str) -> list:
         segs = fill.get("fill_segments")
         if not isinstance(segs, list) or not segs:
             issues.append(f"book_fill_missing_fill_segments:{day}")
-        elif not any(isinstance(s, dict) and s.get("source") == "coinapi" for s in segs):
-            issues.append(f"book_fill_no_coinapi_segment:{day}")
+        else:
+            issues.extend(_fill_segments_issues(day, segs, fill.get("seams")))
+            srcs = [s.get("source") for s in segs if isinstance(s, dict)]
+            if "coinapi" not in srcs:
+                issues.append(f"book_fill_no_coinapi_segment:{day}")
+            elif kind == "full_day" and any(src != "coinapi" for src in srcs):
+                # a full-day fill is an all-CoinAPI replacement; a lake segment inside it would
+                # preserve data the fill decision says cannot be trusted (or does not exist)
+                issues.append(f"full_day_fill_non_coinapi_segment:{day}")
         if not isinstance(fill.get("seams"), list):
             issues.append(f"book_fill_missing_seams:{day}")
         if not isinstance(fill.get("seam_policy"), dict):

@@ -81,7 +81,10 @@ Key properties:
   is keyed on source/product/day + the manifest sha256 (an output without a matching state record
   is a CONFLICT, never adopted); every run writes a reconciled execution report (units, bytes,
   rows, sha256s, spend evidence) under `data/reports/backfill/`. Partial-day fills pull the whole
-  vendor day-file, with the manifest's stitch segments/seams carried verbatim for the recon layer.
+  vendor day-file, with the manifest's stitch segments/seams re-validated (they must partition the
+  day) and carried verbatim for the recon layer. Trade units land in the normalized trade contract
+  (`origin_time`/`received_time`/`price`/`quantity`/`side`/`trade_id` + vendor identifiers
+  preserved), consumable by `ingest/trade_checks.py` unchanged (`vendor_source="coinapi"`).
 
 > Heads-up: BTC-USD `limitbook_full` is ~1.9 GB/day compressed (L3) → ~1 TB / 18 mo.
 > See `coinapi-coinbase-fit` memory for the size mitigation options.

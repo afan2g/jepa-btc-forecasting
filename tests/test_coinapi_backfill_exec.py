@@ -191,21 +191,79 @@ def test_trades_parquet_is_normalized(ready):
     assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
     # ParquetFile reads the file alone (read_table would infer hive partition cols from the path)
     t = pq.ParquetFile(_final(ready, "trades", "2025-01-10")).read()
-    assert t.column_names == ["seq", "time_exchange_ns", "time_coinapi_ns", "guid", "price",
-                              "base_amount", "taker_side", "id_exch_guid", "id_exch_int_inc",
-                              "order_id_maker", "order_id_taker"]
+    # the NORMALIZED trade contract (trade-validation plan Phase 3b / recon ingest:
+    # origin_time, received_time, price, quantity, side∈{buy,sell}, trade_id) so trade_checks
+    # validates CoinAPI fills unchanged — plus the vendor identifiers preserved losslessly
+    assert t.column_names == ["seq", "origin_time", "received_time", "price", "quantity",
+                              "side", "trade_id", "taker_side", "id_exch_guid",
+                              "id_exch_int_inc", "order_id_maker", "order_id_taker"]
     assert t.column("seq").to_pylist() == [0, 1]
-    assert t.column("guid").to_pylist() == ["g-0", "g-1"]
-    assert t.column("taker_side").to_pylist() == ["BUY", "BUY"]
+    assert t.column("trade_id").to_pylist() == ["g-0", "g-1"]
+    assert t.column("side").to_pylist() == ["buy", "buy"]
+    assert t.column("taker_side").to_pylist() == ["BUY", "BUY"]     # vendor value verbatim
     assert t.column("price").to_pylist() == [100.5, 100.5]
-    assert t.column("base_amount").to_pylist() == [0.20, 0.21]
+    assert t.column("quantity").to_pylist() == [0.20, 0.21]
     # the documented exchange/order identifiers ride along losslessly
     assert t.column("id_exch_guid").to_pylist() == ["eg-0", "eg-1"]
     assert t.column("id_exch_int_inc").to_pylist() == ["0", "1"]
     assert t.column("order_id_maker").to_pylist() == ["mk-0", "mk-1"]
     assert t.column("order_id_taker").to_pylist() == ["tk-0", "tk-1"]
-    # "2025-01-10T12:00:00.0000000" -> ns since the partition day's midnight UTC
-    assert t.column("time_exchange_ns").to_pylist()[0] == 12 * 3600 * 10**9
+    # "2025-01-10T12:00:00.0000000" -> absolute datetime64[ns] (Lake convention, naive UTC)
+    import datetime
+    assert t.column("origin_time").to_pylist()[0] == datetime.datetime(2025, 1, 10, 12, 0, 0)
+    assert t.column("received_time").to_pylist()[1] == datetime.datetime(2025, 1, 10, 12, 0, 1,
+                                                                         10000)
+
+
+def test_trades_normalized_frame_passes_trade_checks(ready):
+    # the whole point of the normalized contract: ingest/trade_checks.py consumes the parquet
+    # unchanged (source-agnostic Phase-3b reuse, vendor_source="coinapi"), so a CoinAPI fill day
+    # can clear coinapi_fill_deferred. A 2-row synthetic day rightly trips coverage METRICS —
+    # what must hold is that no SCHEMA-level code fires (columns/side/time all understood).
+    import pandas as pd
+    fake = FakeS3(default_objects())
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    tc = fx.load_by_path("trade_checks", "ingest/trade_checks.py")
+    df = pd.read_parquet(_final(ready, "trades", "2025-01-10"))
+    rec = tc.validate_trade_frame(df, venue="coinbase", day="2025-01-10",
+                                  vendor_source="coinapi")
+    schema_codes = {tc.REQUIRED_COLUMN_MISSING, tc.ORIGIN_TIME_COLUMN_MISSING,
+                    tc.SIDE_COLUMN_MISSING, tc.SIDE_VALUE_UNEXPECTED}
+    assert not (set(rec["reason_codes"]) & schema_codes), rec["reason_codes"]
+    m = rec["metrics"]
+    assert m["dup_trade_id_count"] == 0 and m["trade_id_available"] is True
+
+
+def test_trades_side_normalization(ready):
+    import pyarrow.parquet as pq
+    objs = default_objects()
+    rows = ["2025-01-11T12:00:00.0000000;2025-01-11T12:00:00.0100000;g-0;100.5;0.20;"
+            "SELL_ESTIMATED;eg-0;0;mk-0;tk-0",
+            "2025-01-11T12:00:01.0000000;2025-01-11T12:00:01.0100000;g-1;100.5;0.21;"
+            "BUY;eg-1;1;mk-1;tk-1"]
+    objs[_key("TRADES", "2025-01-11")] = gzip.compress(
+        ("\n".join([TRADES_HEADER] + rows) + "\n").encode())
+    fake = FakeS3(objs)
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    t = pq.ParquetFile(_final(ready, "trades", "2025-01-11")).read()
+    # *_ESTIMATED maps to its side; the raw vendor value stays available verbatim
+    assert t.column("side").to_pylist() == ["sell", "buy"]
+    assert t.column("taker_side").to_pylist() == ["SELL_ESTIMATED", "BUY"]
+
+
+def test_trades_unmappable_side_fails_closed(ready):
+    objs = default_objects()
+    rows = ["2025-01-11T12:00:00.0000000;2025-01-11T12:00:00.0100000;g-0;100.5;0.20;"
+            "UNKNOWN;eg-0;0;mk-0;tk-0"]
+    objs[_key("TRADES", "2025-01-11")] = gzip.compress(
+        ("\n".join([TRADES_HEADER] + rows) + "\n").encode())
+    fake = FakeS3(objs)
+    rc = run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 1
+    assert not _final(ready, "trades", "2025-01-11").exists()
+    unit = {(u["product"], u["day"]): u
+            for u in _report(ready)["units"]}[("trades", "2025-01-11")]
+    assert unit["status"] == "error" and "taker_side" in unit["error"]
 
 
 def test_trades_without_identifier_columns_normalizes_with_nulls(ready):
@@ -220,14 +278,15 @@ def test_trades_without_identifier_columns_normalizes_with_nulls(ready):
     fake = FakeS3(objs)
     assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
     t = pq.ParquetFile(_final(ready, "trades", "2025-01-11")).read()
-    assert t.column("guid").to_pylist() == ["g-0", "g-1"]
+    assert t.column("trade_id").to_pylist() == ["g-0", "g-1"]
     assert t.column("id_exch_guid").to_pylist() == [None, None]
     assert t.column("order_id_taker").to_pylist() == [None, None]
 
 
 def test_trades_time_of_day_offset_form_also_normalizes(ready):
-    # tolerate the book-style offset form too: either vendor format lands as the same
-    # ns-since-partition-midnight normalization
+    # tolerate the book-style offset form too: either vendor format lands as the same absolute
+    # origin_time normalization (offset resolved against the partition day's midnight UTC)
+    import datetime
     import pyarrow.parquet as pq
     objs = default_objects()
     rows = [trades_row(i, f"12:00:0{i}.0000000", f"12:00:0{i}.0100000") for i in range(3)]
@@ -236,13 +295,14 @@ def test_trades_time_of_day_offset_form_also_normalizes(ready):
     fake = FakeS3(objs)
     assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
     t = pq.ParquetFile(_final(ready, "trades", "2025-01-11")).read()
-    assert t.column("time_exchange_ns").to_pylist() == [(12 * 3600 + i) * 10**9
-                                                        for i in range(3)]
+    assert t.column("origin_time").to_pylist() == [datetime.datetime(2025, 1, 11, 12, 0, i)
+                                                   for i in range(3)]
 
 
 def test_trades_datetime_outside_partition_day_is_preserved(ready):
     # faithful-lossless: a record stamped past the partition day's midnight keeps its true
-    # offset (>= DAY_NS) rather than being clamped or wrapped — recon owns day-boundary logic
+    # absolute time rather than being clamped or wrapped — recon owns day-boundary logic
+    import datetime
     import pyarrow.parquet as pq
     objs = default_objects()
     rows = [trades_row(0, "2025-01-11T23:59:59.0000000", "2025-01-11T23:59:59.0100000"),
@@ -252,7 +312,8 @@ def test_trades_datetime_outside_partition_day_is_preserved(ready):
     fake = FakeS3(objs)
     assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
     t = pq.ParquetFile(_final(ready, "trades", "2025-01-11")).read()
-    assert t.column("time_exchange_ns").to_pylist() == [86_399 * 10**9, 86_400 * 10**9]
+    assert t.column("origin_time").to_pylist() == [
+        datetime.datetime(2025, 1, 11, 23, 59, 59), datetime.datetime(2025, 1, 12, 0, 0, 0)]
 
 
 def test_execute_resume_skips_done_units_without_vendor_calls(ready):
@@ -386,6 +447,9 @@ def test_trades_header_drift_fails_closed(ready):
     unit = {(u["product"], u["day"]): u for u in rep["units"]}[("trades", "2025-01-11")]
     assert unit["status"] == "error" and "base_amount" in unit["error"]
     assert rep["reconciliation"]["complete"] is False
+    # post-GET failure keeps the source audit trail: the billed bytes are identified exactly
+    assert unit["src_bytes"] > 0 and unit["src_sha256"]
+    assert unit["billed_bytes"] == unit["src_bytes"]
 
 
 def test_missing_vendor_file_is_recorded_not_fatal(ready):
