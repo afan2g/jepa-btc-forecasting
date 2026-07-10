@@ -1124,11 +1124,14 @@ def apply_resolutions(resolutions: dict, reports: list, day_index: dict, cal: di
                   "applied": False, "resolved": False, "issues": [f"duplicate_entry:{d}"]}
 
     # load every referenced rerun report once; a report with ANY issue disqualifies every entry
-    # that points at it (its records were produced under conditions this gate can't accept)
+    # that points at it (its records were produced under conditions this gate can't accept).
+    # Claims are keyed by the CANONICAL path (realpath): equivalent spellings of one report
+    # (relative/absolute/`..`) must group into a single claim set, or each spelling would see
+    # the other entries' days as unclaimed and wrongly block a valid multi-day rerun (Codex P2).
     claims: dict = {}
     for e in entries:
         if e["action"] == "rerun":
-            claims.setdefault(e["report"], set()).add(e["day"])
+            claims.setdefault(os.path.realpath(e["report"]), set()).add(e["day"])
     ref_pin = _reference_meta_pin(reports)
     batch_paths = {os.path.realpath(r["path"]) for r in reports}
     batch_shas = {sha256_file(r["path"]) for r in reports}
@@ -1172,7 +1175,7 @@ def apply_resolutions(resolutions: dict, reports: list, day_index: dict, cal: di
                            f"{orig.get('reasons')!r}")
         rec = None
         if e["action"] == "rerun":
-            rr = rerun_reports.get(e["report"])
+            rr = rerun_reports.get(os.path.realpath(e["report"]))
             if rr is None:
                 ent.append(f"rerun_report_missing:{d}:{e['report']}")
             elif not rr["ok"]:

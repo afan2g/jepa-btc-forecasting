@@ -1865,6 +1865,42 @@ def test_resolution_one_rerun_report_resolves_two_days(tmp_path):
     assert len(m["meta"]["inputs"]["resolutions"]["rerun_reports"]) == 1
 
 
+def test_resolution_rerun_report_path_spellings_are_canonicalized(tmp_path):
+    # Codex P2: equivalent spellings of ONE rerun report (e.g. one normalized, one with
+    # redundant `..` components — or relative vs absolute) must group claims under a single
+    # canonical file; split claims would see each other's days as unclaimed and wrongly block
+    # a fully valid multi-day rerun
+    reports = [_report([
+        _day("2025-01-01", "inconclusive", _fill_block(None, "no_verdict"),
+             reasons=list(_SR_REASONS)),
+        _day("2025-01-02", "lake_present_degraded",
+             _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                         full_day_reason="quality_over_usable_bar",
+                         fill_segments=[_full_day_seg("2025-01-02")],
+                         seams=[], seam_policy={"seam_guard_s": 60.0}),
+             fillable=True),
+        _day("2025-01-11", "inconclusive", _fill_block(None, "no_verdict"),
+             calendar=_TRADE_ONLY_CTX, reasons=["no_seed_snapshots"]),
+    ])]
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable")),
+                   _day("2025-01-11", "lake_usable", _fill_block(False, "lake_usable"),
+                        calendar=_TRADE_ONLY_CTX)])
+    alias = str(tmp_path / "rerun_001" / ".." / "rerun_001" / "coinbase_quality_map.json")
+    assert alias != rerun and os.path.realpath(alias) == os.path.realpath(rerun)
+    res = _resolutions_file(tmp_path, [
+        _entry("2025-01-01", action="rerun", report=rerun),
+        _entry("2025-01-11", action="rerun", report=alias,
+               expect_reasons=["no_seed_snapshots"])])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["blockers"]["unresolved_days"] == []
+    assert m["meta"]["status"] == "ready"
+    for d in ("2025-01-01", "2025-01-11"):
+        assert _day_rec(m, d)["resolution"]["applied"] is True
+
+
 def test_cli_report_only_with_resolutions_keeps_honest_status(tmp_path, capsys):
     # --report-only still downgrades the exit while resolution_issues keep the status honest;
     # the terminal summary reports the entry/applied/resolved accounting
