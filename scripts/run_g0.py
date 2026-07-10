@@ -52,7 +52,7 @@ def _read_json(path):
         return json.load(f)
 
 
-def _write_json(obj, path) -> None:
+def _write_json(obj, path, *, quiet: bool = False) -> None:
     # Atomic like every other writer in this layer (tmp + rename): a mid-dump failure
     # must never leave a truncated result artifact behind.
     import tempfile
@@ -67,19 +67,23 @@ def _write_json(obj, path) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-    print(f"wrote {path}")
+    if not quiet:
+        print(f"wrote {path}")
 
 
-def _ensure_writable(path) -> None:
-    """Fail BEFORE an irreversible step if the output path cannot be written — the
-    holdout scorer consumes the one-time transaction before its result is persisted, so
-    a bad --out must be caught first."""
-    import tempfile
-    d = os.path.dirname(os.path.abspath(path)) or "."
+def _preflight_out(path) -> None:
+    """Fail BEFORE an irreversible step if the result cannot land at the EXACT output
+    leaf — the holdout scorer consumes the one-time transaction before its result is
+    persisted. A writable parent is not enough (the leaf may be a directory or otherwise
+    unreplaceable), so this performs the same atomic write the result will use, leaving
+    a placeholder the result then replaces."""
+    if os.path.isdir(path):
+        raise ValueError(f"output path {path} is a directory, not a writable file path")
     try:
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".preflight-")
-        os.close(fd)
-        os.unlink(tmp)
+        _write_json({"status": "preflight",
+                     "note": "placeholder written before the one-time holdout "
+                             "consumption; replaced by the score result"},
+                    path, quiet=True)
     except OSError as e:
         raise ValueError(f"output path {path} is not writable: {e}") from None
 
@@ -215,7 +219,7 @@ def cmd_holdout_score(args, read_matrix) -> int:
     if record["state"] != need:
         raise ValueError(f"holdout transaction is {record['state']!r}; this invocation "
                          f"requires {need!r} — refusing before any holdout data is read")
-    _ensure_writable(args.out)   # scoring consumes the transaction; --out must work
+    _preflight_out(args.out)   # scoring consumes the transaction; --out must work
     contract = load_partition_contract(args.contract)
     dev_manifest = load_manifest(args.dev_manifest)
     holdout_manifest = load_manifest(args.holdout_manifest)

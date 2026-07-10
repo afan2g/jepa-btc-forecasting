@@ -115,6 +115,52 @@ def test_freeze_reconciles_winner_against_evidence_and_ledger(g0_pipeline):
                               generated_at="2026-07-10T12:00:00+00:00")
 
 
+def test_freeze_recomputes_solo_gate_from_pinned_ledger():
+    """Codex PR#60 round-2 P1: editing g0xv_dev_pass / h['pass'] / the solo list in a
+    saved dev result (ledger hash intact, winner assembled from a REAL ledger identity)
+    cannot freeze a non-passing candidate — the solo gate is re-derived from the pinned
+    ledger results (DSR with the full trial count, floors, naive benchmark)."""
+    from eval.g0 import run_g0xv_development
+    from eval.ledger import TrialLedger
+    from eval.synthetic import make_g0_world
+
+    w = make_g0_world(n_dev_bars=250, n_holdout_bars=10, cb_signal=4.0, bn_signal=0.0,
+                      seed=1)
+    arms = [{"name": n, **w["dev"]["arms"][n]}
+            for n in ("coinbase_only", "binance_only", "combined")]
+    led = TrialLedger()
+    res = run_g0xv_development(arms, w["contract"],
+                               gate={"n_groups": 4, "k": 2, "min_trades": 5,
+                                     "min_eff_trades": 3.0, "noise_band_n_boot": 500},
+                               ledger=led)
+    assert res["g0xv_dev_pass"] is False              # genuinely failing study
+
+    h = res["horizons"]["10s"]
+    cid, row = max(((c, r) for c, r in h["candidates"].items()
+                    if r["arm"] == "combined" and r["config"].startswith("lgbm")),
+                   key=lambda cr: cr[1]["net_pnl"])
+    entry = next(e for e in led.entries() if e["identity_sha256"] == cid)
+    forged = copy.deepcopy(res)
+    fh = forged["horizons"]["10s"]
+    fh["pass"] = True                                 # edited verdicts only —
+    fh["solo_pass_cross_venue"] = [cid]               # every number stays genuine
+    fh["candidates"][cid]["passes_solo"] = True
+    forged["g0xv_dev_pass"] = True
+    forged["winner"] = {"arm": row["arm"], "config": row["config"], "horizon": "10s",
+                        "variant": row["variant"], "identity_sha256": cid,
+                        "feature_cols": entry["identity"]["feature_cols"],
+                        "dataset_id": entry["identity"]["dataset_id"],
+                        "build_id": entry["identity"]["build_id"],
+                        "net_pnl": row["net_pnl"]}
+    scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
+             "dataset_id": "synthetic-xv-pilot", "build_id": "holdout-seeded-combined"}
+    with pytest.raises(ValueError, match="recomputed from the pinned trial ledger"):
+        build_freeze_artifact(forged, contract=w["contract"], ledger=led,
+                              trade_validation_thresholds={"min_rows": 10},
+                              holdout_scope=scope,
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+
 def test_freeze_rejects_ledger_drift(g0_pipeline):
     drifted = TrialLedger()
     drifted.import_history(g0_pipeline["led_xv"])

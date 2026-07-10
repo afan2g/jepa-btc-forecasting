@@ -190,10 +190,14 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
                     "--report-json", _dump(tmp_path, "report.json", report)],
                    read_matrix=store) == 0
 
-    # an unwritable --out must fail BEFORE the transaction is consumed
+    # an unwritable --out must fail BEFORE the transaction is consumed — both a missing
+    # parent dir and an existing DIRECTORY at the leaf (a writable parent is not enough)
     bad_out = [a if not a.endswith("score.json") else str(tmp_path / "nodir" / "s.json")
                for a in score_args]
     assert rg.main(bad_out, read_matrix=store) == 2
+    dir_out = [a if not a.endswith("score.json") else str(tmp_path)
+               for a in score_args]
+    assert rg.main(dir_out, read_matrix=store) == 2
     rec_path = record_path_for(str(records), json.loads(open(freeze_path).read()))
     assert load_record(rec_path)["state"] == "validated"       # nothing consumed
 

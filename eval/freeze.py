@@ -16,9 +16,13 @@ import json
 import os
 import tempfile
 
+import numpy as np
+
 from eval.hashing import hash_obj
 from eval.ledger import TrialLedger, _json_safe
 from eval.partition import contract_hash, validate_partition_contract
+from eval.stats import deflated_sharpe
+from eval.study import LGBM_RUNGS
 
 FREEZE_VERSION = 1
 _VOLATILE = ("sha256", "generated_at")   # excluded from the pinned content hash
@@ -86,12 +90,21 @@ def _validate_thresholds(thresholds: dict) -> dict:
     return thresholds
 
 
+def _close(a, b) -> bool:
+    return abs(float(a) - float(b)) <= 1e-9 * max(1.0, abs(float(a)), abs(float(b)))
+
+
 def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
     """Reconcile the claimed winner against the evidence it must have come from: a
     PASSING horizon's solo-passing cross-venue candidate whose reported row AND pinned
-    ledger trial identity match every winner field. An edited/mis-assembled dev result
-    (same ledger hash, different winner fields) cannot freeze a non-passing config,
-    substituted feature list, or control-arm candidate."""
+    ledger trial identity match every winner field — and whose SOLO gate is RECOMPUTED
+    from the pinned, self-validating ledger results (net PnL, trade floors, the naive
+    benchmark, and DSR with the full effective trial count and horizon-pool dispersion).
+    Editable pass verdicts in a saved dev-result JSON therefore cannot freeze a
+    non-passing config: the ledger hash pins the per-trial results the gate is re-derived
+    from. PBO and the noise band are NOT recomputable from the ledger (they need the
+    per-sample PnL matrices); their integrity anchor is deterministic re-execution of
+    the study, which is tested to reproduce bit-identical results."""
     winner = dev_result["winner"]
     h = dev_result["horizons"].get(winner["horizon"])
     if not h or not h.get("pass"):
@@ -116,6 +129,48 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
     if not same:
         raise ValueError("frozen winner fields do not match its ledger trial identity; "
                          "refusing to freeze an edited selection")
+    if winner["config"] not in LGBM_RUNGS:
+        raise ValueError(f"frozen winner config {winner['config']!r} is not a gate rung "
+                         f"{LGBM_RUNGS}")
+    if winner["arm"] == dev_result.get("control_arm"):
+        raise ValueError("frozen winner is the control arm; only cross-venue candidates "
+                         "can authorize the archive")
+
+    # Re-derive the solo gate from the PINNED ledger, not the editable verdict fields.
+    res = entry["result"]
+    for k in ("net_pnl", "trade_sharpe", "sample_sharpe", "n_trades", "t_eff"):
+        if not _close(row[k], res[k]):
+            raise ValueError(f"winner candidate row {k} does not reconcile to the pinned "
+                             "ledger result")
+    twin = next(
+        (e for e in ledger.entries()
+         if e["identity"]["protocol"] == "g0xv"
+         and e["identity"]["config"] == "naive"
+         and e["identity"]["variant"] == "base"
+         and all(e["identity"][k] == ident[k]
+                 for k in ("arm", "horizon", "dataset_id", "build_id"))), None)
+    if twin is None:
+        raise ValueError("no naive benchmark trial for the winner's arm/horizon in the "
+                         "pinned ledger")
+    pool = [e for e in ledger.entries()
+            if e["identity"]["protocol"] == "g0xv"
+            and e["identity"]["horizon"] == ident["horizon"]]
+    sr_std = float(np.array([e["result"]["trade_sharpe"] for e in pool]).std() + 1e-9)
+    gate = dev_result["gate"]
+    dsr = deflated_sharpe(sr_hat=res["trade_sharpe"], sr_trials_std=sr_std,
+                          n_trials=max(2, ledger.n_effective_trials()),
+                          T=max(int(round(res["t_eff"])), 2),
+                          skew=res["skew"], kurt=res["kurt"])
+    solo = bool(res["net_pnl"] > 0 and dsr > gate["dsr_thresh"]
+                and res["n_trades"] >= gate["min_trades"]
+                and res["t_eff"] >= gate["min_eff_trades"]
+                and res["sample_sharpe"] >= gate["min_sample_sharpe"]
+                and res["net_pnl"] > twin["result"]["net_pnl"])
+    if not solo:
+        raise ValueError("frozen winner does not clear the solo gate recomputed from the "
+                         "pinned trial ledger (DSR with the full effective trial count, "
+                         "trade floors, and the naive benchmark); an edited pass verdict "
+                         "cannot authorize the holdout")
 
 
 def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedger,
