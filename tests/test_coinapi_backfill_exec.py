@@ -229,6 +229,35 @@ def test_execute_refused_when_approval_below_planned_cost(ready):
     assert rc == 3 and called == []
 
 
+@pytest.mark.parametrize("approve", ["nan", "inf", "-1"])
+def test_execute_refused_on_nonfinite_or_negative_approval(ready, approve):
+    # float('nan') < high is False — a naive `<` check would let NaN through the spend gate
+    called = []
+    rc = run_cli(ready, execute_args(ready, approve=approve),
+                 s3_factory=lambda: called.append(1))
+    assert rc == 3 and called == []
+
+
+def test_zero_unit_manifest_executes_to_empty_complete_report(tmp_path):
+    # a ready manifest with nothing to fill: execute must not build a vendor client at all
+    cal = fx.make_calendar(coinbase_fill_days={}, fill_status={}, excluded_days_by_reason={})
+    days = [fx.day_rec(d, "lake_usable", fx.fill_block(False, "lake_usable"))
+            for d in ("2025-01-01", "2025-01-02", "2025-01-03")]
+    mpath, _ = fx.ready_manifest(tmp_path, cal=cal, report_days=days)
+    sha = bf.sha256_file(mpath)
+    def forbidden():
+        raise AssertionError("zero-unit execute must not build a vendor client")
+    rc = dl.main(["--manifest", mpath, "--manifest-sha256", sha, "--execute",
+                  "--approve-usd", "1.0", "--spend-evidence", "n/a", "--out",
+                  str(tmp_path / "raw"), "--plan-out", str(tmp_path / "plan.json"),
+                  "--report-out", str(tmp_path / "report.json"),
+                  "--generated-utc", "2026-07-10T03:00:00Z"], s3_factory=forbidden)
+    assert rc == 0
+    with open(tmp_path / "report.json") as f:
+        rec = json.load(f)["reconciliation"]
+    assert rec["planned"] == 0 and rec["complete"] is True
+
+
 def test_execute_refused_on_pinned_hash_mismatch(ready):
     args = execute_args(ready)
     args[args.index("--manifest-sha256") + 1] = "0" * 64

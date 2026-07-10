@@ -57,6 +57,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import sys
 from io import StringIO
@@ -454,31 +455,36 @@ def run_manifest_mode(args, s3_factory=None) -> int:
         return 0
 
     high = plan["totals"]["usd_high"]
-    if float(args.approve_usd) < high:
-        print(f"REFUSING: --approve-usd {args.approve_usd} is below the selected plan's "
-              f"high-band cost ${high} — raise the approval or narrow the pilot window.",
-              file=sys.stderr)
+    approve = float(args.approve_usd)
+    # positive-comparison form: NaN fails every comparison, so `approve < high` alone would let
+    # --approve-usd nan through the spend gate. Require a finite, positive cap covering the band.
+    if not (math.isfinite(approve) and approve > 0 and approve >= high):
+        print(f"REFUSING: --approve-usd {args.approve_usd} does not cover the selected plan's "
+              f"high-band cost ${high} (the cap must be a finite positive USD amount >= the "
+              "band) — raise the approval or narrow the pilot window.", file=sys.stderr)
         return bf.REFUSAL_EXIT
-    days = sorted({u["day"] for u in plan["units"]})
-    check_backfill_gate(dt.date.fromisoformat(days[0]), dt.date.fromisoformat(days[-1]),
-                        sample_mb=0, allow_backfill=args.allow_backfill)
-
-    s3, bucket = (s3_factory or _live_s3_factory)()
-    os.makedirs(args.out, exist_ok=True)
-    cleanup_tmp(args.out)
     manifest_sha = plan["meta"]["manifest"]["sha256"]
-    print(f"Executing {len(plan['units'])} reviewed fill unit(s) -> {args.out}  "
-          f"(bucket={bucket} throttle={ff.REQ_PER_MIN}/min)")
     results, quota_hit = [], False
-    for unit in plan["units"]:
-        try:
-            results.append(process_unit(s3, bucket, unit, args, manifest_sha))
-        except ClientError as e:
-            if is_quota_error(str(e)):
-                print(QUOTA_HINT)
-                quota_hit = True
-                break
-            raise
+    if plan["units"]:
+        days = sorted({u["day"] for u in plan["units"]})
+        check_backfill_gate(dt.date.fromisoformat(days[0]), dt.date.fromisoformat(days[-1]),
+                            sample_mb=0, allow_backfill=args.allow_backfill)
+        s3, bucket = (s3_factory or _live_s3_factory)()
+        os.makedirs(args.out, exist_ok=True)
+        cleanup_tmp(args.out)
+        print(f"Executing {len(plan['units'])} reviewed fill unit(s) -> {args.out}  "
+              f"(bucket={bucket} throttle={ff.REQ_PER_MIN}/min)")
+        for unit in plan["units"]:
+            try:
+                results.append(process_unit(s3, bucket, unit, args, manifest_sha))
+            except ClientError as e:
+                if is_quota_error(str(e)):
+                    print(QUOTA_HINT)
+                    quota_hit = True
+                    break
+                raise
+    else:
+        print("  0 units selected — nothing to download (empty fill scope)")
     report = bf.build_execution_report(
         plan, results, generated_utc=generated,
         spend={"approve_usd": float(args.approve_usd), "spend_evidence": args.spend_evidence,
