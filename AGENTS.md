@@ -68,13 +68,22 @@ file as the durable reviewer and repository-contract guidance.
 
 ## Builder Rules
 
-- GitHub issues are the durable work backlog. Plans and specs remain the
-  technical source of truth; an issue tracks scope, dependencies, acceptance
-  criteria, and status without silently overriding those documents.
+- Plans and specs remain the technical source of truth. GitHub issues are
+  authoritative for scope, dependencies, acceptance criteria, and execution
+  state.
+- The [JEPA BTC Forecasting Roadmap](https://github.com/users/afan2g/projects/2)
+  is an operational visualization, not an authority override. Its planning
+  dates are estimates, never technical commitments or approval for vendor/live
+  work. Follow the canonical [agent workflow](docs/agent-workflow.md#authority-and-roadmap)
+  for Project fields, views, automation, and lifecycle transitions.
 - Start implementation only from an unblocked issue whose scope and acceptance
-  criteria are clear. Split umbrella issues into reviewable subissues before
-  assigning workers.
-- One agent, one task, one branch.
+  criteria are clear. A new top-level issue must first be in the Project with
+  Roadmap Stage, Planning Start, Planning Target, and Status assigned. Split
+  umbrella issues into reviewable subissues before assigning workers.
+- Keep the active issue label and Project Status aligned: `status:ready` with
+  Ready, `status:in-progress` with In Progress, and `blocked` with Blocked. Use
+  Done only for a completed issue.
+- One agent, one issue, one branch/worktree.
 - Use Conventional Branch purpose-prefixed names like `feat/<topic>`, `fix/<topic>`, or `chore/<topic>`; do not use agent/vendor prefixes such as `ai/`, `claude/`, or `codex/` for worker branches.
 - Keep work in the branch's own worktree. Do not edit another agent's worktree.
 - Read the assigned issue and every linked plan/spec before editing. Keep the PR
@@ -82,7 +91,7 @@ file as the durable reviewer and repository-contract guidance.
   change before implementing it.
 - Link every worker PR to its issue. Use `Closes #N` only when the PR satisfies
   the whole issue; use `Part of #N` or `Refs #N` for partial work or umbrella
-  issues.
+  issues. A partial PR must not close the issue or move it to Done.
 - Operational work such as approved vendor downloads or report generation does
   not need a branch/worktree unless it also changes tracked code or docs. Record
   commands, results, costs, and blockers on the issue.
@@ -91,8 +100,9 @@ file as the durable reviewer and repository-contract guidance.
 - PRs must include summary, validation, risks, and follow-ups.
 - If Codex or CI finds an issue, fix it with the smallest scoped commit and
   request re-review.
-- After merge, remove the worktree and branch. Close the issue only when all
-  acceptance criteria are met; otherwise update it with remaining work.
+- After human merge, remove the completed PR's worktree and branch. Close the
+  issue and use Project Status Done only when all acceptance criteria are met;
+  otherwise keep the issue open and set its state from the remaining work.
 
 ## Review Guidelines
 

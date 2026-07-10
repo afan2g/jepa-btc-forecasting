@@ -9,7 +9,16 @@ worker and integration-agent sessions.
   issue, its acceptance criteria, dependencies, and every linked plan/spec before
   editing. If the issue is blocked or is an umbrella without an implementation
   slice, stop and report that instead of creating a broad branch.
-- Work in one git worktree and one branch only.
+- Follow the canonical [Project workflow](docs/agent-workflow.md#authority-and-roadmap).
+  Before implementation, verify that a top-level issue is in the Project and has
+  Roadmap Stage, Planning Start, Planning Target, and Status assigned. Repository
+  linking does not guarantee that a top-level issue was added.
+- Treat Project dates as planning estimates only. They do not change technical
+  scope or authorize vendor calls, paid downloads, or compute-heavy work.
+- When starting, blocking, or completing work, keep the issue status label and
+  Project Status aligned. Verify the final Project state even when automation is
+  expected to update it. Never close or mark Done for a partial PR.
+- Work as one agent on one issue in one git worktree and one branch only.
 - Branch naming: Conventional Branch purpose prefixes only, e.g. `feat/<issue-or-short-topic>`, `fix/<issue-or-short-topic>`, or `chore/<issue-or-short-topic>`. Do not use `ai/`, `claude/`, or other agent/vendor prefixes.
 - Start from latest `origin/master` unless the user names another base.
 - Keep the diff scoped to the assigned task.
