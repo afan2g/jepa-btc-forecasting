@@ -912,7 +912,9 @@ deterministic, human-auditable backfill manifest
 quality map (per-batch reports) + batch plan + usable calendar
    -> reviewed backfill manifest   (this tool: no vendor I/O, no downloads)
    -> human approval + CoinAPI Spend Management (§8)
-   -> CoinAPI backfill             (ingest/download_coinapi.py --allow-backfill)
+   -> CoinAPI backfill             (ingest/download_coinapi.py --manifest ... --execute
+                                    --manifest-sha256 <pinned> + spend authorization
+                                    + --allow-backfill; see "Reviewed-manifest executor" below)
 ```
 
 The manifest separates full-day book fills, partial-day book fills (stitch segments preserved
@@ -977,8 +979,39 @@ jq '.days[] | select(.day=="2025-09-20") | {classification, reasons}' \
 
 **This tool does NOT unlock or run the backfill.** The §5a gate stays enforced in
 `ingest/download_coinapi.py` / `ingest/_common.py`; a multi-day pull still needs `--allow-backfill`
-with Spend Management on (§8). The manifest is the auditable spend/approval input a future backfill
-runner consumes.
+with Spend Management on (§8). The manifest is the auditable spend/approval input the
+reviewed-manifest executor below consumes.
+
+**Reviewed-manifest executor (`--manifest`, 2026-07-10, issue #53).**
+`ingest/download_coinapi.py --manifest <reviewed manifest>` is that runner (planning core:
+`ingest/coinapi_backfill.py`, stdlib-only, no vendor I/O). It is fail-closed end to end: it
+accepts ONLY a `ready` + `scope_complete` manifest with every blocker list empty, refuses a
+manifest whose bytes don't match the operator-pinned `--manifest-sha256`, whose pinned
+`meta.inputs` sha256s no longer match the files on disk (regenerated quality map/calendar/plan
+⇒ STALE), or whose `days[]`/`sections`/`cost_summary` fail to mutually reconcile (tampering,
+duplicate/conflicting day records, an excluded day carrying a fill, a fill without an executable
+stitch plan). It plans EXACT sparse units — one per needed book (`LIMITBOOK_FULL`) and trade
+(`TRADES`) fill day, through explicit product handlers — and never downloads a non-fill date
+lying between fills. Trade units are emitted in the **normalized trade contract**
+(`origin_time`/`received_time` as datetime64[ns], `price`, `quantity`, `side`∈{buy,sell},
+`trade_id`, plus the vendor's `taker_side` and identifier columns preserved verbatim), so
+`ingest/trade_checks.py` validates a CoinAPI fill day unchanged (`vendor_source="coinapi"`,
+the Phase-3b reuse that clears `coinapi_fill_deferred`). A partial-day book fill pulls the vendor's whole day-file (that is the
+billing unit), while the day's `fill_segments`/`seams`/`seam_policy` and canonical provenance
+ride VERBATIM in the plan and execution report for the downstream stitcher — the executor never
+recomputes fill policy. The default run is a DRY-RUN plan
+(`data/reports/backfill/coinapi_backfill_plan.json`; deterministic, needs no credentials); a live
+run needs `--execute --manifest-sha256 <hex> --approve-usd <cap ≥ the selected plan's high band>
+--spend-evidence <approval ref>`, and a multi-day unit span still exits 4 without
+`--allow-backfill` (Spend Management on, §8) — the single-day parity allowance is unchanged.
+`--pilot-start/--pilot-end` select a hash-pinned pilot-window subset without recomputing per-day
+policy or cost rows. Resume state is keyed on source/product/day + the manifest sha256
+(`<out>/_backfill_state/coinapi_flatfiles/<sha256>/…`): an output with no matching state record
+for THIS manifest fingerprint is a CONFLICT — never adopted, never overwritten (only the explicit
+`--overwrite` re-downloads). Every execute run appends the legacy `_manifest.jsonl` rows (now
+stamped with product + manifest sha256) and writes a reconciled execution report
+(`data/reports/backfill/coinapi_backfill_execution_report.json`: planned/ok/done-prior/missing/
+conflict/error units, bytes, rows, source+output sha256s, and the spend evidence).
 
 ---
 
@@ -1101,6 +1134,7 @@ END=2026-06-22 .venv/bin/python ingest/verify_lake2.py            # 2-yr gap str
 .venv/bin/python scripts/run_coinbase_quality_map.py    # multi-day Lake quality map (§5a-QualityMap; quota-aware, prints used_data, refuses broad pulls without --allow-broad) -> data/reports/
 .venv/bin/python scripts/plan_coinbase_quality_map_batches.py   # stage the broad quality map into quota-window day batches (§5a-QualityMap; planning only, NO vendor I/O; --dry-run prints without writing) -> data/tmp/
 .venv/bin/python scripts/review_coinbase_backfill_manifest.py --plan-manifest data/tmp/coinbase_quality_map_batches/manifest.json  # review completed batches into an auditable backfill manifest (§5a-QualityMap; gatekeeping, NO download, does not unlock backfill; fails closed) -> data/reports/backfill/
+.venv/bin/python ingest/download_coinapi.py --manifest data/reports/backfill/coinbase_backfill_manifest.json  # reviewed-manifest backfill executor (§5a-QualityMap; DRY-RUN plan by default, NO vendor I/O; --execute needs pinned --manifest-sha256 + --approve-usd + --spend-evidence, and --allow-backfill for a multi-day span) -> data/reports/backfill/
 # NOTE: multi-day BULK pulls are the backfill and are GATED — download_coinapi.py refuses a >1-day full
 # pull (exit 4) until the §5a parity + reseed gates pass. A single day, or a multi-day range with a small
 # --sample-mb smoke (≤64MB), is allowed; --allow-backfill overrides once the gate passes (Spend Mgmt on, §8).
