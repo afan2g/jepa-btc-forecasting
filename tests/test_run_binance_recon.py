@@ -517,6 +517,22 @@ def test_book_stride_ms_recorded_and_validated(tmp_path):
     assert run_cli(tmp_path, raw, "--book-stride-ms", "0")[0] == rbr.SETUP_ERROR_EXIT
 
 
+def test_missing_pyarrow_is_setup_error_and_never_revokes_outputs(tmp_path, monkeypatch):
+    # pyarrow is an optional extra imported lazily by the workers: a missing/broken install must
+    # be a SETUP failure (exit 2) before any unit runs — never a per-unit data `error` that
+    # enters the fail-closed deletion paths and revokes good processed outputs.
+    raw = write_store(tmp_path)
+    rc1, out, _ = run_cli(tmp_path, raw)
+    assert rc1 == 0
+    n_recs = len(read_manifest(out))
+    monkeypatch.setitem(sys.modules, "pyarrow.parquet", None)   # blocks `import pyarrow.parquet`
+    rc2, _, _ = run_cli(tmp_path, raw, "--overwrite")           # would reprocess every unit
+    assert rc2 == rbr.SETUP_ERROR_EXIT
+    for output in ("topk_l2", "trades", "funding", "open_interest", "liquidations"):
+        assert os.path.exists(outpath(out, output))             # nothing revoked
+    assert len(read_manifest(out)) == n_recs                    # no per-unit error records
+
+
 # --------------------------------------------------------------------------- setup errors
 def test_bad_args_exit_2(tmp_path):
     raw = write_store(tmp_path)

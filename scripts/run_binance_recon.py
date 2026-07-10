@@ -653,6 +653,17 @@ def main(argv=None) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
 
+    # ---- parquet dependency preflight. pyarrow is an optional extra and the workers import it
+    # lazily — without this check a missing/broken install would surface as a per-unit data
+    # `error` (exit 3) and enter the fail-closed deletion paths, REVOKING good processed outputs
+    # over a dependency problem. A setup failure must exit 2 before any unit runs. ---------------
+    try:
+        import pyarrow.parquet  # noqa: F401
+    except Exception as e:      # noqa: BLE001 — any import-time breakage is a setup failure
+        print(f"ERROR: pyarrow is required for Stage-2 parquet I/O (install the `lake` extra: "
+              f"`pip install -e .[lake]`): {e}", file=sys.stderr)
+        return SETUP_ERROR_EXIT
+
     # ---- engine resolution per instrument, BEFORE any load (plan Requirement 5). Only
     # instruments with book_delta_v2 units need the replay engine — a passthrough-only request
     # (e.g. --feeds trades) must not abort on an explicit --engine native it will never use. ----
