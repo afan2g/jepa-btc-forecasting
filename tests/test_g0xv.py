@@ -202,6 +202,22 @@ def test_arm_venue_roles_fail_closed(g0_world):
         run_g0xv_development(_arms(g0_world, strip_signal), g0_world["contract"],
                              gate=XV_GATE, ledger=TrialLedger())
 
+    def foreign_signal(arms):
+        for v in arms["combined"]["manifest"]["venues"]:
+            if v.get("role") == "signal":
+                v["exchange"] = "KRAKEN"
+    with pytest.raises(ValueError, match="preregistered Binance markets"):
+        run_g0xv_development(_arms(g0_world, foreign_signal), g0_world["contract"],
+                             gate=XV_GATE, ledger=TrialLedger())
+
+    def unroled_extra(arms):
+        arms["binance_only"]["manifest"]["venues"] = (
+            arms["binance_only"]["manifest"]["venues"]
+            + [{"exchange": "OKX", "symbol": "BTC-USDT"}])
+    with pytest.raises(ValueError, match="explicit signal/target role"):
+        run_g0xv_development(_arms(g0_world, unroled_extra), g0_world["contract"],
+                             gate=XV_GATE, ledger=TrialLedger())
+
 
 def test_holdout_bound_arm_rejected(g0_world):
     arms = _arms(g0_world)

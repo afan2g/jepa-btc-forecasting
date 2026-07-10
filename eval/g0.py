@@ -271,6 +271,9 @@ def _candidate_row(cand: dict, dsr: float, solo: bool) -> dict:
 # experiment and fails closed.
 TARGET_EXCHANGE = "COINBASE"
 TARGET_SYMBOL = "BTC-USD"
+# The preregistered signal markets (docs/data.md §5b / trade-validation plan §2): a
+# cross-venue arm carrying any other signal venue is a different acquisition experiment.
+ALLOWED_SIGNAL_VENUES = (("BINANCE_FUTURES", "BTC-USDT-PERP"), ("BINANCE", "BTC-USDT"))
 
 
 def _require_expected_target(manifest: dict, context: str) -> None:
@@ -410,9 +413,20 @@ def bootstrap_delta_band(delta, *, n_boot: int, block: int, alpha: float, seed: 
         return float("nan"), float("nan")
     rng = np.random.default_rng(seed)
     n_blocks = -(-n // block)                     # ceil
-    starts = rng.integers(0, n, size=(n_boot, n_blocks))
-    idx = (starts[:, :, None] + np.arange(block)[None, None, :]) % n
-    sums = d[idx.reshape(n_boot, -1)[:, :n]].sum(axis=1)
+    # Resamples are computed in bounded batches: materializing all n_boot * n indices
+    # at once would allocate billions of int64 slots on a real six-month matched
+    # matrix. Batching is deterministic — the RNG stream is consumed in the same order
+    # regardless of batch boundaries.
+    offsets = np.arange(block)[None, None, :]
+    batch = max(1, 2_000_000 // max(n, 1))
+    sums = np.empty(n_boot)
+    pos = 0
+    while pos < n_boot:
+        b = min(batch, n_boot - pos)
+        starts = rng.integers(0, n, size=(b, n_blocks))
+        idx = (starts[:, :, None] + offsets) % n
+        sums[pos:pos + b] = d[idx.reshape(b, -1)[:, :n]].sum(axis=1)
+        pos += b
     lo, hi = np.quantile(sums, [alpha / 2.0, 1.0 - alpha / 2.0])
     return float(lo), float(hi)
 
@@ -481,11 +495,25 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
             # authorization test is meaningless against a non-Coinbase control.
             _require_target_only_venues(a["manifest"], "the G0-XV control arm")
         else:
-            has_signal = any(v.get("role") == "signal" for v in a["manifest"]["venues"])
-            if not has_signal:
+            venues = a["manifest"]["venues"]
+            unroled = [v for v in venues if v.get("role") not in ("signal", "target")]
+            if unroled:
+                raise ValueError(f"G0-XV arm {a['name']!r} venues must declare an "
+                                 f"explicit signal/target role, got: {unroled}")
+            signals = [v for v in venues if v["role"] == "signal"]
+            if not signals:
                 raise ValueError(f"G0-XV arm {a['name']!r} declares no signal venue; "
                                  "cross-venue arms must declare their signal venue "
                                  "explicitly")
+            # ... and the signals must be the PREREGISTERED Binance markets: a
+            # Kraken/OKX signal targeting Coinbase would freeze the wrong acquisition
+            # experiment as Binance spend-gate evidence.
+            bad = [v for v in signals
+                   if (v.get("exchange"), v.get("symbol")) not in ALLOWED_SIGNAL_VENUES]
+            if bad:
+                raise ValueError(f"G0-XV arm {a['name']!r} signal venues must be the "
+                                 f"preregistered Binance markets "
+                                 f"{ALLOWED_SIGNAL_VENUES}, got: {bad}")
             # Cross-venue arms still label/trade the SAME protocol target venue.
             _require_expected_target(a["manifest"], f"G0-XV arm {a['name']!r}")
 
