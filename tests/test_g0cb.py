@@ -147,6 +147,21 @@ def test_g0cb_leaky_feature_name_fails_closed(g0_world):
         run_g0cb_study(mat, man, w["contract"], gate=GATE)
 
 
+def test_gate_changes_are_counted_as_new_trials(g0_world):
+    """Codex PR#60 round-6: a post-hoc threshold change is ANOTHER TRIAL (staged
+    protocol §2) — the resolved gate is part of the trial identity, so a rerun with a
+    changed gate on the carried ledger adds multiplicity instead of silently reusing
+    identities."""
+    cb = g0_world["dev"]["arms"]["coinbase_only"]
+    led = TrialLedger()
+    run_g0cb_study(cb["matrix"], cb["manifest"], g0_world["contract"], gate=GATE,
+                   ledger=led)
+    assert led.n_effective_trials() == 4
+    run_g0cb_study(cb["matrix"], cb["manifest"], g0_world["contract"],
+                   gate={**GATE, "min_trades": 1}, ledger=led)
+    assert led.n_effective_trials() == 8              # looser gate = 4 MORE trials
+
+
 def test_g0_rejects_understated_declared_lookback(g0_world):
     """Codex PR#60 P1 regression pin: a build whose ACTUAL look-back exceeds the
     manifest's declared max_lookback_ns (and therefore the embargo sized to it) must

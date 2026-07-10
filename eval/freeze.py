@@ -150,7 +150,8 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
         dataset_id=arms_echo[control]["dataset_id"],
         build_id=hash_obj({a: e["build_id"] for a, e in arms_echo.items()}),
         feature_cols=sorted(arms_echo), config="horizon_verdict",
-        horizon=ident["horizon"])
+        horizon=ident["horizon"],
+        variant_params={"gate_sha256": hash_obj(_json_safe(dict(dev_result["gate"])))})
     verdict_id = identity_hash(verdict_ident)
     by_id = {e["identity_sha256"]: e for e in ledger.entries()}
     v = by_id.get(verdict_id)

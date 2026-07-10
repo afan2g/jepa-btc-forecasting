@@ -118,10 +118,33 @@ def test_required_arms_and_unique_names(g0_world):
     with pytest.raises(ValueError, match="requires arm 'combined'"):
         run_g0xv_development(arms[:2], g0_world["contract"], gate=XV_GATE,
                              ledger=TrialLedger())
+    # the preregistered binance_only ablation cannot be silently omitted either
+    with pytest.raises(ValueError, match="requires arm 'binance_only'"):
+        run_g0xv_development([arms[0], arms[2]], g0_world["contract"], gate=XV_GATE,
+                             ledger=TrialLedger())
     dup = [arms[0], dict(arms[1], name="coinbase_only"), arms[2]]
     with pytest.raises(ValueError, match="duplicate arm names"):
         run_g0xv_development(dup, g0_world["contract"], gate=XV_GATE,
                              ledger=TrialLedger())
+
+
+def test_arm_venue_roles_fail_closed(g0_world):
+    """A cross-venue build labeled 'coinbase_only' cannot serve as the matched control,
+    and a 'cross-venue' arm without a declared signal venue is rejected."""
+    def swap_control(arms):
+        combined = g0_world["dev"]["arms"]["combined"]
+        arms["coinbase_only"]["manifest"] = copy.deepcopy(combined["manifest"])
+        arms["coinbase_only"]["matrix"] = combined["matrix"].copy()
+    with pytest.raises(ValueError, match="control arm is target-venue-only"):
+        run_g0xv_development(_arms(g0_world, swap_control), g0_world["contract"],
+                             gate=XV_GATE, ledger=TrialLedger())
+
+    def strip_signal(arms):
+        arms["binance_only"]["manifest"]["venues"] = [
+            {"exchange": "COINBASE", "symbol": "BTC-USD", "role": "target"}]
+    with pytest.raises(ValueError, match="declares no signal venue"):
+        run_g0xv_development(_arms(g0_world, strip_signal), g0_world["contract"],
+                             gate=XV_GATE, ledger=TrialLedger())
 
 
 def test_holdout_bound_arm_rejected(g0_world):

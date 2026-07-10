@@ -38,7 +38,11 @@ from eval.stats import deflated_sharpe, pbo
 from eval.study import LGBM_RUNGS
 
 CONTROL_ARM = "coinbase_only"
+BINANCE_ARM = "binance_only"
 COMBINED_ARM = "combined"
+# The staged protocol preregisters THREE arms (§2): omitting one would remove its
+# candidates from the common PBO matrix and the effective DSR count.
+REQUIRED_ARMS = (CONTROL_ARM, BINANCE_ARM, COMBINED_ARM)
 G0CB_PROTOCOL = "g0cb"
 G0XV_PROTOCOL = "g0xv"
 
@@ -175,11 +179,14 @@ def _evaluate_arm_candidates(prep: dict, *, protocol: str, gate: dict, ledger: T
                     continue
                 r = evaluate_config(sub, var["feature_cols"], config,
                                     n_groups=gate["n_groups"], k=gate["k"], embargo_ns=emb)
+                # The resolved gate is part of the trial identity: a post-hoc threshold
+                # or split change is ANOTHER TRIAL (staged protocol §2) and must add
+                # multiplicity when history is carried, not silently reuse identities.
                 ident = trial_identity(
                     protocol=protocol, arm=prep["arm"], dataset_id=man["dataset_id"],
                     build_id=man["build_id"], feature_cols=var["feature_cols"],
                     config=config, horizon=str(tag), variant=var["name"],
-                    variant_params=var["params"])
+                    variant_params={**var["params"], "gate": dict(sorted(gate.items()))})
                 entry = ledger.register(ident, _ledger_result(r))
                 out.append({"arm": prep["arm"], "horizon": str(tag), "variant": var["name"],
                             "config": config, "identity": ident,
@@ -244,18 +251,22 @@ def _candidate_row(cand: dict, dsr: float, solo: bool) -> dict:
 
 
 # ------------------------------------------------------------------------------- G0-CB
+def _require_target_only_venues(manifest: dict, context: str) -> None:
+    """Fail CLOSED on venue roles: `role` is optional in the manifest schema, so an
+    omitted or mislabeled role must not slip a signal venue past a target-venue-only
+    path — every venue must declare role == 'target' explicitly."""
+    non_target = [v for v in manifest["venues"] if v.get("role") != "target"]
+    if non_target:
+        raise ValueError(f"{context} is target-venue-only; every venue must declare "
+                         f"role 'target' explicitly, got: {non_target}")
+
+
 def g0cb_manifest_prechecks(manifest: dict, contract: dict) -> None:
     """Everything G0-CB can reject WITHOUT touching matrix data — run by the CLI before
     the matrix file is opened, and again inside run_g0cb_study. A holdout-bound manifest
-    or a cross-venue build fails here, before any data loading. Fail CLOSED on venue
-    roles: `role` is optional in the manifest schema, so an omitted or mislabeled role
-    must not slip a signal venue past the target-venue-only screen — every G0-CB venue
-    must declare role == 'target' explicitly."""
+    or a cross-venue build fails here, before any data loading."""
     require_binding(manifest, contract, "development")
-    non_target = [v for v in manifest["venues"] if v.get("role") != "target"]
-    if non_target:
-        raise ValueError(f"G0-CB is the target-venue-only screen; every venue must "
-                         f"declare role 'target' explicitly, got: {non_target}")
+    _require_target_only_venues(manifest, "G0-CB")
 
 
 def run_g0cb_study(matrix: pd.DataFrame, manifest: dict, contract: dict, *,
@@ -415,10 +426,24 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
     names = [a.get("name") for a in arms]
     if len(set(names)) != len(names):
         raise ValueError(f"duplicate arm names: {sorted(names)}")
-    for required in (control_arm, combined_arm):
+    for required in sorted({control_arm, BINANCE_ARM, combined_arm}):
         if required not in names:
-            raise ValueError(f"G0-XV requires arm {required!r} (matched control and "
-                             "combined arms are the authorization comparison)")
+            raise ValueError(f"G0-XV requires arm {required!r}: the staged protocol "
+                             "preregisters the coinbase_only control, binance_only, and "
+                             "combined arms; omitting one removes its candidates from "
+                             "the common PBO matrix and the effective DSR count")
+    for a in arms:
+        if a["name"] == control_arm:
+            # The control must genuinely be the target-venue-only build, not any
+            # development manifest labeled 'coinbase_only' — the combined-vs-control
+            # authorization test is meaningless against a non-Coinbase control.
+            _require_target_only_venues(a["manifest"], "the G0-XV control arm")
+        else:
+            has_signal = any(v.get("role") == "signal" for v in a["manifest"]["venues"])
+            if not has_signal:
+                raise ValueError(f"G0-XV arm {a['name']!r} declares no signal venue; "
+                                 "cross-venue arms must declare their signal venue "
+                                 "explicitly")
 
     ledger = ledger if ledger is not None else TrialLedger()
     n_imported = 0
@@ -485,7 +510,8 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
             protocol="g0xv-verdict", arm="unified",
             dataset_id=control_prep["manifest"]["dataset_id"], build_id=verdict_build,
             feature_cols=sorted(p["arm"] for p in preps),
-            config="horizon_verdict", horizon=tag)
+            config="horizon_verdict", horizon=tag,
+            variant_params={"gate_sha256": hash_obj(gate)})
         ledger.register(verdict_ident, {
             "pass": h["pass"],
             "inconclusive_blocking": h["inconclusive_blocking"],
