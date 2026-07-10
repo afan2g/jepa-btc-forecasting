@@ -261,7 +261,7 @@ def recon_topk_day(delta_df: pd.DataFrame, book_df: pd.DataFrame | None, *, day:
         "src_rows": int(len(delta_df)),
         "book_rows": int(len(book_df)) if book_df is not None else 0,
         "book_present": book_df is not None,
-        "k": int(k), "grid_ms": int(grid_ms),
+        "k": int(k), "grid_ms": int(grid_ms), "book_stride_ms": int(book_stride_ms),
         "policy": policy.as_dict(), "thresholds": thresholds.as_dict(),
     }
 
@@ -405,28 +405,45 @@ def processed_state(manifest_root: str) -> dict[tuple[str, str, str, str], dict]
     return state
 
 
-def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
-    """Resume policy. A unit is done iff its final parquet exists, OR its last manifest verdict is
-    terminal AND the inputs that produced that verdict have not changed:
+def _parquet_has_rows(path: str) -> bool:
+    """True iff `path` is a parquet file with >=1 row (a cheap footer read). A file that cannot be
+    read counts as having rows so the unit RE-RUNS and surfaces the corruption as an error record
+    instead of being silently skipped."""
+    if not os.path.exists(path):
+        return False
+    try:
+        import pyarrow.parquet as pq
+        with pq.ParquetFile(path) as pf:
+            return pf.metadata.num_rows > 0
+    except Exception:   # noqa: BLE001 — unreadable seed: re-run, let the worker record the error
+        return True
 
+
+def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
+    """Resume policy — the MANIFEST verdict is consulted first, the output file second, so a
+    published parquet is trusted only when its `ok` record exists (a crash between the atomic
+    publish and the manifest append, or an output paired with a superseding non-ok verdict, re-runs
+    instead of masquerading as done). A unit is done iff:
+
+      * last verdict `ok` AND the final parquet still exists (a deleted output re-runs);
       * `degraded` — deterministic from local data, done until --overwrite;
-      * `inconclusive` — done, UNLESS it was inconclusive with the `book` seed product absent and
-        the seed parquet has since appeared in the raw store (a later Stage-1 pull unblocks it);
+      * `inconclusive` — done, UNLESS it lacked seed candidates (`book` product absent or empty)
+        and the seed parquet has since appeared/been refilled with rows (a later Stage-1 pull
+        unblocks it);
       * `missing` — done only while the raw partition is STILL absent (new raw data re-runs it);
-      * `error` (or no record) — always re-run."""
+      * `error`, no record, or an `ok` record whose output vanished — always re-run."""
     if cfg.overwrite:
         return False
-    if os.path.exists(lb.processed_parquet_path(cfg.out_root, u.output, u.exchange, u.symbol,
-                                                u.day)):
-        return True
     rec = state.get((u.output, u.exchange, u.symbol, u.day))
-    if not rec:
-        return False
-    status = rec.get("status")
+    status = rec.get("status") if rec else None
+    if status == "ok":
+        return os.path.exists(lb.processed_parquet_path(cfg.out_root, u.output, u.exchange,
+                                                        u.symbol, u.day))
     if status == "degraded":
         return True
     if status == "inconclusive":
-        if rec.get("book_present") is False and os.path.exists(
+        had_no_seed = rec.get("book_present") is False or rec.get("book_rows") == 0
+        if had_no_seed and _parquet_has_rows(
                 lb.raw_parquet_path(cfg.raw_root, lb.SEED_PRODUCT, u.exchange, u.symbol, u.day)):
             return False
         return True
@@ -472,20 +489,21 @@ def process_topk_unit(u: Unit, cfg: RunConfig, lock) -> UnitResult:
             delta_df, book_df, day=dt.date.fromisoformat(u.day), k=cfg.k, grid_ms=cfg.grid_ms,
             engine=engine, price_scale=price_scale, policy=cfg.policy,
             book_stride_ms=cfg.book_stride_ms, thresholds=cfg.thresholds)
+        rec = {**base, **info}
+        if frame is not None:
+            rows, sha, out_bytes = _write_frame_atomic(
+                frame, final, schema_version=base["schema_version"], output=u.output,
+                exchange=u.exchange, symbol=u.symbol, day_iso=u.day)
+            rec.update(status="ok", rows=rows, sha256=sha, out_bytes=out_bytes)
+        else:
+            _rm(final)   # fail closed: an earlier certified output must not outlive its verdict
+            rec.update(status=info["classification"], rows=0)
     except Exception as exc:   # noqa: BLE001 — recorded, run continues, exit 3
         _rm(final + ".tmp")
+        _rm(final)       # fail closed: an errored unit must not leave a stale certified output
         return _finish({**base, "status": "error",
                         "error": f"{type(exc).__name__}: {exc}"[:500]},
                        cfg.manifest_root, lock, t0)
-    rec = {**base, **info}
-    if frame is not None:
-        rows, sha, out_bytes = _write_frame_atomic(
-            frame, final, schema_version=base["schema_version"], output=u.output,
-            exchange=u.exchange, symbol=u.symbol, day_iso=u.day)
-        rec.update(status="ok", rows=rows, sha256=sha, out_bytes=out_bytes)
-    else:
-        _rm(final)       # fail closed: an earlier certified output must not outlive its verdict
-        rec.update(status=info["classification"], rows=0)
     return _finish(rec, cfg.manifest_root, lock, t0)
 
 
@@ -514,6 +532,7 @@ def process_table_unit(u: Unit, cfg: RunConfig, lock) -> UnitResult:
             exchange=u.exchange, symbol=u.symbol, day_iso=u.day)
     except Exception as exc:   # noqa: BLE001 — schema drift & friends: recorded, run exits 3
         _rm(final + ".tmp")
+        _rm(final)       # fail closed: an errored unit must not leave a stale certified output
         return _finish({**base, "status": "error",
                         "error": f"{type(exc).__name__}: {exc}"[:500]},
                        cfg.manifest_root, lock, t0)
@@ -608,6 +627,10 @@ def main(argv=None) -> int:
             raise ValueError(f"--k must be positive (got {args.k})")
         if args.jobs is not None and args.jobs < 1:
             raise ValueError(f"--jobs must be >=1 (got {args.jobs})")
+        if args.book_stride_ms < 1:
+            # stride <=0 would silently disable seed thinning and materialize EVERY row of a
+            # multi-million-row `book` day as a BookSnapshot (recon/reseed.py thins only for >0)
+            raise ValueError(f"--book-stride-ms must be >=1 (got {args.book_stride_ms})")
     except (ValueError, KeyError, FileNotFoundError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT

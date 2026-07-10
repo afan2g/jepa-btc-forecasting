@@ -42,6 +42,17 @@ def test_canonicalize_never_clobbers_existing_canonical_columns():
     assert "timestamp" in out.columns                 # alias untouched, not silently merged
 
 
+def test_canonicalize_shares_data_and_leaves_original_intact():
+    # The rename must NOT deep-copy column data: a ~109M-row perp day would otherwise be resident
+    # twice for the whole replay (2-3x the documented Requirement-7 per-worker RAM bound).
+    df = pd.DataFrame({"timestamp": _t(1, 2), "receipt_timestamp": _t(1, 2),
+                       "price": [1.0, 2.0]})
+    out = lb.canonicalize_time_columns(df)
+    assert np.shares_memory(out["origin_time"].to_numpy(), df["timestamp"].to_numpy())
+    assert np.shares_memory(out["price"].to_numpy(), df["price"].to_numpy())
+    assert list(df.columns) == ["timestamp", "receipt_timestamp", "price"]   # original untouched
+
+
 # --------------------------------------------------------------------------- trades
 def _raw_trades(**over):
     base = {"origin_time": _t(1, 2, 3), "received_time": _t(1, 2, 3),

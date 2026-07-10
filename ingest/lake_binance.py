@@ -216,10 +216,18 @@ _SELL_VALUES = frozenset({"sell", "s"})
 
 def canonicalize_time_columns(df):
     """Rename raw-vendor engine-time columns to the canonical `origin_time`/`received_time`.
-    Never clobbers: an alias is renamed only when its canonical column is absent."""
+    Never clobbers: an alias is renamed only when its canonical column is absent.
+
+    Shallow copy + axis relabel, NOT `df.rename(columns=...)`: under pre-CoW pandas, rename
+    deep-copies EVERY column, which would double the resident memory of a ~109 M-row perp
+    `book_delta_v2` day for the whole replay (Requirement 7's RAM bound assumes ONE copy)."""
     renames = {alias: canon for canon, alias in _TIME_ALIASES.items()
                if canon not in df.columns and alias in df.columns}
-    return df.rename(columns=renames) if renames else df
+    if not renames:
+        return df
+    out = df.copy(deep=False)   # shares column data; axes are copied, so the original is untouched
+    out.columns = [renames.get(c, c) for c in df.columns]
+    return out
 
 
 def _trade_side(v) -> str:

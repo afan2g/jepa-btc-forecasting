@@ -373,6 +373,97 @@ def test_raw_vendor_time_names_are_canonicalized(tmp_path):
     assert recs["topk_l2"]["engine_time_col"] == "origin_time"
 
 
+# --------------------------------------------------------------------------- fail-closed hardening
+def test_topk_publish_failure_is_a_recorded_error_not_a_crash(tmp_path, monkeypatch):
+    # A write failure on the CERTIFIED publish path must behave like any per-unit error: durable
+    # {status: error} record, run continues, exit 3, report written — never an unhandled traceback.
+    real = rbr._write_frame_atomic
+
+    def boom(frame, final, **kw):
+        if kw.get("output") == "topk_l2":
+            raise OSError(28, "No space left on device")
+        return real(frame, final, **kw)
+
+    monkeypatch.setattr(rbr, "_write_frame_atomic", boom)
+    rc, out, rep = run_cli(tmp_path, write_store(tmp_path))
+    assert rc == rbr.PARTIAL_EXIT
+    t = last_by_output(out)["topk_l2"]
+    assert t["status"] == "error" and "No space left" in t["error"]
+    assert not os.path.exists(outpath(out, "topk_l2"))
+    assert not os.path.exists(outpath(out, "topk_l2") + ".tmp")
+    assert read_report(rep)["counts"]["error"] == 1          # the run completed and reported
+
+
+def test_errored_rerun_revokes_stale_certified_output_and_stays_pending(tmp_path):
+    # certify -> Stage-1 refresh drifts the raw partition -> --overwrite rerun errors: the
+    # previously-certified parquet must NOT survive (fail closed), and the errored unit must
+    # re-run on the next plain run instead of being skipped behind the stale file.
+    raw = write_store(tmp_path)
+    rc1, out, rep = run_cli(tmp_path, raw)
+    assert rc1 == 0 and os.path.exists(outpath(out, "trades"))
+    bad = _trades_df().drop(columns=["price"])
+    pq.write_table(pa.Table.from_pandas(bad, preserve_index=False),
+                   lb.raw_parquet_path(raw, "trades", *PERP, DAY))
+    rc2, _, _ = run_cli(tmp_path, raw, "--overwrite")
+    assert rc2 == rbr.PARTIAL_EXIT
+    assert last_by_output(out)["trades"]["status"] == "error"
+    assert not os.path.exists(outpath(out, "trades"))        # stale certified output revoked
+    rc3, _, _ = run_cli(tmp_path, raw)                       # plain resume re-runs the error unit
+    assert rc3 == rbr.PARTIAL_EXIT                           # still drifted -> still an error
+    assert read_report(rep)["counts"]["error"] == 1
+    assert read_report(rep)["counts"]["skip"] == 4           # the other units stay done
+
+
+def test_output_without_manifest_record_is_reprocessed(tmp_path):
+    # A crash between the atomic publish and the manifest append leaves a parquet with no record;
+    # resume must re-run it (manifest verdict first, file second), not trust the bare file.
+    raw = write_store(tmp_path)
+    orphan = outpath(str(tmp_path / "out"), "trades")
+    os.makedirs(os.path.dirname(orphan), exist_ok=True)
+    pq.write_table(pa.Table.from_pandas(pd.DataFrame({"junk": [1]}), preserve_index=False),
+                   orphan)
+    rc, out, _ = run_cli(tmp_path, raw)
+    assert rc == 0
+    t = last_by_output(out)["trades"]
+    assert t["status"] == "ok"                               # re-processed, not skipped
+    assert list(read_parquet(orphan).columns) == ["origin_time", "received_time", "price",
+                                                  "quantity", "side", "trade_id"]
+
+
+def test_ok_unit_with_deleted_output_reruns(tmp_path):
+    raw = write_store(tmp_path)
+    rc1, out, rep = run_cli(tmp_path, raw)
+    assert rc1 == 0
+    os.remove(outpath(out, "funding"))
+    rc2, _, _ = run_cli(tmp_path, raw)
+    assert rc2 == 0
+    assert os.path.exists(outpath(out, "funding"))           # re-published
+    assert read_report(rep)["counts"]["ok"] == 1 and read_report(rep)["counts"]["skip"] == 4
+
+
+def test_empty_seed_parquet_unblocks_when_refilled(tmp_path):
+    # A present-but-EMPTY `book` seed parquet must behave like the absent-seed case: inconclusive
+    # now, re-run (and certify) once the seed partition is refilled with rows.
+    raw = write_store(tmp_path, {"book": _book_df().iloc[0:0]})
+    rc, out, _ = run_cli(tmp_path, raw)
+    assert rc == 0
+    t = last_by_output(out)["topk_l2"]
+    assert t["status"] == rbr.INCONCLUSIVE and t["book_rows"] == 0
+    pq.write_table(pa.Table.from_pandas(_book_df(), preserve_index=False),
+                   lb.raw_parquet_path(raw, "book", *PERP, DAY))
+    rc2, _, _ = run_cli(tmp_path, raw)
+    assert rc2 == 0
+    assert last_by_output(out)["topk_l2"]["status"] == "ok"
+
+
+def test_book_stride_ms_recorded_and_validated(tmp_path):
+    raw = write_store(tmp_path)
+    rc, out, _ = run_cli(tmp_path, raw)
+    assert last_by_output(out)["topk_l2"]["book_stride_ms"] == 1000
+    # stride <=0 would silently disable seed thinning (materializing every book row) -> setup error
+    assert run_cli(tmp_path, raw, "--book-stride-ms", "0")[0] == rbr.SETUP_ERROR_EXIT
+
+
 # --------------------------------------------------------------------------- setup errors
 def test_bad_args_exit_2(tmp_path):
     raw = write_store(tmp_path)
