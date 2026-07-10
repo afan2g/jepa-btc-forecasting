@@ -27,7 +27,7 @@ import datetime as _dt
 import math
 from typing import Iterable, Iterator, NamedTuple
 
-from bars.events import ClockTrade, clock_order_key
+from bars.events import MIN_ABSOLUTE_NS, ClockTrade, clock_order_key
 
 
 def _parse_day(day: str) -> _dt.date:
@@ -102,9 +102,11 @@ class ThresholdSchedule:
     def threshold_for(self, day: str) -> DayThreshold:
         d = _parse_day(day)
         lo = d - _dt.timedelta(days=self.config.window_days)
+        # sorted by date so the float mean never depends on record_day call order
+        # (window <= ~30 entries; sum() compensation alone is an interpreter detail)
         normalized = [
             notional / coverage
-            for prior, (notional, coverage) in self._history.items()
+            for prior, (notional, coverage) in sorted(self._history.items())
             if lo <= prior < d and coverage >= self.config.min_covered_fraction
         ]
         if len(normalized) < self.config.warmup_days:
@@ -302,7 +304,12 @@ def bars_for_day(trades: Iterable[ClockTrade], *, day: str, schedule: ThresholdS
     book stream `merge_sorted` is forbidden for). Chaining across days is the
     caller's job: pass the previous day's last t_event as `initial_watermark_ns` and
     its next bar index as `start_index`, and call
-    `schedule.record_day(day, notional, coverage)` only AFTER consuming the day."""
+    `schedule.record_day(day, notional, coverage)` only AFTER consuming the day.
+
+    The output is PRE-coalesce: a delayed backlog can tie several bars to one
+    t_event (also across a chained day boundary), so the consumer must wrap the
+    concatenated multi-day stream in `coalesce_decision_bars` before treating bars
+    as modeling opportunities (T9 then dedupes on `(t_event, horizon)` at write)."""
     day_threshold = schedule.threshold_for(day)
     day_start_ns, day_end_ns = _day_bounds_ns(day)
     ordered = sorted(trades, key=clock_order_key)
@@ -310,6 +317,16 @@ def bars_for_day(trades: Iterable[ClockTrade], *, day: str, schedule: ThresholdS
         if clock_order_key(a) == clock_order_key(b):
             raise ValueError(f"duplicate (origin_time, seq) key {clock_order_key(a)} — "
                              "the total accumulation order would be ambiguous")
+    for t in ordered:
+        # BarClock is axis-agnostic, so this absolute-axis entry point owns the
+        # received-time floor: an unconverted time-of-day receipt slipping past the
+        # bars.events adapter would silently become a t_event decades in the past
+        # (origin is already forced absolute by the day-bound check in push)
+        if t.received_time < MIN_ABSOLUTE_NS:
+            raise ValueError(
+                f"received_time {t.received_time} at (origin_time, seq)="
+                f"{clock_order_key(t)} is not an absolute UTC epoch timestamp"
+            )
     clk = BarClock(threshold=day_threshold.threshold, time_cap_ns=time_cap_ns,
                    day_start_ns=day_start_ns, day_end_ns=day_end_ns,
                    is_warmup=day_threshold.is_warmup,

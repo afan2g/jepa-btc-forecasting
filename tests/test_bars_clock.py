@@ -74,9 +74,13 @@ def test_bar_closes_on_the_threshold_crossing_trade():
 
 
 def test_threshold_bar_t_event_is_max_member_received_time():
-    trades = [trade(1_000 * i, 1_000 * i + 5_000, notional=500.0) for i in range(1, 3)]
+    # the EARLIER member is received LATER than the crossing trade, so an
+    # implementation using the trigger's own receipt (8_000 vs 9_000) would fail
+    trades = [trade(1_000, 9_000, notional=500.0), trade(2_000, 8_000, notional=500.0)]
     bars = run(clock(), trades)
-    assert bars[0].t_event == 7_000  # max received over members, not the trigger's
+    assert bars[0].close_reason == CLOSE_THRESHOLD
+    assert bars[0].members[-1].origin_time == 2_000  # crossing trade
+    assert bars[0].t_event == 9_000  # max received over members, not the trigger's
 
 
 # ------------------------------------------------------------------ hybrid time cap
@@ -340,6 +344,19 @@ def test_bars_for_day_scrambled_input_yields_identical_bars():
         assert got == expected
 
 
+def test_equal_origin_trades_accumulate_in_seq_order_within_a_bar():
+    # same origin_time, distinct seq: the seq tie-break must be load-bearing in the
+    # actual bar membership, not only in the sort key (data.md §5b: Coinbase trades
+    # are unsorted and trade_id is non-monotonic — only (origin, seq) is a total order)
+    shared = DAY_OPEN + 5 * 10**9
+    trades = [trade(shared, notional=1_000.0, seq=3), trade(shared, notional=1_000.0, seq=1),
+              trade(shared, notional=1_000.0, seq=2)]
+    bars = list(bars_for_day(trades, day=DAY, schedule=_schedule_with_history(),
+                             time_cap_ns=DAY_NS))
+    assert [m.seq for m in bars[0].members] == [1, 2, 3]  # threshold 3000: one bar
+    assert bars[0].close_reason == CLOSE_THRESHOLD
+
+
 def test_bars_for_day_rejects_duplicate_order_keys():
     t = _day_trades(n=2)
     dup = [t[0], t[0]._replace(price=200.0, amount=1.0), t[1]]
@@ -352,6 +369,16 @@ def test_bars_for_day_rejects_trades_outside_the_day():
     early = [trade(DAY_OPEN - 1, notional=100.0, seq=0)]
     with pytest.raises(ValueError, match="day"):
         list(bars_for_day(early, day=DAY, schedule=_schedule_with_history(),
+                          time_cap_ns=DAY_NS))
+
+
+def test_bars_for_day_rejects_non_absolute_received_time():
+    # the adapter floors both axes, but bars_for_day is the absolute-axis entry
+    # point for ANY caller: a raw 13:00 time-of-day receipt on a hand-built
+    # ClockTrade would otherwise become a t_event ~55 years before the day open
+    bad = [trade(DAY_OPEN + 1_000, 13 * 3600 * 10**9, notional=100.0, seq=0)]
+    with pytest.raises(ValueError, match="absolute"):
+        list(bars_for_day(bad, day=DAY, schedule=_schedule_with_history(),
                           time_cap_ns=DAY_NS))
 
 

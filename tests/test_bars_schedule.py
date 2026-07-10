@@ -91,6 +91,20 @@ def test_sub_min_coverage_day_is_excluded_and_does_not_count_toward_warmup():
     assert got.threshold == pytest.approx(1_500_000.0 / 100)  # excluded day absent
 
 
+def test_threshold_is_invariant_to_history_recording_order():
+    # float summation order must not depend on record_day call order, or two builds
+    # recording the same history differently could disagree in the last ulp; the
+    # magnitude mix below makes (1+1)+1e16 != (1e16+1)+1 if iteration follows
+    # insertion order
+    entries = [("2025-01-01", 1.0), ("2025-01-02", 1.0), ("2025-01-03", 1.0e16)]
+    fwd, rev = ThresholdSchedule(CFG), ThresholdSchedule(CFG)
+    for day, vol in entries:
+        fwd.record_day(day, vol)
+    for day, vol in reversed(entries):
+        rev.record_day(day, vol)
+    assert fwd.threshold_for("2025-01-08") == rev.threshold_for("2025-01-08")
+
+
 def test_duplicate_day_recording_fails_closed():
     s = _loaded([("2025-01-01", 1_000_000.0)])
     with pytest.raises(ValueError, match="2025-01-01"):
