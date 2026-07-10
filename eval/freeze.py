@@ -219,6 +219,11 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
         "arm_matrix_hashes": {a: e["matrix_content_sha256"]
                               for a, e in arms_echo.items()}
             == vr["arm_matrix_hashes"],
+        # The venue keys the scope-coverage rule reads must be the ledger-pinned ones —
+        # an edited echo could otherwise freeze a too-narrow trade-validation scope and
+        # burn the one-time record when scoring later rejects it.
+        "arm_venue_keys": {a: e["venue_keys"] for a, e in arms_echo.items()}
+            == vr["arm_venue_keys"],
     }
     bad = sorted(k for k, ok in study_checks.items() if not ok)
     if bad:

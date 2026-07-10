@@ -658,6 +658,10 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
             # verifies against.
             "arm_matrix_hashes": {a: e["matrix_content_sha256"]
                                   for a, e in arms_out.items()},
+            # ... and the per-arm trade-validation venue keys, so an edited echo cannot
+            # freeze a too-narrow validation scope (which would burn the one-time
+            # record when scoring later rejects it).
+            "arm_venue_keys": {a: e["venue_keys"] for a, e in arms_out.items()},
         })
 
     winner = None

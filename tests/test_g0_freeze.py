@@ -303,6 +303,22 @@ def test_freeze_rejects_edited_evidence_values(g0_pipeline):
                                   generated_at="2026-07-10T12:00:00+00:00")
 
 
+def test_freeze_pins_arm_venue_keys_to_ledger_verdict(g0_pipeline):
+    """Codex PR#60 round-23: the venue keys the scope-coverage rule reads are
+    ledger-pinned — editing the echo to a narrower list (which would burn the one-time
+    record at scoring) refuses to freeze."""
+    edited = copy.deepcopy(g0_pipeline["res_xv"])
+    arm = edited["winner"]["arm"]
+    edited["arms"][arm]["venue_keys"] = ["coinbase"]
+    with pytest.raises(ValueError, match="arm_venue_keys"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope={**g0_pipeline["scope"],
+                                             "venues": ["coinbase"]},
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+
 def test_freeze_pins_arm_matrix_hashes_to_ledger_verdict(g0_pipeline):
     """Codex PR#60 round-5 P1: the per-arm full matrix hashes the freeze copies into
     sources (and the holdout refit verifies against) must be the LEDGER-pinned ones — an
