@@ -25,8 +25,86 @@ import pandas as pd
 from eval.hashing import hash_obj
 from recon.coinapi import L3Book, _iter_actions
 from recon.ingest import shared_engine_time_col
+from recon.parity import compare_topk, lake_warmup_cutoff
 from recon.reseed import (BookSnapshot, ReseedPolicy, book_snapshot, classify_snapshot,
                           reconstruct_lake_l2_at_samples_seeded)
+
+# ---------------------------------------------------------------------- preregistration
+# Preregistered BEFORE any real-data arm was run (issue #54 Phase 2). Mirrored verbatim
+# in experiments/preregistration_54.json (pinned equal by test) so the bars cannot drift
+# silently after results are seen. Anchors, quoted from docs/data.md:
+#   * day-quality bars = the §5a-QualityMap `lake_usable` classification thresholds
+#     (crossed <=1%, missing <=2%, thin <=10%);
+#   * parity bars separate the clean reference class (2025-06-01: median $0.00,
+#     p95/p99/max $0.48/$4.35/$66.59, corr 0.99999778, labels 0.951/0.983/0.995) from
+#     the measured crossed-seed cross-validation FAILURES (p99 $25.40/$157.00,
+#     >$50-spike fractions 2.2e-3/2.8e-2, 2s labels 0.832/0.917);
+#   * a >$50-spike-fraction failure may be overridden ONLY by the PR-#28-style
+#     volatility attribution (spikes concentrated in hours the REFERENCE itself moved),
+#     documented spike-by-spike in the report — never silently.
+PREREGISTERED = {
+    "thresholds": {
+        "day_quality": {"crossed_rate_max": 0.01,
+                        "missing_book_fraction_max": 0.02,
+                        "thin_depth_fraction_max": 0.10,
+                        "crossed_duration_s_max": 900.0},
+        "parity": {"mid_median_usd_max": 0.01,
+                   "mid_signed_mean_abs_usd_max": 0.50,
+                   "mid_corr_min": 0.9995,
+                   "mid_p95_usd_max": 10.0,
+                   "mid_p99_usd_max": 35.0,
+                   "spike_gt50_fraction_max": 0.001,
+                   "label_agreement_min": {"2": 0.92, "10": 0.96, "60": 0.985}},
+        "clean_control_non_regression": {"crossed_rate_delta_max": 0.001,
+                                         "mid_p99_delta_usd_max": 1.0,
+                                         "mid_corr_delta_max": 0.0001,
+                                         "label2_delta_max": 0.005},
+        "economics": {"max_fraction_of_full_day_cost": 0.25},
+    },
+    "fixture_days": {
+        "clean_control": ["2025-06-01"],
+        "crossed_seed_mild": ["2024-12-04"],
+        "crossed_seed_severe": ["2026-04-01"],
+        "emulated_degradations": ["no_lake_book_snapshots", "leading_gap_seam",
+                                  "sparse_deltas"],
+    },
+}
+
+# Vendor billing facts used by the cost projection. Every number carries its source in
+# BILLING_SOURCES; the flat-file rates match the #33 manifest cost model
+# (scripts/review_coinbase_backfill_manifest.py BOOK_USD_PER_GB/TRADES_USD_PER_GB) and
+# live 2026-06/07 usage, but their public pages were bot-gated on 2026-07-10 — treat as
+# archived-capture facts pending re-verification (see BILLING_SOURCES status fields).
+BILLING_FACTS = {
+    "book_usd_per_gb": 1.0,
+    "trades_usd_per_gb": 3.0,
+    "requests_usd_per_1000": 10.0,
+    "rest_usd_per_credit_first_1k_per_day": 5.26 / 1000.0,
+    "rest_credit_per_100_data_items": 1,
+    "rest_date_bounded_credit_cap": 10,
+    "rest_history_max_levels": 20,
+}
+BILLING_SOURCES = [
+    {"fact": "rest_credit_per_100_data_items / default limit=100 = 1 request",
+     "url": "https://docs.coinapi.io/market-data/api-limits-and-billing-metrics",
+     "accessed": "2026-07-10", "status": "confirmed_live_via_llms_full_txt"},
+    {"fact": "rest_usd_per_credit_first_1k_per_day ($5.26 first 1,000/day, $2.63 next)",
+     "url": "https://www.coinapi.io/llms-full.txt",
+     "accessed": "2026-07-10", "status": "confirmed_live"},
+    {"fact": "rest history endpoint is L2, max 20 levels",
+     "url": "https://docs.coinapi.io/market-data/rest-api/order-book/historical-data",
+     "accessed": "2026-07-10", "status": "confirmed_live_via_search_index"},
+    {"fact": "flat files $1/GB limit book, $3/GB trades, $10 per 1,000 GET/LIST/HEAD",
+     "url": "https://docs.coinapi.io/flat-files-api/billing",
+     "accessed": "2026-07-10",
+     "status": "archived_capture_2025_02_06; live page bot-gated; matches repo-measured "
+               "billing (docs/data.md §2.2) and the #33 manifest cost model"},
+    {"fact": "limitbook_snapshot_X product exists (top-X levels, 1 s interval, "
+             "'Limit Book Data' tier)",
+     "url": "https://www.coinapi.io/products/flat-files/pricing",
+     "accessed": "2026-07-10", "status": "archived_capture_2025_10_11; live page "
+                                         "bot-gated; availability for COINBASE unknown"},
+]
 
 
 def _chunks(frame_or_chunks):
@@ -239,6 +317,210 @@ def seed_lake_replay(lake_df: pd.DataFrame, candidates, *, grid, k: int,
     meta["frame_hash"] = frame_replay_hash(frame)
     meta["report_hash"] = hash_obj(meta, exclude_keys=("report_hash",))
     return frame, meta
+
+
+def evaluate_arm_parity(arm_frame: pd.DataFrame, arm_meta: dict,
+                        reference_frame: pd.DataFrame, *, k: int, grid_s: float,
+                        injection_guard_s: float | None = None,
+                        horizons_s=(2, 10, 60), band_bps: float = 0.0) -> dict:
+    """Compare a seeded-arm frame against the full-day CoinAPI reference, with the SAME
+    exclusion semantics as the production parity gate (`run_parity_core`):
+
+      * `since_ts` — warm-up cutoff clamped to the accepted seed's ts (pre-seed samples
+        are cold-start warm-up, not the arm's behavior);
+      * residual crossed arm samples (awaiting a reseed) are excluded point-wise and
+        counted, only when a seed was actually accepted;
+      * `parity_guarded` — the SAME comparison additionally masking
+        `injection_guard_s` after every applied snapshot (seed + reseeds). Because the
+        reference and the emulated snapshots come from the SAME vendor file, samples
+        right after an injection agree trivially; the guarded variant shows how much of
+        the parity is genuinely carried by the Lake deltas.
+    """
+    seed_accepted = bool(arm_meta.get("seed_accepted"))
+    seed_ts = arm_meta.get("seed_ts")
+    cutoff = lake_warmup_cutoff(arm_frame)
+    if seed_accepted and seed_ts is not None:
+        cutoff = int(seed_ts) if cutoff is None else max(int(cutoff), int(seed_ts))
+    reseed_enabled = bool(arm_meta.get("policy", {}).get("enabled", False))
+    excluded = (set(arm_meta.get("crossed_sample_ts", []))
+                if (seed_accepted and reseed_enabled) else set())
+
+    parity = compare_topk(arm_frame, reference_frame, k=k, grid_s=grid_s,
+                          horizons_s=horizons_s, band_bps=band_bps,
+                          since_ts=cutoff, exclude_ts=excluded)
+
+    guard: dict = {"guard_s": None, "n_guard_excluded": 0}
+    parity_guarded = None
+    if injection_guard_s is not None:
+        guard_ns = int(injection_guard_s * 1e9)
+        inj_ts = [int(t) for t in ([seed_ts] if (seed_accepted and seed_ts is not None)
+                                   else [])] + [int(t) for t in
+                                                arm_meta.get("reseed_ts", [])]
+        ts = arm_frame["sample_ts"].astype("int64").to_numpy()
+        in_guard = np.zeros(len(ts), dtype=bool)
+        for t0 in inj_ts:
+            in_guard |= (ts >= t0) & (ts <= t0 + guard_ns)
+        guard_ts = set(int(t) for t in ts[in_guard])
+        guard = {"guard_s": float(injection_guard_s),
+                 "n_guard_excluded": len(guard_ts - excluded),
+                 "injection_ts": inj_ts}
+        parity_guarded = compare_topk(arm_frame, reference_frame, k=k, grid_s=grid_s,
+                                      horizons_s=horizons_s, band_bps=band_bps,
+                                      since_ts=cutoff, exclude_ts=excluded | guard_ts)
+
+    rep = {
+        "day_quality": {
+            "crossed_rate": arm_meta.get("crossed_rate"),
+            "crossed_samples": arm_meta.get("crossed_samples"),
+            "missing_book_fraction": arm_meta.get("missing_book_fraction"),
+            "thin_depth_fraction": arm_meta.get("thin_depth_fraction"),
+            "crossed_duration_s": arm_meta.get("crossed_duration_s"),
+        },
+        "since_ts": (int(cutoff) if cutoff is not None else None),
+        "excluded_crossed_ts": sorted(excluded)[:100],
+        "n_excluded_crossed": len(excluded),
+        "injection_guard": guard,
+        "parity": parity,
+        "parity_guarded": parity_guarded,
+    }
+    rep["report_hash"] = hash_obj(_json_safe(rep), exclude_keys=("report_hash",))
+    return rep
+
+
+def _json_safe(obj):
+    """Strict-JSON coercion (non-finite floats -> None, numpy scalars -> python)."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float):
+        return obj if isfinite(obj) else None
+    if hasattr(obj, "item"):
+        v = obj.item()
+        return _json_safe(v) if isinstance(v, float) else v
+    return obj
+
+
+def evaluate_preregistered(*, day_quality: dict, parity: dict) -> dict:
+    """Score one arm's metrics against the PREREGISTERED thresholds.
+
+    Returns `{"pass": bool, "failed": [criterion, ...], "checked": {...}}`. A missing
+    metric FAILS its criterion (fail-closed): an arm that could not measure a bar has
+    not passed it. Clean-control non-regression and economics are day-level checks
+    applied by the runner, not here.
+    """
+    th = PREREGISTERED["thresholds"]
+    failed: list[str] = []
+    checked: dict = {}
+
+    def check(name: str, value, ok) -> None:
+        checked[name] = {"value": value, "ok": bool(ok)}
+        if not ok:
+            failed.append(name)
+
+    dq = th["day_quality"]
+    for key, bar in (("crossed_rate", dq["crossed_rate_max"]),
+                     ("missing_book_fraction", dq["missing_book_fraction_max"]),
+                     ("thin_depth_fraction", dq["thin_depth_fraction_max"]),
+                     ("crossed_duration_s", dq["crossed_duration_s_max"])):
+        v = day_quality.get(key)
+        check(f"day_quality.{key}", v, v is not None and v <= bar)
+
+    pa = th["parity"]
+    md = parity.get("mid_diff", {})
+    check("parity.mid_median", md.get("median"),
+          md.get("median") is not None and md["median"] <= pa["mid_median_usd_max"])
+    sm = md.get("signed_mean")
+    check("parity.mid_signed_mean", sm,
+          sm is not None and abs(sm) <= pa["mid_signed_mean_abs_usd_max"])
+    check("parity.mid_corr", md.get("corr"),
+          md.get("corr") is not None and md["corr"] >= pa["mid_corr_min"])
+    check("parity.mid_p95", md.get("p95"),
+          md.get("p95") is not None and md["p95"] <= pa["mid_p95_usd_max"])
+    check("parity.mid_p99", md.get("p99"),
+          md.get("p99") is not None and md["p99"] <= pa["mid_p99_usd_max"])
+    sf = parity.get("spike_fraction", {}).get(">50")
+    check("parity.spike_gt50_fraction", sf,
+          sf is not None and sf <= pa["spike_gt50_fraction_max"])
+    for h, bar in pa["label_agreement_min"].items():
+        ag = parity.get("label_agreement", {}).get(h, {}).get("agreement")
+        check(f"parity.label_agreement.{h}", ag, ag is not None and ag >= bar)
+
+    return {"pass": not failed, "failed": failed, "checked": checked,
+            "thresholds": th}
+
+
+def project_strategy_costs(*, full_day_book_gb: float,
+                           on_demand_requests: int | None = None,
+                           stream_stats: dict | None = None) -> dict:
+    """Project per-day vendor cost for each bootstrap strategy against the full-day
+    fill baseline, from BILLING_FACTS only (no vendor calls). Unknown billing
+    granularity is carried as an explicit low/high BAND plus an assumptions list —
+    never resolved optimistically.
+    """
+    facts = BILLING_FACTS
+    get_usd = facts["requests_usd_per_1000"] / 1000.0
+    credit_usd = facts["rest_usd_per_credit_first_1k_per_day"]
+    full_usd = full_day_book_gb * facts["book_usd_per_gb"] + get_usd
+    out: dict = {
+        "billing_facts": dict(facts),
+        "billing_sources": list(BILLING_SOURCES),
+        "full_day_fill": {
+            "gb": float(full_day_book_gb), "usd": full_usd,
+            "assumptions": ["whole daily limitbook_full object at $1/GB + 1 GET",
+                            "no tiered discount applied (unconfirmed)"]},
+    }
+
+    def band(low_usd: float, high_usd: float) -> dict:
+        return {"low": low_usd, "high": high_usd}
+
+    def saving(usd_band: dict) -> dict:
+        # low saving uses the HIGH cost estimate (conservative), and vice versa.
+        return {"low": 1.0 - usd_band["high"] / full_usd,
+                "high": 1.0 - usd_band["low"] / full_usd}
+
+    if on_demand_requests is not None:
+        n = int(on_demand_requests)
+        credits = band(n * 1.0, n * float(facts["rest_date_bounded_credit_cap"]))
+        usd = band(credits["low"] * credit_usd, credits["high"] * credit_usd)
+        out["rest_on_demand"] = {
+            "n_requests": n,
+            "credits_band": credits,
+            "usd_band": usd,
+            "saving_vs_full_day": saving(usd),
+            "assumptions": [
+                "1 credit minimum per request (confirmed billing rule); high bound = "
+                "the documented 10-credit cap on date-bounded queries because the "
+                "'data item' unit for an order-book response is UNDOCUMENTED",
+                "REST /history is L2 max 20 levels; intraday availability of "
+                "historical snapshots is UNVERIFIED (a daily-00:00-only reading "
+                "exists) — an on-demand intraday request may be unserviceable",
+                "first-1k/day credit pricing ($5.26/1k)",
+            ]}
+
+    if stream_stats is not None:
+        rows = int(stream_stats["n_changed"])
+        levels = int(stream_stats["max_levels"])
+        # CSV row estimate: 2 ISO-8601 timestamps (~56 B) + 4*levels numeric fields at
+        # ~12 B each incl. separators; gzip ratio band for repetitive numeric CSV.
+        row_bytes = 56 + 48 * levels
+        raw_gb = rows * row_bytes / 1e9
+        gz = band(raw_gb * 0.10, raw_gb * 0.35)
+        usd = band(gz["low"] * facts["book_usd_per_gb"] + get_usd,
+                   gz["high"] * facts["book_usd_per_gb"] + get_usd)
+        out["flatfile_snapshot_stream"] = {
+            "rows": rows, "levels": levels,
+            "raw_gb_estimate": raw_gb, "gz_gb_band": gz,
+            "usd_band": usd,
+            "saving_vs_full_day": saving(usd),
+            "assumptions": [
+                f"row bytes ~= 56 + 48*levels = {row_bytes} (uncompressed CSV estimate)",
+                "gzip ratio band [0.10, 0.35] for repetitive numeric CSV",
+                "limitbook_snapshot_X availability/size for COINBASE is UNVERIFIED "
+                "(needs one S3 LIST) — billed at the Limit Book $1/GB tier + 1 GET",
+                "rows = changed top-X seconds measured from the emulated stream",
+            ]}
+    return out
 
 
 def _sustained_cross_trigger(frame: pd.DataFrame, *, trigger_ns: int,

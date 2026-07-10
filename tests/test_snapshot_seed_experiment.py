@@ -417,3 +417,124 @@ class TestOnDemandReseedArm:
         _, m2 = self._run(_true_state_provider)
         assert m1["frame_hash"] == m2["frame_hash"]
         assert m1["on_demand"]["request_log"] == m2["on_demand"]["request_log"]
+
+
+# ----------------------------------------------------------------- arm parity evaluation
+class TestEvaluateArmParity:
+    def _arm_and_reference(self):
+        from experiments.snapshot_seed import (SnapshotAcceptance, seed_lake_replay)
+        from recon.coinapi import reconstruct_coinapi_l2_at_samples
+        acceptance = SnapshotAcceptance(min_levels_per_side=2, max_age_s=600.0,
+                                        tick_scale=100)
+        snap = _true_state_snapshot(DAY_OPEN + s(300))
+        arm_frame, arm_meta = seed_lake_replay(
+            synthetic_lake_day(), [(snap, {})], grid=GRID, k=2, acceptance=acceptance)
+        ref_frame, _ = reconstruct_coinapi_l2_at_samples(
+            synthetic_l3_day(), k=2, day=DAY, sample_ts=GRID, size_policy="decrement")
+        return arm_frame, arm_meta, ref_frame
+
+    def test_report_structure_and_exclusions(self):
+        from experiments.snapshot_seed import evaluate_arm_parity
+        arm_frame, arm_meta, ref = self._arm_and_reference()
+        rep = evaluate_arm_parity(arm_frame, arm_meta, ref, k=2, grid_s=30.0,
+                                  injection_guard_s=60.0)
+        assert set(rep) >= {"day_quality", "parity", "parity_guarded", "since_ts",
+                            "excluded_crossed_ts", "injection_guard"}
+        # the seed accepted at 300s clamps the compared window (no pre-seed samples)
+        assert rep["since_ts"] == DAY_OPEN + s(300)
+        assert rep["parity"]["n_grid_full"] == len(GRID)
+        dq = rep["day_quality"]
+        assert {"crossed_rate", "missing_book_fraction", "thin_depth_fraction",
+                "crossed_duration_s"} <= set(dq)
+        # guarded variant additionally masks the 60 s after the injection at 300s
+        g = rep["injection_guard"]
+        assert g["guard_s"] == 60.0
+        assert g["n_guard_excluded"] >= 1  # the 300s and 330s samples fall in the guard
+
+    def test_parity_carries_required_metrics(self):
+        from experiments.snapshot_seed import evaluate_arm_parity
+        arm_frame, arm_meta, ref = self._arm_and_reference()
+        rep = evaluate_arm_parity(arm_frame, arm_meta, ref, k=2, grid_s=30.0)
+        p = rep["parity"]
+        assert {"mid_diff", "label_agreement", "spike_counts",
+                "crossed_rate", "missing_book"} <= set(p)
+        assert {"median", "p95", "p99", "corr"} <= set(p["mid_diff"])
+        assert set(p["label_agreement"]) == {"2", "10", "60"}
+
+    def test_deterministic_report(self):
+        from experiments.snapshot_seed import evaluate_arm_parity
+        arm_frame, arm_meta, ref = self._arm_and_reference()
+        r1 = evaluate_arm_parity(arm_frame, arm_meta, ref, k=2, grid_s=30.0)
+        r2 = evaluate_arm_parity(arm_frame, arm_meta, ref, k=2, grid_s=30.0)
+        assert r1["report_hash"] == r2["report_hash"]
+
+
+# --------------------------------------------------------------- preregistered thresholds
+class TestPreregistration:
+    def test_json_artifact_matches_module_constants(self):
+        import json
+        import pathlib
+        from experiments.snapshot_seed import PREREGISTERED
+        artifact = json.loads(
+            (pathlib.Path(__file__).parent.parent / "experiments" /
+             "preregistration_54.json").read_text())
+        assert artifact["thresholds"] == PREREGISTERED["thresholds"]
+        assert artifact["fixture_days"] == PREREGISTERED["fixture_days"]
+
+    def test_passing_metrics_pass(self):
+        from experiments.snapshot_seed import evaluate_preregistered
+        verdict = evaluate_preregistered(
+            day_quality={"crossed_rate": 0.0001, "missing_book_fraction": 0.001,
+                         "thin_depth_fraction": 0.01, "crossed_duration_s": 10.0},
+            parity={"mid_diff": {"median": 0.0, "signed_mean": 0.05, "corr": 0.99999,
+                                 "p95": 0.5, "p99": 4.0},
+                    "spike_fraction": {">50": 0.00002},
+                    "label_agreement": {"2": {"agreement": 0.95},
+                                        "10": {"agreement": 0.98},
+                                        "60": {"agreement": 0.995}}})
+        assert verdict["pass"] is True
+        assert verdict["failed"] == []
+
+    def test_failing_metrics_name_the_criterion(self):
+        from experiments.snapshot_seed import evaluate_preregistered
+        verdict = evaluate_preregistered(
+            day_quality={"crossed_rate": 0.05, "missing_book_fraction": 0.001,
+                         "thin_depth_fraction": 0.01, "crossed_duration_s": 10.0},
+            parity={"mid_diff": {"median": 0.0, "signed_mean": 0.05, "corr": 0.9990,
+                                 "p95": 0.5, "p99": 4.0},
+                    "spike_fraction": {">50": 0.00002},
+                    "label_agreement": {"2": {"agreement": 0.95},
+                                        "10": {"agreement": 0.98},
+                                        "60": {"agreement": 0.995}}})
+        assert verdict["pass"] is False
+        assert "day_quality.crossed_rate" in verdict["failed"]
+        assert "parity.mid_corr" in verdict["failed"]
+
+
+# ------------------------------------------------------------------------ cost projection
+class TestCostProjection:
+    def test_full_day_baseline_and_strategy_bands(self):
+        from experiments.snapshot_seed import project_strategy_costs
+        costs = project_strategy_costs(
+            full_day_book_gb=2.266,
+            on_demand_requests=3,
+            stream_stats={"n_changed": 40_000, "max_levels": 20},
+        )
+        base = costs["full_day_fill"]
+        assert base["usd"] == pytest.approx(2.266 * 1.0 + 0.01)  # $1/GB + 1 GET
+        od = costs["rest_on_demand"]
+        assert od["n_requests"] == 3
+        # band: [1 credit/request, levels-as-data-items worst case], first-1k pricing
+        assert od["usd_band"]["low"] == pytest.approx(3 * 1 * 5.26 / 1000)
+        assert od["usd_band"]["high"] > od["usd_band"]["low"]
+        st = costs["flatfile_snapshot_stream"]
+        assert st["rows"] == 40_000
+        assert 0 < st["usd_band"]["low"] < st["usd_band"]["high"]
+        assert costs["billing_facts"]["book_usd_per_gb"] == 1.0
+
+    def test_savings_versus_full_day(self):
+        from experiments.snapshot_seed import project_strategy_costs
+        costs = project_strategy_costs(full_day_book_gb=2.0, on_demand_requests=1,
+                                       stream_stats=None)
+        od = costs["rest_on_demand"]
+        assert od["saving_vs_full_day"]["low"] > 0.9  # >=90% cheaper even at band high
