@@ -2,6 +2,13 @@
 
 -
 
+## Issue
+
+- Issue: #
+- [ ] `Closes #N`: this PR completes every acceptance criterion
+- [ ] `Part of #N` / `Refs #N`: this PR advances an issue without closing it
+- [ ] Dependencies and linked plans/specs are identified below
+
 ## Agent Role
 
 - [ ] Human-authored
@@ -35,6 +42,7 @@ Commands/results:
 - Data/modeling risks:
 - Performance risks:
 - Follow-ups:
+- Dependencies/plans/specs:
 
 ## Integration
 

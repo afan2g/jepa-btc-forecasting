@@ -1,0 +1,71 @@
+name: Task
+description: Track one implementation, documentation, investigation, or operational task
+title: ""
+labels: []
+body:
+  - type: dropdown
+    id: task_type
+    attributes:
+      label: Task type
+      options:
+        - Implementation
+        - Documentation
+        - Investigation
+        - Operational run
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: State the concrete outcome, not only the proposed activity.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List included work and important non-goals.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use a checklist with observable completion conditions.
+      placeholder: |-
+        - [ ] Behavior or artifact is complete
+        - [ ] Relevant checks pass
+        - [ ] Documentation and reports reconcile
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and blockers
+      description: Link prerequisite issues and state whether work can start now.
+
+  - type: textarea
+    id: references
+    attributes:
+      label: Plans and specifications
+      description: Link the authoritative repository plans, specs, and contracts.
+
+  - type: checkboxes
+    id: vendor
+    attributes:
+      label: Live or billable work
+      options:
+        - label: This task may use a live vendor API, paid download, or broad data scan; approval and spend controls are documented in the issue.
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Separate cheap local checks from live, billable, or manual checks.
+    validations:
+      required: true
