@@ -39,7 +39,9 @@ evidence.
 
 `G0-CB` validates target-venue data, labels, costs, CPCV, and the lower bound supplied
 by Coinbase's own book and trade flow. It uses the existing manifest-driven baseline
-ladder and a preregistered gate block; it does not introduce a second evaluator.
+ladder and a preregistered gate block. Selection/CPCV uses only November-March; after
+the trial ledger and winner are frozen, a fixed-holdout evaluator fits on pre-April
+rows and scores April exactly once.
 
 - PASS: proceed to the six-month Binance pilot.
 - FAIL because the target data, label timing, cost model, or execution economics are
@@ -59,8 +61,8 @@ tags:
 2. Binance-only signal features, lagged to their observable decision time.
 3. Combined Coinbase and Binance features.
 
-The exact numerical gate block is frozen in the three feature manifests before the
-pilot OOS month is touched. Authorization for the full Binance archive requires:
+The exact numerical gate and fixed-holdout blocks are frozen before the pilot OOS
+month is loaded by the evaluator. Authorization for the full Binance archive requires:
 
 - at least one non-naive cross-venue arm to clear the existing net-of-cost G1-style
   gate block (including DSR and PBO); and
@@ -70,6 +72,14 @@ pilot OOS month is touched. Authorization for the full Binance archive requires:
 Any post-hoc feature, horizon, cost, or threshold change is another trial and enters
 the DSR/PBO trial ledger. A no-verdict or unavailable PBO fails closed. A failed
 `G0-XV` blocks the full Binance pull until a documented stop or pivot decision.
+
+The three arms are **not** three independent `run_from_manifest` studies. One G0-XV
+study ledger covers every registered `(arm, feature-manifest build, model config,
+horizon, variant)` candidate. DSR uses that complete effective trial count, and PBO
+uses common development-OOS candidate-PnL matrices across arms/configurations before
+any arm or winner is selected. The frozen selection artifact then controls one-time
+April scoring on the matched holdout rows. Per-arm significance cannot authorize the
+archive when the unified ledger fails.
 
 `G0-XV` is an acquisition screen, not final E2.3. Six post-ETF months cannot satisfy
 E2.3's pre/post-ETF comparison.
@@ -85,6 +95,21 @@ full approved coverage. Its pre/post-ETF claim remains blocked unless certified
 Coinbase target data extends to both regimes; additional Binance history alone does
 not satisfy that requirement.
 
+### Executable evaluator prerequisite
+
+The current `eval.runner.run_from_manifest`/`eval.study.run_study` path performs CPCV
+over every supplied row and accepts one feature list at a time. It therefore cannot
+implement either fixed April scoring or the unified multi-arm ledger above. Issue #52
+must land before G0-CB/G0-XV execution. Its minimum contract is:
+
+- physically/logically separate development and holdout inputs;
+- development-only CPCV, threshold/config/feature selection, DSR, and PBO;
+- a deterministic candidate ledger spanning arms, models, horizons, and variants;
+- a hash-pinned winner/config/split/source artifact produced before holdout loading;
+- fit on pre-April data only, followed by one-time April scoring; and
+- outputs that separate development evidence from fixed-holdout evidence and cannot
+  feed April results back into another selection pass.
+
 ## 3. Frozen Pilot Window
 
 | Use | Inclusive dates | Treatment |
@@ -96,6 +121,15 @@ not satisfy that requirement.
 The existing `2026-04-01` Binance Stage-1 smoke is inside the pilot window. Coverage
 gaps remain explicit exclusions; neither producer nor evaluator may silently shorten
 the date range to improve results.
+
+For this protocol, **touching the OOS** means accessing outcome-bearing derived data in
+a way that can influence feature/label/threshold/model selection or reporting: bar or
+feature distributions, labels, costs, forecasts, PnL, model metrics, manual price-path
+analysis, or equivalent summaries. Outcome-blind operations are permitted and logged:
+vendor transfer, path/size/footer/schema/hash/row-count checks, coverage routing, and
+deterministic reconstruction certification whose thresholds were already fixed. They
+must not emit or inspect modeling outcomes. The completed `2026-04-01` Stage-1 smoke
+performed only these permitted integrity checks, so it did not consume the pilot OOS.
 
 The formal G1 holdout must:
 
@@ -121,6 +155,7 @@ venue features:
 Every manifest pins source manifests/hashes, usable-calendar hash, stitch policy,
 window, exclusions, bar-clock schedule, feature order, gate block, and build ID.
 Missing Binance data is an exclusion in cross-venue mode, not a column of zeros.
+G0 additionally pins the #52 candidate-ledger and frozen-selection artifact hashes.
 
 ## 5. Acquisition and Resource Gates
 
@@ -135,9 +170,13 @@ one day is not a quota guarantee.
   the vendor's 300 GB figure is a soft limit.
 - At the recorded 156.25 GB usage snapshot, do not launch the entire pilot as one
   batch. Generate deterministic resumable tranches and re-check usage/disk first.
-- Coinbase CoinAPI downloads are likewise staged: approve the pilot-window subset of
-  the reviewed manifest first; defer remaining full-window fills until the pilot
-  decisions authorize them.
+- Coinbase CoinAPI downloads are likewise staged, but the current contiguous-range,
+  book-only `ingest/download_coinapi.py` is not a safe manifest executor. Issue #53
+  must add a reviewed-manifest planner/executor for exact book and trade fill units.
+  It derives a hash-pinned pilot-window subset without recomputing policy, downloads
+  no intervening non-fill day, and preserves partial-fill stitch metadata even when
+  the vendor charges/transfers a whole daily file. Remaining full-window fills stay
+  deferred until the pilot decisions authorize them.
 - No data runner may infer scope from a directory glob. It consumes reviewed,
   hash-pinned manifests and preserves exclusions.
 
@@ -150,6 +189,8 @@ one day is not a quota guarantee.
 - Issue #38 remains formal full-data G1.
 - Issue #47 tracks `G0-CB`; #48 tracks `G0-XV`; #49 tracks remaining Binance
   acquisition; #50 tracks full production reconstruction.
+- Issue #52 tracks the fixed-holdout/unified-ledger evaluator; #53 tracks exact
+  reviewed-manifest CoinAPI execution.
 
 Operational downloads and generated reports remain untracked. Any code or durable-doc
 change discovered by a pilot run uses its own issue, branch, review, and PR.
@@ -161,6 +202,7 @@ Do not start the remaining Binance archive when any of these holds:
 - `G0-XV` is FAIL, blocking, or inconclusive;
 - pilot source coverage or reconstruction is uncertified;
 - the three arms do not share identical rows/splits/labels/costs;
-- the pilot OOS was touched before manifests and trials were frozen;
+- the pilot OOS had prohibited outcome-bearing access before manifests, candidates,
+  splits, and trials were frozen;
 - quota, disk, or spend approval is missing; or
 - a policy deviation has not been recorded on the owning issue.

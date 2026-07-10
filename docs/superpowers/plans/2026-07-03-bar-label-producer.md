@@ -147,6 +147,14 @@ earlier broader Coinbase build to the combined arm is forbidden. A row lacking c
 coverage is excluded from all three G0-XV arms, not represented by sentinel values. Dataset/build IDs
 and source-manifest hashes distinguish pilot from full production outputs.
 
+**Evaluator boundary (deep-review P1s):** the producer writes development
+(`2025-11-01..2026-03-31`) and April holdout artifacts as separate immutable builds; it never passes
+their union to `run_from_manifest`. The current runner has no fixed-holdout fit/score path and cannot
+compute PBO across different feature manifests. Issue #52 is therefore a hard prerequisite for T10:
+it owns one candidate ledger across arm × feature build × model × horizon × variant, development-only
+selection/PBO, a frozen selection artifact, pre-April fitting, and one-time April scoring. T10 may
+prepare the inputs but cannot report G0-CB/G0-XV by running each manifest independently.
+
 ---
 
 ## §A. Bar clock construction (E0.3)
@@ -803,7 +811,8 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
 **Tier 2 — real-data (skipif-gated, runs only after backfill unlock):**
 `data/processed/*` present ⇒ the E0.3 median-bar histogram, τ ladder, G0-CB, and then
 the matched G0-XV arms when Binance pilot data exists. Formal G1 uses a later full-data
-build and separate holdout. Skips cleanly today (matches `tests/test_baseline_integration.py`).
+build and separate holdout. G0 scoring additionally requires #52's fixed-holdout/multi-arm
+evaluator. Skips cleanly today (matches `tests/test_baseline_integration.py`).
 
 ---
 
@@ -811,6 +820,8 @@ build and separate holdout. Skips cleanly today (matches `tests/test_baseline_in
 
 Backfill is **GATED and currently LOCKED** until issue #33's reviewed manifest reaches
 `ready`/`scope_complete=true`; `download_coinapi.py` retains its broad-pull and spend controls.
+The current downloader is contiguous-range and book-only, so issue #53's exact reviewed-manifest
+book/trade executor is also required before #34 can run the pilot backfill.
 The split is therefore decisive:
 
 **Buildable & fully testable NOW (pre-backfill) — synthetic + tiny fixtures:**
@@ -832,11 +843,12 @@ Coinbase-default schedule); **τ measurement** (E1.1) to set the real horizon la
 **time-per-bar histogram** artifact; G0-CB and matched G0-XV with real regime stratification,
 the complete pilot-driven DSR trial count, and PBO over the preregistered pilot splits.
 **Pilot OOS held out FIRST:** April 2026
-is **partitioned out and touched once, last**, for the G0 reports — T10 calibrates thresholds,
+is **partitioned into a separate immutable build and scored once, last**, for the G0 reports — T10 calibrates thresholds,
 measures τ, and does all model/config selection on the **pre-OOS** data only, with labels/CV/metrics
 **pre-registered** before the OOS is read (experiment-plan:27-29). The runner just evaluates whatever
 rows it is given (`eval/runner.py:60-62`), so the producer/T10 must **exclude April from the
-calibration/selection matrix**, not merely annotate it. These are gated on backfill unlock and are
+calibration/selection matrix**, not merely annotate it, and #52 must fit the frozen winner on
+pre-April rows before loading/scoring the April build. These are gated on backfill unlock and are
 **not** part of the code-complete producer. April is consumed after G0 and cannot be reused as
 formal G1 OOS; the full-data run freezes a separate holdout outside the pilot.
 
@@ -858,7 +870,7 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker + slippage, fee-tier param; **slippage includes the `coinbase_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable Coinbase book at `coinbase_read_ts` (one-sided book → drop, #4) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; staged `dataset_id`/`build_id`/`venues`/`sources`; emit Coinbase-only plus matched Coinbase/Binance/combined manifest views; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection + feature-subset identity tests | Pre |
 | **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; explicit `coinbase_only` / `cross_venue` source modes; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: Coinbase-only opens no Binance inputs; no surviving row crosses a seam; the three cross-venue arms have identical row/split/label/cost hashes; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + mode/matched-arm + determinism tests | Pre (synthetic seams) |
-| **T10** `feat/producer-calibration` (Post) | Consume the reviewed pilot seam list; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; G0-CB then matched G0-XV artifacts. Freeze April 2026 before its one-time pilot OOS read. Formal G1 is a later full-data run with a separate holdout. **Acceptance: seam masking holds on the real stitch plan and pilot arms share row/split/label/cost hashes** | T9, pilot backfilled data + reviewed stitch plan | E0.3/E0.5 artifacts + G0-CB/G0-XV results | **Post** (pilot backfill unlock) |
+| **T10** `feat/producer-calibration` (Post) | Consume the reviewed pilot seam list; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; emit separate pre-April development and April holdout builds for G0-CB and matched G0-XV. Freeze all candidates before April access. #52, not the producer or three independent `run_from_manifest` calls, owns unified DSR/PBO selection, pre-April fit, and one-time holdout scoring. Formal G1 is a later full-data run with a separate holdout. **Acceptance: seam masking holds; pilot arms share row/split/label/cost hashes; development/holdout source hashes are disjoint and immutable** | T9, pilot backfilled data + reviewed stitch plan, #52 evaluator | E0.3/E0.5 artifacts + frozen G0 input builds; #52 emits G0 results | **Post** (pilot backfill + evaluator unlock) |
 
 ---
 

@@ -25,7 +25,7 @@
 
 **Hard stops:** Fail **G0-XV** → do not acquire the remaining Binance archive without a documented pivot. Fail **G1** → stop or pivot to maker-execution / different horizon (JEPA cannot manufacture signal). Fail **G3** → ship LightGBM; SSL-frozen-deep won't help. Fail **G5** → ship the simpler model; pretraining isn't the edge. A Coinbase-only **G0-CB** predictivity failure is not, by itself, a project hard stop because it does not test the Binance→Coinbase premise.
 
-**Cross-cutting discipline (applies to every phase from Phase 1 on):**
+**Cross-cutting discipline (applies to every modeling screen/gate from Phase 0S on):**
 - **Pre-register** labels, CV scheme, no-trade-band rule, and primary metric before touching the held-out OOS month. Every post-hoc tweak is a new "trial" and must enter the DSR trial count `N`. (LR §6)
 - **Every predictivity claim is reported as a LIFT over a persistence/identity baseline**, OOS, under purged+embargoed CPCV. (LR §1, §3)
 - **Stratify all results by spread/tick and volatility regime** — never report a single pooled number. (LR §4, LOBFrame)
@@ -43,19 +43,26 @@ the full Binance archive is not pulled before the primary premise has bounded OO
 1. **G0-CB (Coinbase-only):** build a Coinbase-only matrix and run the existing baseline ladder as a
    preliminary data/label/cost and lower-bound signal screen. Weak own-book predictivity alone does
    not falsify a leading Binance signal; a failure requires a recorded diagnosis and proceed/stop
-   decision.
+   decision. Selection/CPCV uses November-March only; issue #52 freezes the selected candidate,
+   fits pre-April rows, and scores April once through a fixed-holdout path. Passing April through the
+   existing all-row CPCV runner is forbidden.
 2. **Six-month acquisition:** bound Coinbase fills and Binance Stage-1/Stage-2 work to
    `2025-11-01` through `2026-04-30`. Development/CPCV ends `2026-03-31`; April 2026 is the pilot OOS
    month and is consumed after use.
 3. **G0-XV (matched cross-venue):** compare Coinbase-only, Binance-only, and combined feature
    manifests over identical rows, labels, costs, horizons, and splits. The full Binance pull is
    authorized only when a cross-venue arm clears the preregistered net/DSR/PBO block and combined
-   beats the matched Coinbase-only control beyond the preregistered bootstrap noise band.
+   beats the matched Coinbase-only control beyond the preregistered bootstrap noise band. The arms,
+   model configs, horizons, and pilot variants belong to one #52 candidate ledger and PBO study;
+   three independent manifest runs cannot authorize the archive.
 4. **Archive expansion:** after G0-XV passes, acquire/reconstruct the approved remaining span and
    freeze a separate coverage-selected holdout outside the pilot before formal G1 tuning.
 
 Every pilot-driven variation enters the later trial ledger. G0-XV is a spend gate, not formal G1 or
 final E2.3; six post-ETF months cannot establish the required pre/post-ETF result.
+Operational acquisition/schema/hash/coverage/reconstruction checks in April are allowed when they
+are outcome-blind and use already-frozen integrity thresholds; feature, label, cost, forecast, PnL,
+or model-result access consumes the holdout.
 
 ---
 

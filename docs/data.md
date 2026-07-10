@@ -33,7 +33,9 @@ Binding protocol:
 The data target is unchanged, but vendor spend is sequenced:
 
 1. Coinbase-only G0-CB uses the pilot window `2025-11-01` through `2026-04-30`.
-   Approve/download only the pilot-window subset of the reviewed CoinAPI manifest first.
+   Approve/download only the pilot-window subset of the reviewed CoinAPI manifest first. The
+   existing contiguous-range, book-only downloader cannot execute that sparse scope; #53 must add
+   the exact reviewed-manifest book/trade planner and executor before any pilot backfill.
 2. If the recorded G0-CB diagnosis authorizes the next spend, acquire the same six complete
    calendar months for Binance futures and spot.
 3. Reconstruct the pilot and run matched Coinbase-only, Binance-only, and combined G0-XV arms.
@@ -43,6 +45,10 @@ The data target is unchanged, but vendor spend is sequenced:
 G0-CB is a target-data/economics and lower-bound screen; weak Coinbase-own-book predictivity alone
 does not disprove a Binance-leading signal. G0-XV is a spend gate, not formal G1 or final E2.3.
 Pilot and full datasets have separate source manifests, build IDs, feature manifests, and holdouts.
+April integrity-only transfer/schema/footer/hash/row-count/coverage/reconstruction checks are allowed
+and logged; they do not consume the holdout. Access to April feature/label/cost/forecast/PnL/model
+results or outcome-driven manual analysis does consume it and is forbidden before the #52 candidate
+ledger and selection artifact are frozen.
 
 ---
 
