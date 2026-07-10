@@ -159,7 +159,8 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
     arm = dev_res["winner"]["arm"]
 
     scope = {"days": g0_world["holdout_days"], "venues": ["coinbase"],
-             "dataset_id": "synthetic-xv-pilot", "build_id": f"holdout-seeded-{arm}"}
+             "dataset_id": "synthetic-xv-pilot", "build_id": f"holdout-seeded-{arm}",
+             "excluded_days": {}}
     freeze_path = str(tmp_path / "freeze.json")
     assert rg.main(["freeze", "--dev-result", dev_out, "--contract", f["contract"],
                     "--ledger", xv_ledger,

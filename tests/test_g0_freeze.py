@@ -153,7 +153,8 @@ def test_freeze_recomputes_solo_gate_from_pinned_ledger():
                         "build_id": entry["identity"]["build_id"],
                         "net_pnl": row["net_pnl"]}
     scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
-             "dataset_id": "synthetic-xv-pilot", "build_id": "holdout-seeded-combined"}
+             "dataset_id": "synthetic-xv-pilot", "build_id": "holdout-seeded-combined",
+             "excluded_days": {}}
     # the pinned ledger verdict (registered at study time) refuses the forged pass
     with pytest.raises(ValueError, match="not a pass"):
         build_freeze_artifact(forged, contract=w["contract"], ledger=led,
@@ -204,7 +205,7 @@ def test_freeze_rejects_verdict_flip_when_pbo_failed_closed(g0_world, monkeypatc
                         "net_pnl": row["net_pnl"]}
     scope = {"days": list(g0_world["holdout_days"]), "venues": ["coinbase"],
              "dataset_id": "synthetic-xv-pilot",
-             "build_id": f"holdout-seeded-{row['arm']}"}
+             "build_id": f"holdout-seeded-{row['arm']}", "excluded_days": {}}
     with pytest.raises(ValueError, match="pinned ledger verdict .* not a pass"):
         build_freeze_artifact(forged, contract=g0_world["contract"], ledger=led,
                               trade_validation_thresholds={"min_rows": 10},
@@ -302,7 +303,8 @@ def test_freeze_with_append_only_ledger_across_studies(g0_world):
     assert len(verdicts_10s) == 2                     # stale + current pinned verdicts
     scope = {"days": list(g0_world["holdout_days"]), "venues": ["coinbase"],
              "dataset_id": "synthetic-xv-pilot",
-             "build_id": f"holdout-seeded-{res_b['winner']['arm']}"}
+             "build_id": f"holdout-seeded-{res_b['winner']['arm']}",
+             "excluded_days": {}}
     art = build_freeze_artifact(res_b, contract=g0_world["contract"], ledger=led_b,
                                 trade_validation_thresholds={"min_rows": 10},
                                 holdout_scope=scope,
@@ -335,6 +337,31 @@ def test_generic_or_out_of_window_day_selectors_rejected(g0_pipeline, days, matc
     scope = {**g0_pipeline["scope"], "days": days}
     with pytest.raises(ValueError, match=match):
         validate_holdout_scope(scope, g0_pipeline["world"]["contract"])
+
+
+def test_scope_must_cover_the_full_holdout_window(g0_pipeline):
+    """Codex PR#60 round-10 P1: the holdout cannot be silently shortened — every window
+    day is a scope day or an explicitly reasoned exclusion."""
+    contract = g0_pipeline["world"]["contract"]
+    full = g0_pipeline["scope"]["days"]
+    cherry = {**g0_pipeline["scope"], "days": ["2026-04-15"]}
+    with pytest.raises(ValueError, match="cannot be silently shortened"):
+        validate_holdout_scope(cherry, contract)
+    dropped = {**g0_pipeline["scope"], "days": full[:-1]}      # no exclusion recorded
+    with pytest.raises(ValueError, match="cannot be silently shortened"):
+        validate_holdout_scope(dropped, contract)
+    # an EXPLICITLY reasoned exclusion is the sanctioned way to shrink coverage
+    ok = {**g0_pipeline["scope"], "days": full[:-1],
+          "excluded_days": {full[-1]: "vendor coverage gap, certified unusable"}}
+    assert validate_holdout_scope(ok, contract)
+    overlap = {**g0_pipeline["scope"],
+               "excluded_days": {full[0]: "also a scope day"}}
+    with pytest.raises(ValueError, match="overlap"):
+        validate_holdout_scope(overlap, contract)
+    unreasoned = {**g0_pipeline["scope"], "days": full[:-1],
+                  "excluded_days": {full[-1]: ""}}
+    with pytest.raises(ValueError, match="non-empty reason"):
+        validate_holdout_scope(unreasoned, contract)
 
 
 def test_scope_venue_and_field_validation(g0_pipeline):

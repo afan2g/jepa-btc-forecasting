@@ -43,7 +43,8 @@ def g0_pipeline(g0_world):
     thresholds = {"min_rows_hard": 1000, "price_spike_warn": 0.5}
     scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
              "dataset_id": "synthetic-xv-pilot",
-             "build_id": f"holdout-seeded-{res_xv['winner']['arm']}"}
+             "build_id": f"holdout-seeded-{res_xv['winner']['arm']}",
+             "excluded_days": {}}
     freeze = build_freeze_artifact(res_xv, contract=w["contract"], ledger=led_xv,
                                    trade_validation_thresholds=thresholds,
                                    holdout_scope=scope,

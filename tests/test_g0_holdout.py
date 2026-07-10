@@ -334,7 +334,8 @@ def g0_multi_pipeline():
     assert res["g0xv_dev_pass"] and res["winner"], "multi-horizon fixture must pass"
     scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
              "dataset_id": "synthetic-xv-pilot",
-             "build_id": f"holdout-seeded-{res['winner']['arm']}"}
+             "build_id": f"holdout-seeded-{res['winner']['arm']}",
+             "excluded_days": {}}
     freeze = build_freeze_artifact(res, contract=w["contract"], ledger=led,
                                    trade_validation_thresholds={"min_rows": 10},
                                    holdout_scope=scope,

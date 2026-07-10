@@ -27,7 +27,7 @@ from eval.study import LGBM_RUNGS
 FREEZE_VERSION = 1
 _VOLATILE = ("sha256", "generated_at")   # excluded from the pinned content hash
 
-_SCOPE_FIELDS = ("days", "venues", "dataset_id", "build_id")
+_SCOPE_FIELDS = ("days", "venues", "dataset_id", "build_id", "excluded_days")
 
 
 def _canonical_day(token) -> str:
@@ -48,8 +48,12 @@ def _canonical_day(token) -> str:
 
 
 def validate_holdout_scope(scope: dict, contract: dict) -> dict:
-    """Exact-scope validation: explicit sorted unique days inside the contract's holdout
-    window, explicit venue keys, and the holdout dataset/build identity."""
+    """Exact-scope validation: explicit sorted unique days, explicit venue keys, the
+    holdout dataset/build identity, and FULL-WINDOW coverage — every day of the
+    contract's holdout window is either a scope day or an explicitly reasoned exclusion.
+    The protocol forbids silently shortening the holdout (staged protocol §3): a
+    cherry-picked subset such as ['2026-04-15'] must not become the 'exact' scope the
+    one-time transaction then enforces."""
     validate_partition_contract(contract)
     if not isinstance(scope, dict) or set(scope) != set(_SCOPE_FIELDS):
         raise ValueError(f"holdout scope must have exactly the fields {_SCOPE_FIELDS}")
@@ -67,6 +71,30 @@ def validate_holdout_scope(scope: dict, contract: dict) -> dict:
     if outside:
         raise ValueError(f"holdout scope days outside the contract holdout window "
                          f"[{lo}, {hi}): {outside}")
+    excl = scope["excluded_days"]
+    if (not isinstance(excl, dict)
+            or any(not isinstance(r, str) or not r for r in excl.values())):
+        raise ValueError("holdout scope excluded_days must map explicit days to "
+                         "non-empty reason strings (coverage gaps are explicit "
+                         "exclusions, never silent)")
+    excl_canon = [_canonical_day(d) for d in excl]
+    overlap = sorted(set(canon) & set(excl_canon))
+    if overlap:
+        raise ValueError(f"holdout scope days and excluded_days overlap: {overlap}")
+    window = []
+    d = lo
+    while d < hi:
+        window.append(d.isoformat())
+        d += dt.timedelta(days=1)
+    covered = sorted(set(canon) | set(excl_canon))
+    if covered != window:
+        missing = sorted(set(window) - set(covered))
+        extra = sorted(set(covered) - set(window))
+        raise ValueError(
+            f"holdout scope must cover EVERY day of the contract holdout window "
+            f"[{lo}, {hi}) — each day is a scope day or an explicitly reasoned "
+            f"exclusion; missing: {missing}, outside: {extra}. The holdout cannot be "
+            "silently shortened")
     venues = scope["venues"]
     if (not isinstance(venues, list) or not venues
             or any(not isinstance(v, str) or not v or "*" in v or "?" in v
@@ -299,7 +327,8 @@ def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedg
         "gate": dict(dev_result["gate"]),
         "trade_validation_thresholds": dict(trade_validation_thresholds),
         "holdout_scope": {**holdout_scope, "days": list(holdout_scope["days"]),
-                          "venues": list(holdout_scope["venues"])},
+                          "venues": list(holdout_scope["venues"]),
+                          "excluded_days": dict(holdout_scope["excluded_days"])},
         "holdout_window": {"holdout_start_ns": contract["holdout_start_ns"],
                            "holdout_end_ns": contract["holdout_end_ns"]},
         "sources": {
