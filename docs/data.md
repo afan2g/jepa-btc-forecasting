@@ -890,10 +890,53 @@ is pinned by sha256 in `meta.inputs`.
 
 It **fails closed** (`status=blocking`, exit 3): any missing/refused batch report, unmapped planned
 day, duplicate day across batches, unresolved `no_verdict` day, contradictory/unknown `coinapi_fill`,
-cross-batch meta drift, calendar drift, or unverifiable `fill_status` blocks a `ready` verdict.
+stale/conflicting/semantically-invalid resolution (below), cross-batch meta drift, calendar drift, or
+unverifiable `fill_status` blocks a `ready` verdict.
 `--report-only` downgrades the exit but keeps the honest status; an inspection run (`--report …`,
 no plan) is always `report_only` and can never be `ready`. A degraded day that maps to a valid fill
-is a normal fill, not a blocker.
+is a normal fill, not a blocker. The terminal blocker summary prints up to 8 entries per blocker
+category and explicitly counts the remainder (`... +N more (M total)`) — it never truncates silently.
+
+**Targeted resolutions (`--resolutions`, 2026-07-10).** Unresolved `no_verdict` days (the runner's
+deliberate "no validated policy covers this `inconclusive` shape" outcome — e.g. `seed_rejected:*`,
+`no_seed_snapshots`, `lake_load_failed:*`) are cleared WITHOUT rerunning a completed batch and
+WITHOUT hand-editing generated JSON, via a hand-authored, versioned decisions file passed as
+`--resolutions <path>` in readiness mode. Each entry supersedes exactly one original per-day result
+with one of two actions:
+
+* `rerun` — points at a **targeted rerun report** (`run_coinbase_quality_map.py --days <day>
+  --out-dir <fresh dir>`, never a batch dir). The rerun report must pass the same bars as a batch
+  report (quota completion proof, summary cross-checks, right market, calendar agreement) **plus**
+  pinned-run-parameter identity with the batch reports (`exchange/symbol/thresholds/grid_ms/k/
+  engine/policy` — no threshold drift) and must not carry unclaimed days (every day in the report
+  needs its own entry — no silent cherry-picking). The rerun's day record then replaces the
+  original everywhere (classification, fill decision, sections, cost). A rerun that is *still*
+  `no_verdict` applies but does not resolve — the day stays a blocker with the new evidence.
+* `policy` — an **explicit human decision** for an irrecoverable day. Decisions are deliberately
+  conservative-only: `coinapi_fill_full_day` (synthesized whole-day CoinAPI stitch plan, costed
+  like any full-day fill; the day's `inconclusive` classification is preserved) or `exclude`
+  (drops the day from fill/cost scope with the recorded reason — including the calendar-gap cost
+  baseline and the calendar fill-availability checks, the same "exclusion wins" rule calendar
+  exclusions get). There is **no accept-as-usable decision** — a usable verdict requires data
+  evidence via a `rerun`.
+
+Fail-closed rules: only a currently-unresolved (`needs_fill=null` + `why=no_verdict`) day may be
+superseded; every entry must pin the original `expect: {classification, reasons}` verbatim (a
+regenerated report that no longer matches makes the decision **stale** and blocks); duplicate
+entries for a day conflict and neither applies; unknown days, a missing rerun report file, a rerun
+report failing its report-level bars (including re-presenting a plan-registered **batch** report
+as a "rerun"), and corrupt rerun day records all block with a `resolution_issues` verdict, while a
+structurally malformed resolutions file or rerun report is a plain exit-2 input error (`--out`
+untouched). Every entry carries `reason` + `decided_utc` (+ optional `decided_by`); the manifest
+pins the resolutions file and every rerun report by sha256 in `meta.inputs.resolutions` (entries
+for days outside the manifest universe keep their audit trail there, under `unattached`) and
+stamps each affected day's `resolution` block, so the superseding decision is fully auditable
+from the manifest alone. Author `expect` pins mechanically from the generated report, e.g.:
+
+```bash
+jq '.days[] | select(.day=="2025-09-20") | {classification, reasons}' \
+  data/reports/coinbase_quality_map_batches/batch_001/coinbase_quality_map.json
+```
 
 **This tool does NOT unlock or run the backfill.** The §5a gate stays enforced in
 `ingest/download_coinapi.py` / `ingest/_common.py`; a multi-day pull still needs `--allow-backfill`

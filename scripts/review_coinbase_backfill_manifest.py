@@ -17,9 +17,21 @@ Two mutually-exclusive modes:
   * readiness  (--plan-manifest): the gate; can reach status=ready. Fail-closed by default.
   * inspection (--report ...):     eyeball one or more reports; status is always report_only.
 
+Readiness mode optionally takes --resolutions: a hand-authored, versioned decisions file whose
+entries supersede ORIGINAL unresolved (needs_fill=null / why=no_verdict) days — either with a
+TARGETED rerun report (run_coinbase_quality_map.py --days <day> --out-dir <fresh dir>) or an
+EXPLICIT policy decision (conservative outcomes only: coinapi_fill_full_day / exclude). No batch
+rerun, no hand-editing of generated JSON. Fail-closed: only currently-unresolved days may be
+superseded, every entry pins the original (classification, reasons) it resolves (stale pins
+block), rerun reports must match the batch reports' pinned run parameters and claim every day
+they carry, and any entry that conflicts with the loaded reports is a blocking resolution_issues
+verdict (a structurally malformed resolutions file or rerun report is an exit-2 input error
+instead, --out untouched).
+
 Usage:
   .venv/bin/python scripts/review_coinbase_backfill_manifest.py \
-      --plan-manifest data/tmp/coinbase_quality_map_batches/manifest.json
+      --plan-manifest data/tmp/coinbase_quality_map_batches/manifest.json \
+      [--resolutions data/reports/backfill/coinbase_backfill_resolutions.json]
   .venv/bin/python scripts/review_coinbase_backfill_manifest.py --report data/reports/…/…json
 """
 from __future__ import annotations
@@ -77,8 +89,8 @@ BLOCKING_EXIT = 3                   # fail-closed blocking verdict
 REPORT_NAME = "coinbase_quality_map.json"
 DEFAULT_OUT = "data/reports/backfill/coinbase_backfill_manifest.json"
 BLOCKER_KEYS = ("structural", "missing_keys", "coverage_gaps", "inconsistencies",
-                "unresolved_days", "batch_incomplete", "book_fill_unavailable",
-                "trade_fill_unavailable", "calendar_drift")
+                "resolution_issues", "unresolved_days", "batch_incomplete",
+                "book_fill_unavailable", "trade_fill_unavailable", "calendar_drift")
 # Run parameters pinned across batch reports: differing sampling (grid_ms/k) or reconstruction
 # (engine/policy) produce incompatible quality verdicts, so a ready manifest must not combine them.
 _META_PIN_FIELDS = ("exchange", "symbol", "thresholds", "grid_ms", "k", "engine", "policy")
@@ -87,6 +99,15 @@ _META_PIN_FIELDS = ("exchange", "symbol", "thresholds", "grid_ms", "k", "engine"
 # even if all batches are consistently the wrong market.
 EXPECTED_EXCHANGE = "COINBASE"
 EXPECTED_SYMBOL = "BTC-USD"
+
+# ----------------------------------------------------------- targeted resolutions
+RESOLUTIONS_VERSION = 1
+RESOLUTION_ACTIONS = ("rerun", "policy")
+# Deliberately NO accept-as-usable decision: a policy override can only route a day to a
+# CONSERVATIVE outcome (pay for a whole-day CoinAPI fill, or drop the day from scope) — a usable
+# verdict needs data evidence, which can only arrive via a targeted rerun report.
+POLICY_DECISIONS = ("coinapi_fill_full_day", "exclude")
+POLICY_WHY = "policy_decision"
 
 
 class ReviewInputError(ValueError):
@@ -633,7 +654,7 @@ def build_day_record(day: str, report_rec: dict | None, cal: dict) -> dict:
 
     return {"day": day, "classification": classification, "sources": sources,
             "calendar": cctx, "book_fill": book, "trade_fill": trade,
-            "excluded": excluded, "unresolved": unresolved, "notes": []}
+            "excluded": excluded, "unresolved": unresolved, "resolution": None, "notes": []}
 
 
 # ----------------------------------------------------------- blockers container
@@ -922,12 +943,15 @@ def check_calendar_drift(reports: list, cal: dict, blockers: dict) -> None:
                     blockers["calendar_drift"].append(f"{d}:{field}")
 
 
-def check_fill_availability(cal: dict, blockers: dict) -> None:
-    """Every calendar book-gap / trade-fill day must be verifiably fillable (fill_status)."""
-    for d in sorted(book_gap_days(cal)):
+def check_fill_availability(cal: dict, blockers: dict, skip=frozenset()) -> None:
+    """Every calendar book-gap / trade-fill day must be verifiably fillable (fill_status). `skip`
+    holds applied policy-EXCLUDED days: exclusion wins over fill routing (the same rule calendar
+    exclusions already get), so an explicitly excluded day must not keep blocking on an unfillable
+    probe — otherwise `exclude` could never resolve the irrecoverable-day class it exists for."""
+    for d in sorted(book_gap_days(cal) - skip):
         if not is_fillable(cal, d, "book"):
             blockers["book_fill_unavailable"].append(d)
-    for d in sorted(trade_fill_days(cal)):
+    for d in sorted(trade_fill_days(cal) - skip):
         if not is_fillable(cal, d, "trades"):
             blockers["trade_fill_unavailable"].append(d)
 
@@ -966,6 +990,246 @@ def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -
             blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
 
 
+# ----------------------------------------------------------- targeted resolutions
+def load_resolutions(path: str) -> dict:
+    """Load + structurally validate the hand-authored resolutions file. Structural problems are
+    user-actionable input errors (exit 2, --out untouched); semantic conflicts with the loaded
+    reports (stale pins, unknown/duplicate days, rerun reports failing the gate checks) are
+    BLOCKING verdicts recorded by apply_resolutions instead, so an auditable manifest is still
+    written."""
+    obj = load_json_object(path, what="resolutions file")
+    if obj.get("resolutions_version") != RESOLUTIONS_VERSION:
+        raise ReviewInputError(f"resolutions file {path}: unsupported resolutions_version "
+                               f"{obj.get('resolutions_version')!r} (expected "
+                               f"{RESOLUTIONS_VERSION})")
+    entries = obj.get("resolutions")
+    if not isinstance(entries, list):
+        raise ReviewInputError(f"resolutions file {path}: 'resolutions' must be a list")
+    for i, e in enumerate(entries):
+        where = f"resolutions file {path}: entry [{i}]"
+        if not isinstance(e, dict):
+            raise ReviewInputError(f"{where} must be an object")
+        day = e.get("day")
+        try:
+            dt.date.fromisoformat(day)
+        except (TypeError, ValueError):
+            raise ReviewInputError(f"{where}: 'day' must be YYYY-MM-DD, got {day!r}") from None
+        action = e.get("action")
+        if action not in RESOLUTION_ACTIONS:
+            raise ReviewInputError(f"{where} ({day}): unknown action {action!r} "
+                                   f"(expected one of {RESOLUTION_ACTIONS})")
+        exp = e.get("expect")
+        if (not isinstance(exp, dict) or not isinstance(exp.get("classification"), str)
+                or not isinstance(exp.get("reasons"), list)):
+            raise ReviewInputError(f"{where} ({day}): 'expect' must pin the original record as "
+                                   "{'classification': str, 'reasons': [...]}")
+        for k in ("reason", "decided_utc"):
+            v = e.get(k)
+            if not isinstance(v, str) or not v.strip():
+                raise ReviewInputError(f"{where} ({day}): '{k}' must be a non-empty string")
+        if action == "rerun" and not isinstance(e.get("report"), str):
+            raise ReviewInputError(f"{where} ({day}): a rerun entry needs a 'report' path")
+        if action == "policy" and e.get("decision") not in POLICY_DECISIONS:
+            raise ReviewInputError(f"{where} ({day}): unknown policy decision "
+                                   f"{e.get('decision')!r} (expected one of {POLICY_DECISIONS})")
+    return obj
+
+
+def _reference_meta_pin(reports: list):
+    """The first batch report's pinned run parameters — the compatibility reference a targeted
+    rerun must match (the same _META_PIN_FIELDS check_report_consistency pins across batches)."""
+    for r in reports:
+        meta = _as_dict(r["report"].get("meta"))
+        return {f: meta.get(f) for f in _META_PIN_FIELDS}
+    return None
+
+
+def _load_rerun_report(path: str) -> dict:
+    """Load a resolution rerun report with the same shape strictness as load_batch_reports: a
+    present-but-malformed report is a structural input error (exit 2), never a crash downstream."""
+    report = load_json_object(path, what="resolution rerun report")
+    days = report.get("days")
+    if days is not None and not isinstance(days, list):
+        raise ReviewInputError(f"{path}: report 'days' must be a list of objects")
+    for rec in days or []:
+        if not isinstance(rec, dict):
+            raise ReviewInputError(f"{path}: report 'days' must contain objects, got "
+                                   f"{type(rec).__name__}")
+        if not isinstance(rec.get("day"), str):
+            raise ReviewInputError(f"{path}: report day must be a string, got "
+                                   f"{type(rec.get('day')).__name__}")
+    return report
+
+
+def check_rerun_report(report: dict, claimed: set, ref_pin, cal: dict) -> list:
+    """Report-level checks a targeted rerun must pass before ANY of its day records may supersede
+    an original: the same bars a batch report faces (missing keys, ran-to-completion quota proof,
+    summary count cross-check, right market, pinned-parameter identity with the batch reports,
+    calendar agreement) PLUS the resolution coverage contract — every day the report carries must
+    be explicitly claimed by an entry (no silent cherry-picking) and appear exactly once."""
+    issues = [f"missing {k}" for k in report_missing_keys(report)]
+    issues += _batch_ran(report)
+    issues += summary_count_issues(report)
+    meta = _as_dict(report.get("meta"))
+    if meta.get("exchange") != EXPECTED_EXCHANGE or meta.get("symbol") != EXPECTED_SYMBOL:
+        issues.append(f"wrong_market:{meta.get('exchange')}/{meta.get('symbol')} "
+                      f"(expected {EXPECTED_EXCHANGE}/{EXPECTED_SYMBOL})")
+    for f in _META_PIN_FIELDS:
+        if meta.get(f) is None:
+            issues.append(f"missing_meta:{f}")
+    if ref_pin is not None:
+        pin = {f: meta.get(f) for f in _META_PIN_FIELDS}
+        for key in _META_PIN_FIELDS:
+            if pin[key] != ref_pin[key]:
+                issues.append(f"meta_drift:{key}:{ref_pin[key]!r}!={pin[key]!r}")
+    seen = set()
+    for d in (rec.get("day") for rec in report.get("days") or []):
+        if d in seen:
+            issues.append(f"rerun_day_duplicated:{d}")
+        seen.add(d)
+    for d in sorted(seen - claimed):
+        issues.append(f"unclaimed_day:{d}")
+    drift = new_blockers()
+    check_calendar_drift([{"report": report}], cal, drift)
+    issues += [f"calendar_drift:{x}" for x in drift["calendar_drift"]]
+    return issues
+
+
+def _is_unresolved(rec: dict) -> bool:
+    cf = _as_dict(_as_dict(rec).get("coinapi_fill"))
+    return cf.get("needs_fill") is None and cf.get("why") == "no_verdict"
+
+
+def apply_resolutions(resolutions: dict, reports: list, day_index: dict, cal: dict,
+                      blockers: dict) -> dict:
+    """Validate the resolutions against the loaded batch reports and apply valid rerun entries to
+    `day_index` IN PLACE (the superseding record then flows through every downstream check,
+    section, and cost row exactly like a batch record; policy decisions are applied later, on the
+    BUILT day record). Returns {day: resolution block} for the manifest days. Fail-closed: an
+    entry with ANY issue does not apply and records a resolution_issues blocker; an applied rerun
+    that still reaches no verdict does not `resolve` (the day stays an unresolved_days blocker)."""
+    entries = resolutions.get("resolutions") or []
+    issues = blockers["resolution_issues"]
+    out: dict = {}
+
+    counts: dict = {}
+    for e in entries:
+        counts[e["day"]] = counts.get(e["day"], 0) + 1
+    dupes = {d for d, n in counts.items() if n > 1}
+    for d in sorted(dupes):
+        # two decisions for one day CONFLICT — there is no fail-closed winner, so neither applies
+        issues.append(f"duplicate_entry:{d}")
+        out[d] = {"action": None, "decision": None, "reason": None, "decided_by": None,
+                  "decided_utc": None, "expect": None, "report": None,
+                  "applied": False, "resolved": False, "issues": [f"duplicate_entry:{d}"]}
+
+    # load every referenced rerun report once; a report with ANY issue disqualifies every entry
+    # that points at it (its records were produced under conditions this gate can't accept)
+    claims: dict = {}
+    for e in entries:
+        if e["action"] == "rerun":
+            claims.setdefault(e["report"], set()).add(e["day"])
+    ref_pin = _reference_meta_pin(reports)
+    batch_paths = {os.path.realpath(r["path"]) for r in reports}
+    batch_shas = {sha256_file(r["path"]) for r in reports}
+    rerun_reports: dict = {}
+    for path in sorted(claims):
+        if not os.path.exists(path):
+            continue   # recorded per-entry below (rerun_report_missing)
+        if os.path.realpath(path) in batch_paths or sha256_file(path) in batch_shas:
+            # a plan-registered batch report is the ORIGINAL evidence, not a targeted rerun —
+            # accepting it would stamp applied-rerun provenance without any new data
+            issues.append(f"{path}: rerun_is_batch_report")
+            rerun_reports[path] = {"report": None, "ok": False}
+            continue
+        report = _load_rerun_report(path)
+        rep_issues = check_rerun_report(report, claims[path], ref_pin, cal)
+        issues.extend(f"{path}: {msg}" for msg in rep_issues)
+        rerun_reports[path] = {"report": report, "ok": not rep_issues}
+
+    for e in sorted((e for e in entries if e["day"] not in dupes), key=lambda x: x["day"]):
+        d = e["day"]
+        block = {"action": e["action"], "decision": e.get("decision"), "reason": e["reason"],
+                 "decided_by": e.get("decided_by"), "decided_utc": e["decided_utc"],
+                 "expect": e["expect"], "report": None,
+                 "applied": False, "resolved": False, "issues": []}
+        ent: list = []
+        orig = day_index.get(d)
+        if orig is None:
+            ent.append(f"unknown_day:{d}")
+        else:
+            if not _is_unresolved(orig):
+                # only an UNRESOLVED day may be superseded: a day with a deterministic verdict
+                # (usable / fill / excluded) must never be rewritten by an override
+                ent.append(f"target_not_unresolved:{d}")
+            exp = e["expect"]
+            if exp.get("classification") != orig.get("classification"):
+                ent.append(f"stale_expect:{d}:classification:pinned="
+                           f"{exp.get('classification')!r}:actual="
+                           f"{orig.get('classification')!r}")
+            if exp.get("reasons") != (orig.get("reasons") or []):
+                ent.append(f"stale_expect:{d}:reasons:pinned={exp.get('reasons')!r}:actual="
+                           f"{orig.get('reasons')!r}")
+        rec = None
+        if e["action"] == "rerun":
+            rr = rerun_reports.get(e["report"])
+            if rr is None:
+                ent.append(f"rerun_report_missing:{d}:{e['report']}")
+            elif not rr["ok"]:
+                ent.append(f"rerun_report_invalid:{d}:{e['report']}")
+            else:
+                recs = [r for r in rr["report"].get("days") or [] if r.get("day") == d]
+                if not recs:
+                    ent.append(f"rerun_day_absent:{d}:{e['report']}")
+                else:
+                    # the superseding record passes the SAME per-day validation as batch days
+                    rec = recs[0]
+                    ent.extend(f"rerun:{d}:{issue}" for issue in day_record_issues(rec))
+        if ent:
+            issues.extend(ent)
+            block["issues"] = ent
+            out[d] = block
+            continue
+        block["applied"] = True
+        if e["action"] == "rerun":
+            block["report"] = {"path": e["report"], "sha256": sha256_file(e["report"])}
+            day_index[d] = rec
+            block["resolved"] = not _is_unresolved(rec)
+        else:
+            block["resolved"] = True
+            if e["decision"] == "coinapi_fill_full_day":
+                # positive-unavailability evidence bar, deliberately STRICTER than
+                # check_report_fill_availability: only its measured not-ok calendar branch, no
+                # local-parquet escape — a policy fill is a fresh human spend decision, not
+                # data-in-hand evidence. A mere absence of evidence still must not block
+                # (pre-spend approval would be circular).
+                fs = _fill_status(cal, d)
+                if (isinstance(fs, dict) and fs.get("book") is not None
+                        and not is_fillable(cal, d, "book")):
+                    blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
+        out[d] = block
+    return out
+
+
+def _apply_policy_decision(rec: dict, block: dict, cal: dict) -> None:
+    """Apply an APPLIED policy decision to the BUILT day record. The report record (and its
+    inconclusive classification) is preserved verbatim — the decision routes the day's OUTCOME:
+    a conservative whole-day CoinAPI fill, or an explicit exclusion. Both clear `unresolved`."""
+    d = rec["day"]
+    if block["decision"] == "coinapi_fill_full_day":
+        gb, basis = day_book_gb(cal, d)
+        segs, seams_, policy = _synth_full_day_plan(d, POLICY_WHY)
+        rec["book_fill"].update(
+            needed=True, source="policy", kind="full_day", why=POLICY_WHY,
+            fill_profile=FULL_DAY_FILL, full_day_reason=POLICY_WHY,
+            fill_segments=segs, seams=seams_, seam_policy=policy,
+            gb=gb, gb_basis=basis, usd=book_usd(gb))
+    else:   # "exclude" — exclusion wins over every fill category (mirrors is_excluded)
+        rec["excluded"] = {"reason": f"policy_decision:{block['reason']}"}
+        rec["book_fill"], rec["trade_fill"] = _empty_book_fill(), _empty_trade_fill()
+    rec["unresolved"] = None
+
+
 # ----------------------------------------------------------- sections + cost summary + assembly
 def _sections(days: list) -> dict:
     sec = {"full_day_book_fills": [], "partial_day_book_fills": [], "trade_fills": [],
@@ -991,7 +1255,7 @@ def _sections(days: list) -> dict:
     return {k: sorted(v) for k, v in sec.items()}
 
 
-def _cost_summary(days: list, cal: dict) -> dict:
+def _cost_summary(days: list, cal: dict, policy_excluded=frozenset()) -> dict:
     book_m = book_e = trades_m = trades_e = 0.0
     full_n = partial_n = trade_n = 0
     for r in days:
@@ -1015,8 +1279,12 @@ def _cost_summary(days: list, cal: dict) -> dict:
     # calendar-gap baseline over calendar book-gap + trade-fill days — use the SAME
     # measured-or-estimated helpers as the fill rows, so a malformed/negative mb (measured_mb None)
     # falls back to the conservative estimate rather than being zeroed (understating the baseline).
-    base_book_gb = sum(day_book_gb(cal, d)[0] for d in sorted(book_gap_days(cal)))
-    base_trade_gb = sum(day_trades_gb(cal, d)[0] for d in sorted(trade_fill_days(cal)))
+    # Applied policy-EXCLUDED days leave the baseline too (exclusion wins over fill routing), else
+    # a ready manifest would price a day in its baseline that its own sections exclude.
+    base_book_gb = sum(day_book_gb(cal, d)[0]
+                       for d in sorted(book_gap_days(cal) - policy_excluded))
+    base_trade_gb = sum(day_trades_gb(cal, d)[0]
+                        for d in sorted(trade_fill_days(cal) - policy_excluded))
     baseline = round(book_usd(base_book_gb) + trades_usd(base_trade_gb), 4)
     low = round(book_usd(book_m) + trades_usd(trades_m), 4)   # measured-only
     return {
@@ -1088,7 +1356,8 @@ def _batch_report_input(r: dict, out_dir) -> dict:
             "n_days": len(r["report"].get("days") or [])}
 
 
-def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only) -> dict:
+def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only,
+                             resolutions_path=None) -> dict:
     plan = load_json_object(plan_path, what="plan manifest")
     resolved_cal = cal_path or (plan.get("meta") or {}).get("input_calendar")
     if not resolved_cal:
@@ -1100,23 +1369,63 @@ def build_manifest_readiness(plan_path, cal_path, *, generated_utc, report_only)
     missing = missing_batch_reports(plan)
 
     blockers = new_blockers()
+    resolutions = applied = None
+    if resolutions_path:
+        # load + apply BEFORE the checks: a valid rerun replaces its day_index record, so the
+        # completeness reciprocals and fill-availability checks judge the SUPERSEDING record
+        resolutions = load_resolutions(resolutions_path)
+        applied = apply_resolutions(resolutions, reports, day_index, cal, blockers)
     check_completeness(plan, reports, day_index, cal, blockers, missing)
     check_report_consistency(reports, blockers)
+    if applied:
+        # a valid resolution with a verdict clears its unresolved_days blocker; an unapplied or
+        # still-no-verdict resolution leaves the day blocking (unresolved preservation)
+        resolved = {d for d, b in applied.items() if b["applied"] and b["resolved"]}
+        blockers["unresolved_days"] = sorted(set(blockers["unresolved_days"]) - resolved)
+    # exclusion wins over fill routing for applied policy-exclude days too: they leave the
+    # calendar-derived fill-availability day-sets and the calendar-gap cost baseline
+    policy_excluded = {d for d, b in (applied or {}).items()
+                       if b["applied"] and b["action"] == "policy"
+                       and b["decision"] == "exclude"}
     check_calendar_drift(reports, cal, blockers)
-    check_fill_availability(cal, blockers)
+    check_fill_availability(cal, blockers, skip=policy_excluded)
     check_report_fill_availability(day_index, cal, blockers)
 
-    days = [build_day_record(d, day_index.get(d), cal) for d in _universe(reports, cal)]
-    sections, cost = _sections(days), _cost_summary(days, cal)
+    days = []
+    for d in _universe(reports, cal):
+        rec = build_day_record(d, day_index.get(d), cal)
+        block = (applied or {}).get(d)
+        if block is not None:
+            rec["resolution"] = block
+            if block["applied"] and block["action"] == "policy":
+                _apply_policy_decision(rec, block, cal)
+        days.append(rec)
+    sections = _sections(days)
+    cost = _cost_summary(days, cal, policy_excluded=policy_excluded)
 
     blocking = any_blockers(blockers)
     status = "blocking" if blocking else "ready"
     out_dir = (plan.get("meta") or {}).get("out_dir")
+    res_input = None
+    if resolutions_path:
+        rerun_paths = sorted({e["report"] for e in resolutions.get("resolutions") or []
+                              if e.get("action") == "rerun"})
+        # an entry whose day is outside the manifest universe has no day record to carry its
+        # resolution block — keep its audit trail here instead of dropping it
+        attached = {rec["day"] for rec in days}
+        res_input = {"path": resolutions_path, "sha256": sha256_file(resolutions_path),
+                     "n_entries": len(resolutions.get("resolutions") or []),
+                     "rerun_reports": [{"path": p,
+                                        "sha256": sha256_file(p) if os.path.exists(p) else None}
+                                       for p in rerun_paths],
+                     "unattached": {d: b for d, b in sorted((applied or {}).items())
+                                    if d not in attached}}
     inputs = {
         "plan_manifest": {"path": plan_path, "sha256": sha256_file(plan_path)},
         "usable_calendar": {"path": resolved_cal, "sha256": sha256_file(resolved_cal),
                             "anchor_end": cal.get("anchor_end")},
         "batch_reports": [_batch_report_input(r, out_dir) for r in reports],
+        "resolutions": res_input,
         "n_batches": len(reports),
         "plan_generated_utc": (plan.get("meta") or {}).get("generated_utc"),
     }
@@ -1192,11 +1501,21 @@ def print_summary(manifest: dict) -> None:
           f"${c['credit_usd']:.0f} credit); band ${c['band']['low_usd']:.2f}"
           f"–${c['band']['high_usd']:.2f}; calendar-gap baseline "
           f"${c['calendar_gap_baseline_usd']:.2f}")
+    res_in = (meta.get("inputs") or {}).get("resolutions")
+    if res_in:
+        blocks = [r["resolution"] for r in manifest["days"] if r.get("resolution")]
+        n_applied = sum(1 for b in blocks if b.get("applied"))
+        n_resolved = sum(1 for b in blocks if b.get("resolved"))
+        print(f"  resolutions: {res_in['n_entries']} entries, {n_applied} applied, "
+              f"{n_resolved} resolved")
     if meta["status"] == "blocking":
         print("  BLOCKERS:")
         for k in BLOCKER_KEYS:
-            for item in manifest["blockers"][k][:8]:
+            items = manifest["blockers"][k]
+            for item in items[:8]:
                 print(f"    - {k}: {item}")
+            if len(items) > 8:   # never truncate silently — count what was omitted
+                print(f"    - {k}: ... +{len(items) - 8} more ({len(items)} total)")
     print("  NOTE: review only — does NOT unlock or run the backfill (§5a gate stays enforced "
           "in ingest/download_coinapi.py). A multi-day pull needs --allow-backfill + CoinAPI "
           "Spend Management (docs/data.md §8).")
@@ -1218,9 +1537,16 @@ def parse_args(argv=None):
     ap.add_argument("--report-only", action="store_true",
                     help="readiness mode: downgrade a blocking verdict to exit 0 (keeps honest "
                          "status + blockers)")
+    ap.add_argument("--resolutions", default=None,
+                    help="readiness mode: hand-authored per-day resolutions JSON — targeted rerun "
+                         "reports or explicit policy decisions that supersede original unresolved "
+                         "(no_verdict) days; fail-closed, provenance pinned in meta.inputs")
     ap.add_argument("--generated-utc", default=None,
                     help="override the manifest timestamp (for deterministic tests)")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.report and args.resolutions:
+        ap.error("--resolutions applies to readiness mode (--plan-manifest) only")
+    return args
 
 
 def main(argv=None) -> int:
@@ -1230,7 +1556,8 @@ def main(argv=None) -> int:
         if args.plan_manifest:
             manifest = build_manifest_readiness(args.plan_manifest, args.usable_calendar,
                                                 generated_utc=generated,
-                                                report_only=args.report_only)
+                                                report_only=args.report_only,
+                                                resolutions_path=args.resolutions)
         else:
             manifest = build_manifest_inspection(args.report, args.usable_calendar,
                                                  generated_utc=generated)

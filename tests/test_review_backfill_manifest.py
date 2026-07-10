@@ -1528,3 +1528,532 @@ def test_cli_deterministic_bytes(tmp_path):
     rv.main(["--plan-manifest", plan_path, "--out", str(out2),
              "--generated-utc", "2026-07-03T00:00:00Z"])
     assert out1.read_bytes() == out2.read_bytes()
+
+
+# =========================================================================== Task 12: resolutions
+# Targeted per-day resolutions (docs/data.md §5a-QualityMap "Reviewed backfill manifest"):
+# a hand-authored decisions file lets a TARGETED rerun report or an EXPLICIT policy decision
+# supersede an original unresolved (no_verdict) day — without rerunning a whole batch and without
+# hand-editing generated JSON. Fail-closed: only currently-unresolved days may be superseded, every
+# entry pins the original (classification, reasons) it resolves, and any invalid entry blocks.
+_SR_REASONS = ["seed_rejected:crossed", "crossed_rate_after=0.0845"]
+
+
+def _reports_with_unresolved(reasons=None):
+    """The _clean_reports() tree with 2025-01-01 unresolved (inconclusive / no_verdict)."""
+    return [_report([
+        _day("2025-01-01", "inconclusive", _fill_block(None, "no_verdict"),
+             reasons=list(reasons) if reasons is not None else list(_SR_REASONS)),
+        _day("2025-01-02", "lake_present_degraded",
+             _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                         full_day_reason="quality_over_usable_bar",
+                         fill_segments=[_full_day_seg("2025-01-02")],
+                         seams=[], seam_policy={"seam_guard_s": 60.0}),
+             fillable=True),
+        _day("2025-01-11", "lake_usable", _fill_block(False, "lake_usable"),
+             calendar=_TRADE_ONLY_CTX),
+    ])]
+
+
+def _entry(day, *, action, expect_classification="inconclusive", expect_reasons=_SR_REASONS,
+           report=None, decision=None, reason="targeted follow-up", decided_by="tester",
+           decided_utc="2026-07-10T00:00:00Z"):
+    e = {"day": day, "action": action,
+         "expect": {"classification": expect_classification, "reasons": list(expect_reasons)},
+         "reason": reason, "decided_by": decided_by, "decided_utc": decided_utc}
+    if report is not None:
+        e["report"] = report
+    if decision is not None:
+        e["decision"] = decision
+    return e
+
+
+def _resolutions_file(tmp_path, entries, *, version=1, name="resolutions.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps({"resolutions_version": version, "resolutions": entries}))
+    return str(path)
+
+
+def _write_rerun_report(tmp_path, days, *, subdir="rerun_001", **meta_overrides):
+    rdir = tmp_path / subdir
+    rdir.mkdir(parents=True, exist_ok=True)
+    path = rdir / "coinbase_quality_map.json"
+    path.write_text(json.dumps(_report(days, **meta_overrides)))
+    return str(path)
+
+
+def _build(plan_path, cal_path, res_path):
+    return rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                       report_only=False, resolutions_path=res_path)
+
+
+def _day_rec(m, day):
+    return next(r for r in m["days"] if r["day"] == day)
+
+
+def test_resolution_rerun_supersedes_unresolved_day(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["blockers"]["unresolved_days"] == []
+    assert m["meta"]["status"] == "ready" and m["meta"]["scope_complete"] is True
+    rec = _day_rec(m, "2025-01-01")
+    assert rec["classification"] == "lake_usable"   # the rerun record supersedes the original
+    assert rec["unresolved"] is None
+    assert rec["resolution"]["action"] == "rerun"
+    assert rec["resolution"]["applied"] is True and rec["resolution"]["resolved"] is True
+    assert rec["resolution"]["report"]["path"] == rerun
+    assert len(rec["resolution"]["report"]["sha256"]) == 64
+    assert "2025-01-01" in m["sections"]["lake_usable_days"]
+    assert "2025-01-01" not in m["sections"]["unresolved_days"]
+    # provenance: the resolutions file and every rerun report are pinned in meta.inputs
+    ri = m["meta"]["inputs"]["resolutions"]
+    assert ri["path"] == res and len(ri["sha256"]) == 64 and ri["n_entries"] == 1
+    assert ri["rerun_reports"] == [{"path": rerun, "sha256": rv.sha256_file(rerun)}]
+
+
+def test_resolution_policy_fill_supersedes_unresolved_day(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="policy",
+                                              decision="coinapi_fill_full_day")])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["blockers"]["unresolved_days"] == []
+    assert m["meta"]["status"] == "ready"
+    rec = _day_rec(m, "2025-01-01")
+    assert rec["classification"] == "inconclusive"   # the Lake verdict is preserved as-is
+    assert rec["unresolved"] is None
+    bf = rec["book_fill"]
+    assert bf["needed"] is True and bf["kind"] == "full_day" and bf["source"] == "policy"
+    assert bf["fill_profile"] == "full_day_fill"
+    o, e = _day_bounds("2025-01-01")
+    assert [s["source"] for s in bf["fill_segments"]] == ["coinapi"]
+    assert bf["fill_segments"][0]["start_ts"] == o and bf["fill_segments"][-1]["end_ts"] == e
+    assert bf["gb"] == rv.EST_BOOK_GB_PER_DAY and bf["gb_basis"] == "estimated"
+    assert "2025-01-01" in m["sections"]["full_day_book_fills"]
+    # 2025-01-02 (report) + 2025-01-10 (calendar gap) + the policy fill
+    assert m["cost_summary"]["full_book_fill_days"] == 3
+    assert rec["resolution"]["decision"] == "coinapi_fill_full_day"
+    assert rec["resolution"]["applied"] is True and rec["resolution"]["resolved"] is True
+
+
+def test_resolution_policy_exclude_supersedes_unresolved_day(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="policy", decision="exclude",
+                                              reason="unrecoverable: no seed source")])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["blockers"]["unresolved_days"] == []
+    assert m["meta"]["status"] == "ready"
+    rec = _day_rec(m, "2025-01-01")
+    assert rec["unresolved"] is None
+    assert rec["excluded"] == {"reason": "policy_decision:unrecoverable: no seed source"}
+    assert rec["book_fill"]["needed"] is False and rec["trade_fill"]["needed"] is False
+    assert "2025-01-01" in m["sections"]["excluded_days"]
+
+
+def test_resolution_stale_expect_blocks(tmp_path):
+    # the entry pins the original (classification, reasons); a regenerated batch report that no
+    # longer matches makes the decision STALE — it must not apply. Both pins are checked.
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="policy",
+                                              decision="coinapi_fill_full_day",
+                                              expect_reasons=["no_seed_snapshots"])])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any(x.startswith("stale_expect:2025-01-01:reasons:")
+               for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]   # NOT resolved
+    rec = _day_rec(m, "2025-01-01")
+    assert rec["unresolved"] is not None and rec["book_fill"]["needed"] is False
+    assert rec["resolution"]["applied"] is False and rec["resolution"]["issues"]
+    # the classification pin is enforced independently of the reasons pin
+    res2 = _resolutions_file(tmp_path, [_entry("2025-01-01", action="policy",
+                                               decision="coinapi_fill_full_day",
+                                               expect_classification="lake_usable")],
+                             name="resolutions2.json")
+    m2 = _build(plan_path, cal_path, res2)
+    assert m2["meta"]["status"] == "blocking"
+    assert any(x.startswith("stale_expect:2025-01-01:classification:")
+               for x in m2["blockers"]["resolution_issues"])
+    assert m2["blockers"]["unresolved_days"] == ["2025-01-01"]
+
+
+def test_resolution_conflicting_duplicate_entries_block(tmp_path):
+    # two decisions for the same day conflict — NEITHER applies (fail-closed)
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    res = _resolutions_file(tmp_path, [
+        _entry("2025-01-01", action="policy", decision="coinapi_fill_full_day"),
+        _entry("2025-01-01", action="policy", decision="exclude")])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("duplicate_entry:2025-01-01" in x for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]
+    rec = _day_rec(m, "2025-01-01")
+    assert rec["unresolved"] is not None
+    assert rec["book_fill"]["needed"] is False and rec["excluded"] is None
+    assert rec["resolution"]["applied"] is False
+
+
+def test_resolution_target_with_verdict_blocks(tmp_path):
+    # 2025-01-02 already carries a deterministic fill verdict — an override must not touch it
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    res = _resolutions_file(tmp_path, [_entry("2025-01-02", action="policy", decision="exclude",
+                                              expect_classification="lake_present_degraded",
+                                              expect_reasons=[])])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("target_not_unresolved:2025-01-02" in x
+               for x in m["blockers"]["resolution_issues"])
+    rec = _day_rec(m, "2025-01-02")
+    assert rec["book_fill"]["needed"] is True and rec["excluded"] is None   # verdict preserved
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]   # real unresolved day untouched
+
+
+def test_resolution_unknown_day_blocks(tmp_path):
+    # a resolution for a day no batch report maps cannot invent coverage (plan-driven scope)
+    plan_path, cal_path = _write_tree(tmp_path)   # clean tree: no unresolved days at all
+    res = _resolutions_file(tmp_path, [_entry("2025-03-03", action="policy", decision="exclude")])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("unknown_day:2025-03-03" in x for x in m["blockers"]["resolution_issues"])
+    # the entry's day is outside the manifest universe (no invented day record), so its audit
+    # trail must survive under meta.inputs.resolutions instead of vanishing
+    assert all(rec["day"] != "2025-03-03" for rec in m["days"])
+    unattached = m["meta"]["inputs"]["resolutions"]["unattached"]
+    assert unattached["2025-03-03"]["applied"] is False
+    assert unattached["2025-03-03"]["issues"] == ["unknown_day:2025-03-03"]
+
+
+def test_resolution_policy_exclude_wins_over_calendar_trade_fill(tmp_path):
+    # exclude must behave like a calendar exclusion ("exclusion wins over fill routing"): the
+    # excluded day leaves the fill-availability day-set AND the calendar-gap cost baseline —
+    # otherwise excluding an irrecoverable trade-gap day whose probe is not-ok can NEVER unblock
+    # the gate, and a ready manifest ships a baseline that still prices the excluded day.
+    reports = [_report([
+        _day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable")),
+        _day("2025-01-02", "lake_present_degraded",
+             _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                         full_day_reason="quality_over_usable_bar",
+                         fill_segments=[_full_day_seg("2025-01-02")],
+                         seams=[], seam_policy={"seam_guard_s": 60.0}),
+             fillable=True),
+        _day("2025-01-11", "inconclusive", _fill_block(None, "no_verdict"),
+             calendar=_TRADE_ONLY_CTX, reasons=list(_SR_REASONS)),
+    ])]
+    cal = _calendar()
+    cal["fill_status"]["2025-01-11"]["trades"]["ok"] = False   # probe not-ok: unfillable trades
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal, reports=reports)
+    # without a resolution: the unresolved day AND its unfillable trade fill both block
+    m0 = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                     report_only=False)
+    assert m0["blockers"]["trade_fill_unavailable"] == ["2025-01-11"]
+    res = _resolutions_file(tmp_path, [_entry("2025-01-11", action="policy", decision="exclude",
+                                              reason="irrecoverable")])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["blockers"]["trade_fill_unavailable"] == []   # exclusion wins
+    assert m["blockers"]["unresolved_days"] == []
+    assert m["meta"]["status"] == "ready"
+    assert "2025-01-11" not in m["sections"]["trade_fills"]
+    # baseline covers 2025-01-10 only: 1.0 GB book ($1.00) + 0.03 GB trades ($0.09) — the
+    # excluded day's $0.06 trade cost must NOT remain in the baseline
+    assert m["cost_summary"]["calendar_gap_baseline_usd"] == 1.09
+
+
+def test_resolution_rerun_report_cannot_be_a_batch_report(tmp_path):
+    # ORIGINAL batch evidence must not be re-presented as a "targeted rerun": that would stamp
+    # applied-rerun provenance without any new data having been produced
+    reports = [_report([_day("2025-01-01", "inconclusive", _fill_block(None, "no_verdict"),
+                             reasons=list(_SR_REASONS))]),
+               _report([
+                   _day("2025-01-02", "lake_present_degraded",
+                        _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                                    full_day_reason="quality_over_usable_bar",
+                                    fill_segments=[_full_day_seg("2025-01-02")],
+                                    seams=[], seam_policy={"seam_guard_s": 60.0}),
+                        fillable=True),
+                   _day("2025-01-11", "lake_usable", _fill_block(False, "lake_usable"),
+                        calendar=_TRADE_ONLY_CTX)])]
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    batch1 = rv.load_json_object(plan_path, what="p")["batches"][0]["report_dir"]
+    res = _resolutions_file(tmp_path, [_entry(
+        "2025-01-01", action="rerun",
+        report=os.path.join(batch1, "coinbase_quality_map.json"))])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("rerun_is_batch_report" in x for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]   # not applied
+    assert _day_rec(m, "2025-01-01")["resolution"]["applied"] is False
+
+
+def test_resolution_policy_fill_blocks_when_calendar_book_not_ok(tmp_path):
+    # a policy fill faces the same positive-unavailability evidence bar as report-driven fills:
+    # a MEASURED present-but-not-ok calendar book status must block the spend
+    cal = _calendar()
+    cal["fill_status"]["2025-01-01"] = {"book": {"present": True, "mb": 900.0, "ok": False},
+                                        "trades": None, "error": False, "reason": "", "ok": True}
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal, reports=_reports_with_unresolved())
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="policy",
+                                              decision="coinapi_fill_full_day")])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert m["blockers"]["book_fill_unavailable"] == ["2025-01-01:calendar_book_not_ok"]
+    assert m["blockers"]["resolution_issues"] == []   # the decision itself is valid
+    assert m["blockers"]["unresolved_days"] == []     # ...and applied
+    assert _day_rec(m, "2025-01-01")["resolution"]["applied"] is True
+
+
+def test_resolution_rerun_fill_judged_by_availability_checks(tmp_path):
+    # pins the apply-BEFORE-checks ordering: check_report_fill_availability must judge the
+    # SUPERSEDING rerun record — a rerun-introduced fill on a day whose calendar book status is
+    # measured present-but-not-ok blocks, which can only happen if the rerun record replaced the
+    # original in day_index before the availability checks ran
+    cal = _calendar()
+    cal["fill_status"]["2025-01-01"] = {"book": {"present": True, "mb": 900.0, "ok": False},
+                                        "trades": None, "error": False, "reason": "", "ok": True}
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_present_degraded",
+                        _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                                    full_day_reason="quality_over_usable_bar",
+                                    fill_segments=[_full_day_seg("2025-01-01")],
+                                    seams=[], seam_policy={"seam_guard_s": 60.0}))])
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["blockers"]["unresolved_days"] == []
+    assert m["meta"]["status"] == "blocking"
+    assert m["blockers"]["book_fill_unavailable"] == ["2025-01-01:calendar_book_not_ok"]
+    rec = _day_rec(m, "2025-01-01")
+    assert rec["resolution"]["applied"] is True and rec["resolution"]["resolved"] is True
+
+
+def test_resolution_one_rerun_report_resolves_two_days(tmp_path):
+    # the intended production shape: one targeted rerun report covering several unresolved days,
+    # each claimed by its own entry
+    reports = [_report([
+        _day("2025-01-01", "inconclusive", _fill_block(None, "no_verdict"),
+             reasons=list(_SR_REASONS)),
+        _day("2025-01-02", "lake_present_degraded",
+             _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                         full_day_reason="quality_over_usable_bar",
+                         fill_segments=[_full_day_seg("2025-01-02")],
+                         seams=[], seam_policy={"seam_guard_s": 60.0}),
+             fillable=True),
+        _day("2025-01-11", "inconclusive", _fill_block(None, "no_verdict"),
+             calendar=_TRADE_ONLY_CTX, reasons=["no_seed_snapshots"]),
+    ])]
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable")),
+                   _day("2025-01-11", "lake_usable", _fill_block(False, "lake_usable"),
+                        calendar=_TRADE_ONLY_CTX)])
+    res = _resolutions_file(tmp_path, [
+        _entry("2025-01-01", action="rerun", report=rerun),
+        _entry("2025-01-11", action="rerun", report=rerun,
+               expect_reasons=["no_seed_snapshots"])])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["blockers"]["unresolved_days"] == []
+    assert m["meta"]["status"] == "ready"
+    for d in ("2025-01-01", "2025-01-11"):
+        assert _day_rec(m, d)["resolution"]["applied"] is True
+    assert len(m["meta"]["inputs"]["resolutions"]["rerun_reports"]) == 1
+
+
+def test_cli_report_only_with_resolutions_keeps_honest_status(tmp_path, capsys):
+    # --report-only still downgrades the exit while resolution_issues keep the status honest;
+    # the terminal summary reports the entry/applied/resolved accounting
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])
+    res = _resolutions_file(tmp_path, [
+        _entry("2025-01-01", action="rerun", report=rerun),
+        _entry("2025-01-02", action="policy", decision="exclude",
+               expect_classification="lake_present_degraded", expect_reasons=[])])
+    out = tmp_path / "m.json"
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(out), "--resolutions", res,
+                  "--report-only", "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == 0
+    m = json.loads(out.read_text())
+    assert m["meta"]["status"] == "blocking"   # target_not_unresolved:2025-01-02
+    assert "resolutions: 2 entries, 1 applied, 1 resolved" in capsys.readouterr().out
+
+
+def test_resolution_rerun_still_no_verdict_is_preserved(tmp_path):
+    # a truthful rerun that STILL reaches no verdict is not an error — but the day must remain an
+    # unresolved blocker (never silently cleared), now carrying the rerun's evidence
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "inconclusive", _fill_block(None, "no_verdict"),
+                        reasons=["seed_rejected:crossed", "crossed_rate_after=0.5000"])])
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["meta"]["status"] == "blocking"
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]
+    rec = _day_rec(m, "2025-01-01")
+    assert rec["resolution"]["applied"] is True and rec["resolution"]["resolved"] is False
+    assert rec["unresolved"]["reasons"] == ["seed_rejected:crossed", "crossed_rate_after=0.5000"]
+
+
+def test_resolution_rerun_meta_drift_blocks(tmp_path):
+    # a rerun under different pinned run parameters (here: thresholds) is not comparable evidence
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))],
+        thresholds={"crossed_usable_max": 0.5, "missing_usable_max": 0.02,
+                    "thin_usable_max": 0.1, "seed_crossed_frac_max": 0.05})
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("meta_drift:thresholds" in x for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]   # not applied
+    assert _day_rec(m, "2025-01-01")["classification"] == "inconclusive"
+
+
+def test_resolution_rerun_unclaimed_day_blocks(tmp_path):
+    # every day a rerun report covers must be explicitly claimed — no silent cherry-picking
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable")),
+                   _day("2025-01-02", "lake_usable", _fill_block(False, "lake_usable"))])
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("unclaimed_day:2025-01-02" in x for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]   # not applied
+
+
+def test_resolution_rerun_duplicate_day_in_report_blocks(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    dup = _day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))
+    rerun = _write_rerun_report(tmp_path, [dup, dict(dup)])
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("rerun_day_duplicated:2025-01-01" in x
+               for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]   # not applied
+
+
+def test_resolution_rerun_report_missing_blocks(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun",
+                                              report=str(tmp_path / "nope.json"))])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("rerun_report_missing" in x for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]
+
+
+def test_resolution_rerun_corrupt_record_blocks(tmp_path):
+    # the superseding record passes the SAME per-day validation as batch report days
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_present_degraded",
+                        _fill_block(True, "quality_over_usable_bar"))])   # fill without a plan
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("needs_fill_without_plan" in x for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01"]   # not applied
+    assert _day_rec(m, "2025-01-01")["classification"] == "inconclusive"
+
+
+def test_resolutions_file_structural_errors_exit_2(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    bad_files = [
+        {"resolutions_version": 99, "resolutions": []},                        # unknown version
+        {"resolutions_version": 1, "resolutions": {}},                         # not a list
+        {"resolutions_version": 1,
+         "resolutions": [_entry("2025-01-01", action="frobnicate")]},          # unknown action
+        {"resolutions_version": 1,
+         "resolutions": [_entry("2025-01-01", action="policy", decision="accept_as_usable")]},
+        {"resolutions_version": 1,
+         "resolutions": [_entry("2025-01-01", action="rerun")]},               # rerun w/o report
+        {"resolutions_version": 1,
+         "resolutions": [{k: v for k, v in
+                          _entry("2025-01-01", action="policy", decision="exclude").items()
+                          if k != "expect"}]},                                 # missing expect pin
+    ]
+    for i, obj in enumerate(bad_files):
+        p = tmp_path / f"res_{i}.json"
+        p.write_text(json.dumps(obj))
+        with pytest.raises(rv.ReviewInputError):
+            _build(plan_path, cal_path, str(p))
+    # via the CLI: exit 2 and a pre-existing --out is never truncated
+    out = tmp_path / "m.json"
+    out.write_text('{"prior": "good manifest"}')
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(out),
+                  "--resolutions", str(tmp_path / "res_0.json"),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.INPUT_ERROR_EXIT
+    assert json.loads(out.read_text()) == {"prior": "good manifest"}
+
+
+def test_manifest_without_resolutions_has_null_provenance(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path)
+    m = rv.build_manifest_readiness(plan_path, cal_path, generated_utc="2026-07-03T00:00:00Z",
+                                    report_only=False)
+    assert m["meta"]["inputs"]["resolutions"] is None
+    assert all(rec["resolution"] is None for rec in m["days"])
+
+
+def test_cli_resolutions_end_to_end_ready(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    out = tmp_path / "m.json"
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(out), "--resolutions", res,
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == 0
+    m = json.loads(out.read_text())
+    assert m["meta"]["status"] == "ready"
+    assert m["meta"]["inputs"]["resolutions"]["path"] == res
+
+
+def test_cli_resolutions_rejected_in_inspection_mode(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path)
+    rpath = os.path.join(rv.load_json_object(plan_path, what="p")["batches"][0]["report_dir"],
+                         "coinbase_quality_map.json")
+    res = _resolutions_file(tmp_path, [])
+    with pytest.raises(SystemExit):
+        rv.main(["--report", rpath, "--usable-calendar", cal_path,
+                 "--out", str(tmp_path / "m.json"), "--resolutions", res])
+
+
+def test_cli_deterministic_bytes_with_resolutions(tmp_path):
+    plan_path, cal_path = _write_tree(tmp_path, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable"))])
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    out1, out2 = tmp_path / "a.json", tmp_path / "b.json"
+    for out in (out1, out2):
+        rv.main(["--plan-manifest", plan_path, "--out", str(out), "--resolutions", res,
+                 "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert out1.read_bytes() == out2.read_bytes()
+
+
+def test_blocker_summary_truncation_is_explicit(tmp_path, capsys):
+    # >8 blockers of one kind: the terminal summary must COUNT the omitted entries, not silently
+    # print only the first eight (the 2026-07-09 production run hid the 9th unresolved day)
+    days10 = [f"2025-02-{i:02d}" for i in range(1, 11)]
+    cal = _calendar(lake_all_days=list(days10), usable_days=list(days10), coinbase_fill_days={},
+                    excluded_days_by_reason={}, fill_status={})
+    reports = [_report([_day(d, "inconclusive", _fill_block(None, "no_verdict"),
+                             reasons=["seed_rejected:crossed"]) for d in days10])]
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal, reports=reports)
+    rc = rv.main(["--plan-manifest", plan_path, "--out", str(tmp_path / "m.json"),
+                  "--generated-utc", "2026-07-03T00:00:00Z"])
+    assert rc == rv.BLOCKING_EXIT
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.strip().startswith("- unresolved_days:")]
+    assert len(lines) == 9   # 8 entries + 1 explicit remainder line
+    assert "2025-02-08" in out
+    assert "+2 more (10 total)" in out
