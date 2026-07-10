@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/request_codex_deep_review.sh <pr-number-or-url> [focus]
 
-Posts a detailed @codex request for a longer PR review.
+Posts a detailed @codex review request for a longer PR review.
 
 Examples:
   scripts/request_codex_deep_review.sh 2
@@ -27,7 +27,9 @@ pr="$1"
 focus="${2:-}"
 
 body=$(cat <<'EOF'
-@codex Please do a deep review of this PR, in the style of a senior engineering design/code review.
+@codex review
+
+Please do a deep review of this PR, in the style of a senior engineering design/code review.
 
 Use AGENTS.md, especially the Review Guidelines and Deep Review Guidelines.
 
