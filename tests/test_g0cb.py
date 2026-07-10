@@ -75,6 +75,16 @@ def test_g0cb_venue_role_gate_fails_closed(g0_world):
         v.pop("role", None)               # omitted roles: fail closed, not fail open
     with pytest.raises(ValueError, match="role 'target' explicitly"):
         g0cb_manifest_prechecks(man, g0_world["contract"])
+    # ... and the single target must be the protocol's Coinbase BTC-USD, exactly once
+    man = copy.deepcopy(g0_world["dev"]["arms"]["coinbase_only"]["manifest"])
+    man["venues"][0]["symbol"] = "ETH-USD"
+    with pytest.raises(ValueError, match="exactly one target venue COINBASE/BTC-USD"):
+        g0cb_manifest_prechecks(man, g0_world["contract"])
+    man = copy.deepcopy(g0_world["dev"]["arms"]["coinbase_only"]["manifest"])
+    man["venues"] = man["venues"] + [{"exchange": "KRAKEN", "symbol": "BTC-USD",
+                                      "role": "target"}]
+    with pytest.raises(ValueError, match="exactly one target venue"):
+        g0cb_manifest_prechecks(man, g0_world["contract"])
 
 
 def test_g0cb_rejects_april_rows_before_fit(g0_world):

@@ -133,6 +133,29 @@ def test_required_arms_and_unique_names(g0_world):
                              ledger=TrialLedger())
 
 
+def test_target_venue_is_pinned_and_arms_are_disjoint(g0_world):
+    """Deep-review round-14: every arm labels/trades the protocol's Coinbase BTC-USD
+    target (no substituted or extra targets), and the control/Binance feature sets must
+    be disjoint — a control feature inside 'binance_only' would let target-book signal
+    drive the Binance-only ablation."""
+    def wrong_target(arms):
+        for v in arms["binance_only"]["manifest"]["venues"]:
+            if v.get("role") == "target":
+                v["symbol"] = "ETH-USD"
+    with pytest.raises(ValueError, match="exactly one target venue COINBASE/BTC-USD"):
+        run_g0xv_development(_arms(g0_world, wrong_target), g0_world["contract"],
+                             gate=XV_GATE, ledger=TrialLedger())
+
+    def leak_control_feature(arms):
+        arms["binance_only"]["manifest"]["feature_cols"] = (
+            arms["binance_only"]["manifest"]["feature_cols"] + ["cb_ofi"])
+        arms["binance_only"]["matrix"]["cb_ofi"] = \
+            g0_world["dev"]["arms"]["combined"]["matrix"]["cb_ofi"].to_numpy()
+    with pytest.raises(ValueError, match="must be .*disjoint"):
+        run_g0xv_development(_arms(g0_world, leak_control_feature), g0_world["contract"],
+                             gate=XV_GATE, ledger=TrialLedger())
+
+
 def test_combined_arm_must_union_component_features(g0_world):
     """Deep-review P2: an arm merely NAMED 'combined' but carrying only the Binance
     features cannot serve as the combined-vs-control authorization arm — its feature set

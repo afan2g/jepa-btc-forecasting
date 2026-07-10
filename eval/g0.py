@@ -266,14 +266,34 @@ def _candidate_row(cand: dict, dsr: float, solo: bool) -> dict:
 
 
 # ------------------------------------------------------------------------------- G0-CB
+# The protocol's one trading venue (spec §2): every G0 build labels and trades Coinbase
+# BTC-USD. A manifest declaring any other (or an extra) target venue is a different
+# experiment and fails closed.
+TARGET_EXCHANGE = "COINBASE"
+TARGET_SYMBOL = "BTC-USD"
+
+
+def _require_expected_target(manifest: dict, context: str) -> None:
+    """Exactly ONE target venue, and it must be the protocol's Coinbase BTC-USD — a
+    manifest that marks another venue (or several) as 'target' would invalidate the
+    Coinbase-only screen and the combined-vs-control comparison."""
+    targets = [v for v in manifest["venues"] if v.get("role") == "target"]
+    if (len(targets) != 1 or targets[0].get("exchange") != TARGET_EXCHANGE
+            or targets[0].get("symbol") != TARGET_SYMBOL):
+        raise ValueError(f"{context} must declare exactly one target venue "
+                         f"{TARGET_EXCHANGE}/{TARGET_SYMBOL}, got: {targets}")
+
+
 def _require_target_only_venues(manifest: dict, context: str) -> None:
     """Fail CLOSED on venue roles: `role` is optional in the manifest schema, so an
     omitted or mislabeled role must not slip a signal venue past a target-venue-only
-    path — every venue must declare role == 'target' explicitly."""
+    path — every venue must declare role == 'target' explicitly, and the single target
+    must be the protocol's Coinbase BTC-USD."""
     non_target = [v for v in manifest["venues"] if v.get("role") != "target"]
     if non_target:
         raise ValueError(f"{context} is target-venue-only; every venue must declare "
                          f"role 'target' explicitly, got: {non_target}")
+    _require_expected_target(manifest, context)
 
 
 def g0cb_manifest_prechecks(manifest: dict, contract: dict) -> None:
@@ -466,6 +486,8 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
                 raise ValueError(f"G0-XV arm {a['name']!r} declares no signal venue; "
                                  "cross-venue arms must declare their signal venue "
                                  "explicitly")
+            # Cross-venue arms still label/trade the SAME protocol target venue.
+            _require_expected_target(a["manifest"], f"G0-XV arm {a['name']!r}")
 
     ledger = ledger if ledger is not None else TrialLedger()
     # n_imported counts the TRIAL entries carried in from the supplied prior histories
@@ -488,6 +510,14 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
     # an arm merely NAMED 'combined' but carrying only one side would make the
     # combined-vs-control authorization test meaningless.
     by_arm = {p["arm"]: p for p in preps}
+    # The ablation arms must be genuinely disjoint: a control (target-book) feature
+    # inside the Binance-only arm would let the "Binance-only" solo gate be driven by
+    # Coinbase features, hollowing out the required three-way comparison.
+    overlap = set(by_arm[control_arm]["feature_cols"]) \
+        & set(by_arm[BINANCE_ARM]["feature_cols"])
+    if overlap:
+        raise ValueError(f"the {control_arm!r} and {BINANCE_ARM!r} feature sets must be "
+                         f"disjoint; shared features: {sorted(overlap)}")
     union = set(by_arm[control_arm]["feature_cols"]) | set(by_arm[BINANCE_ARM]["feature_cols"])
     combined_feats = set(by_arm[combined_arm]["feature_cols"])
     if combined_feats != union:
