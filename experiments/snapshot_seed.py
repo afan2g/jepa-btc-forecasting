@@ -719,8 +719,14 @@ def load_lake_cached_day(cache_root, *, table: str, exchange: str, symbol: str,
             continue
         if needle in url:
             body = meta_path.parent / "output.pkl"
-            if body.exists():
-                hits.append((url, body))
+            if not body.exists():
+                # fail closed: proceeding on the remaining shards would silently
+                # replay a PARTIAL Lake day and corrupt parity while reporting fine
+                raise FileNotFoundError(
+                    f"cached lakeapi shard has metadata but no body: {url} "
+                    f"(expected {body}) — interrupted/evicted cache; refusing a "
+                    "partial-day load")
+            hits.append((url, body))
     if not hits:
         raise FileNotFoundError(
             f"no cached lakeapi body for {table} {exchange} {symbol} dt={day} under "

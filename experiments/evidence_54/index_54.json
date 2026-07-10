@@ -1,7 +1,9 @@
 {
   "issue": 54,
   "generated_utc": "2026-07-10",
-  "harness_commit": "35948bd5ac837b2e536f353cf506bdbd50e705eb+evidence-refresh",
+  "reports_generated_at_commit": "c39fb3c1444cb4ac19f613ccf76e88893ee1db5f",
+  "evidence_rebuilt_at_commit": "a915325070805dc400552b1f6948d75ec2287277",
+  "provenance_note": "reports_generated_at_commit = the harness code that produced the pinned day reports (git rev-parse-able); evidence_rebuilt_at_commit = the tree whose arm_summary_rows rebuilt the CSVs from those reports. The CSV/index refresh changed no replay output.",
   "note": "Tracked audit bundle for the #54 NO-GO decision: per-arm metric CSVs and the #33-manifest reconciliation carry every decision-bearing number quoted in docs/data.md, issue #54, and PR #63. Full day-report JSONs stay git-ignored under data/reports/snapshot_seed/ (aggregate metrics only, <1 MB each) and are pinned here by sha256 + their internal report_hash; inputs pinned by the CoinAPI parquet sha256 and Lake cache file URLs.",
   "tracked_files": {
     "reconciliation_54.json": "ef329146102b47b095f75b96b30efc8f6374c82bdbef28d2d3c8b6d29cd5e1da",

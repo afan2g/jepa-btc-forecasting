@@ -776,6 +776,38 @@ class TestLoadLakeCachedDay:
             load_lake_cached_day(tmp_path, table="book_delta_v2", exchange="COINBASE",
                                  symbol="BTC-USD", day="2025-06-01")
 
+    def test_matched_shard_with_missing_body_fails_instead_of_partial_load(self, tmp_path):
+        # A matched metadata.json whose output.pkl is missing (interrupted/evicted
+        # cache) must FAIL the load — silently proceeding on the remaining shards
+        # would replay a partial Lake day and corrupt parity while reporting normally.
+        import json
+        from experiments.snapshot_seed import load_lake_cached_day
+        base = ("https://data.crypto-lake.com/market-data/cryptofeed/book_delta_v2/"
+                "exchange=COINBASE/symbol=BTC-USD/dt=2025-06-01/")
+        df = pd.DataFrame({"timestamp": [1], "sequence_number": [1],
+                           "side_is_bid": [True], "price": [1.0], "size": [1.0]})
+        self._make_cache(tmp_path, base + "1.snappy.parquet", df)
+        # second shard: metadata only, body missing
+        import hashlib as _h
+        d = (tmp_path / "joblib" / "lakeapi" / "main" / "_download_one" /
+             _h.md5((base + "2.snappy.parquet").encode()).hexdigest())
+        d.mkdir(parents=True)
+        (d / "metadata.json").write_text(
+            json.dumps({"input_args": {"url": f"'{base}2.snappy.parquet'"}}))
+        with pytest.raises(FileNotFoundError, match="2.snappy.parquet"):
+            load_lake_cached_day(tmp_path, table="book_delta_v2", exchange="COINBASE",
+                                 symbol="BTC-USD", day="2025-06-01")
+
+    def test_evidence_index_commits_are_resolvable_shas(self):
+        import json
+        import pathlib
+        import re
+        idx = json.loads((pathlib.Path(__file__).parent.parent / "experiments" /
+                          "evidence_54" / "index_54.json").read_text())
+        # provenance fields must be bare 40-hex SHAs a reviewer can `git rev-parse`
+        for field in ("reports_generated_at_commit", "evidence_rebuilt_at_commit"):
+            assert re.fullmatch(r"[0-9a-f]{40}", idx[field]), field
+
 
 # ------------------------------------------------------------------- day orchestration
 class TestRunExperimentDay:
