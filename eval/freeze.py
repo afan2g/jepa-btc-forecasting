@@ -86,6 +86,38 @@ def _validate_thresholds(thresholds: dict) -> dict:
     return thresholds
 
 
+def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
+    """Reconcile the claimed winner against the evidence it must have come from: a
+    PASSING horizon's solo-passing cross-venue candidate whose reported row AND pinned
+    ledger trial identity match every winner field. An edited/mis-assembled dev result
+    (same ledger hash, different winner fields) cannot freeze a non-passing config,
+    substituted feature list, or control-arm candidate."""
+    winner = dev_result["winner"]
+    h = dev_result["horizons"].get(winner["horizon"])
+    if not h or not h.get("pass"):
+        raise ValueError(f"frozen winner names horizon {winner['horizon']!r}, which is "
+                         "not a passing horizon of the dev result")
+    cid = winner["identity_sha256"]
+    if cid not in h.get("solo_pass_cross_venue", []):
+        raise ValueError("frozen winner is not a solo-passing cross-venue candidate of "
+                         "its horizon")
+    row = h["candidates"].get(cid)
+    if (not row or row["arm"] != winner["arm"] or row["config"] != winner["config"]
+            or row["variant"] != winner["variant"]):
+        raise ValueError("frozen winner fields do not match its reported candidate row")
+    entry = next((e for e in ledger.entries() if e["identity_sha256"] == cid), None)
+    if entry is None:
+        raise ValueError("frozen winner identity is not in the pinned trial ledger")
+    ident = entry["identity"]
+    same = (ident["protocol"] == "g0xv"
+            and all(ident[k] == winner[k]
+                    for k in ("arm", "config", "horizon", "variant",
+                              "dataset_id", "build_id", "feature_cols")))
+    if not same:
+        raise ValueError("frozen winner fields do not match its ledger trial identity; "
+                         "refusing to freeze an edited selection")
+
+
 def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedger,
                           trade_validation_thresholds: dict, holdout_scope: dict,
                           generated_at: str) -> dict:
@@ -110,6 +142,7 @@ def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedg
         raise ValueError("ledger has changed since the development study ran (its hash "
                          "no longer matches the dev result); re-run development so every "
                          "trial is inside the frozen history")
+    _verify_winner(dev_result, ledger)
     validate_holdout_scope(holdout_scope, contract)
     _validate_thresholds(trade_validation_thresholds)
 

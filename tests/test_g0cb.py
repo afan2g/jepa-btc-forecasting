@@ -147,6 +147,19 @@ def test_g0cb_leaky_feature_name_fails_closed(g0_world):
         run_g0cb_study(mat, man, w["contract"], gate=GATE)
 
 
+def test_g0_rejects_understated_declared_lookback(g0_world):
+    """Codex PR#60 P1 regression pin: a build whose ACTUAL look-back exceeds the
+    manifest's declared max_lookback_ns (and therefore the embargo sized to it) must
+    fail closed BEFORE any candidate is evaluated — the under-embargoed CPCV would
+    otherwise leak feature windows into test spans. Enforced by validate_frame inside
+    _prepare_development_input on every G0 input path."""
+    cb = g0_world["dev"]["arms"]["coinbase_only"]
+    bad = cb["matrix"].copy()
+    bad["t_feature_start"] = bad["t_event"] - 5 * (bad["t_event"] - bad["t_feature_start"])
+    with pytest.raises(ValueError, match="observed look-back .* exceeds declared"):
+        run_g0cb_study(bad, cb["manifest"], g0_world["contract"], gate=GATE)
+
+
 def test_g0cb_rejects_unknown_gate_keys(g0_world):
     cb = g0_world["dev"]["arms"]["coinbase_only"]
     with pytest.raises(ValueError, match="unknown gate keys"):

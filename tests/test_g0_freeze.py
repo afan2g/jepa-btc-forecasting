@@ -70,6 +70,51 @@ def test_freeze_rejects_substituted_contract(g0_pipeline):
         _build(g0_pipeline, contract=other)
 
 
+def test_freeze_reconciles_winner_against_evidence_and_ledger(g0_pipeline):
+    """Codex PR#60 P2: an edited dev result retaining the ledger hash must not freeze a
+    winner that is not a passing cross-venue candidate — winner fields reconcile against
+    the horizon pass evidence, the reported candidate row, AND the ledger identity."""
+    base = g0_pipeline["res_xv"]
+
+    edited = copy.deepcopy(base)
+    edited["winner"]["config"] = "ridge"              # non-gate config, same identity
+    with pytest.raises(ValueError, match="candidate row"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope=g0_pipeline["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+    edited = copy.deepcopy(base)
+    ctrl_naive = next(cid for cid, row in base["horizons"]["10s"]["candidates"].items()
+                      if row["arm"] == "coinbase_only" and row["config"] == "naive")
+    edited["winner"]["identity_sha256"] = ctrl_naive  # control-arm candidate
+    with pytest.raises(ValueError, match="solo-passing cross-venue"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope=g0_pipeline["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+    edited = copy.deepcopy(base)
+    edited["winner"]["feature_cols"] = edited["winner"]["feature_cols"][:1]  # substituted
+    with pytest.raises(ValueError, match="ledger trial identity"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope=g0_pipeline["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+    edited = copy.deepcopy(base)
+    edited["winner"]["horizon"] = "60s"               # horizon not in the result
+    with pytest.raises(ValueError, match="not a passing horizon"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope=g0_pipeline["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+
 def test_freeze_rejects_ledger_drift(g0_pipeline):
     drifted = TrialLedger()
     drifted.import_history(g0_pipeline["led_xv"])
