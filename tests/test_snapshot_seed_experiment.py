@@ -938,6 +938,29 @@ class TestRunExperimentDay:
             meta = arm["meta"]
             assert "crossed_sample_ts" not in meta
             assert len(meta.get("reseed_ts", [])) <= 100
+            # candidate ledgers are unbounded on real days (86,400 stream entries);
+            # the shipped meta caps them while keeping exact counts and the
+            # full-ledger hash (full_meta_hash)
+            led = meta["candidates"]
+            assert len(led["accepted"]) <= 50 and len(led["rejected"]) <= 50
+            assert led["n_total"] >= led["n_accepted"] >= 0
+            assert meta["full_meta_hash"]
+
+    def test_slim_meta_caps_oversized_candidate_ledgers(self):
+        # Real stream arms carry 86,400 accepted candidates; the shipped meta caps
+        # the ledgers (keeping counts + the full-ledger hash) so a day report stays
+        # reviewable instead of ballooning to >100 MB.
+        from experiments.snapshot_seed import _slim_meta
+        meta = {"report_hash": "x", "candidates": {
+            "n_total": 200, "n_accepted": 150,
+            "accepted": [{"ts": i} for i in range(150)],
+            "rejected": [{"ts": i, "reason": "crossed"} for i in range(50, 100)]}}
+        slim = _slim_meta(meta)
+        assert len(slim["candidates"]["accepted"]) == 50
+        assert len(slim["candidates"]["rejected"]) == 50
+        assert slim["candidates"]["n_accepted"] == 150  # counts preserved
+        assert meta["candidates"]["accepted"][0] == {"ts": 0}  # input untouched
+        assert slim["full_meta_hash"] == "x"
 
 
 # ------------------------------------------------------------- frame snapshot provider

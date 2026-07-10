@@ -93,7 +93,14 @@ BILLING_SOURCES = [
      "accessed": "2026-07-10", "status": "confirmed_live"},
     {"fact": "rest history endpoint is L2, max 20 levels",
      "url": "https://docs.coinapi.io/market-data/rest-api/order-book/historical-data",
-     "accessed": "2026-07-10", "status": "confirmed_live_via_search_index"},
+     "accessed": "2026-07-10",
+     "status": "confirmed_live_via_search_index; verbatim 'limited ... to the maximum "
+               "number of 20 levels' + 'top 20 bids and top 20 asks (2x20)'. DISPUTED "
+               "by a 2026-07-10 deep-review claim that the endpoint page documents "
+               "limit_levels max=50 — that page is bot-gated (403) and unverifiable "
+               "offline; 20 kept as the conservative purchasability cap, and the "
+               "coinapi_on_demand_L50 sensitivity arm closes the depth question "
+               "empirically (depth does not change any verdict)"},
     {"fact": "flat files $1/GB limit book, $3/GB trades, $10 per 1,000 GET/LIST/HEAD",
      "url": "https://docs.coinapi.io/flat-files-api/billing",
      "accessed": "2026-07-10",
@@ -741,6 +748,14 @@ def _slim_meta(meta: dict) -> dict:
         cov = dict(cov)
         cov["invalid_runs_idx"] = list(cov["invalid_runs_idx"])[:100]
         m["coverage"] = cov
+    led = m.get("candidates")
+    if isinstance(led, dict):
+        # stream arms carry one candidate per second (86,400/day) — cap the shipped
+        # ledgers; exact counts stay, and full_meta_hash still covers the full lists
+        led = dict(led)
+        led["accepted"] = list(led.get("accepted", []))[:50]
+        led["rejected"] = list(led.get("rejected", []))[:50]
+        m["candidates"] = led
     m["full_meta_hash"] = m.pop("report_hash", None)
     m["report_hash"] = hash_obj(_json_safe(m), exclude_keys=("report_hash",))
     return m

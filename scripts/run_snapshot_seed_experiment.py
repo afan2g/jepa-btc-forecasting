@@ -43,7 +43,8 @@ from scripts.run_coinbase_parity import (                             # noqa: E4
 NATIVE_UNAVAILABLE_EXIT = 6
 DEFAULT_ARMS = ("cold_control,lake_book_control,coinapi_day_open_L20,"
                 "coinapi_day_open_full,coinapi_stream_L5,coinapi_stream_L10,"
-                "coinapi_stream_L20,coinapi_stream_L50,coinapi_on_demand_L20")
+                "coinapi_stream_L20,coinapi_stream_L50,coinapi_on_demand_L20,"
+                "coinapi_on_demand_L50")
 
 
 def arm_specs_from_names(names) -> list[dict]:

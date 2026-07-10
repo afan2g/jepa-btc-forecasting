@@ -46,7 +46,8 @@
     "coinapi_stream_L10",
     "coinapi_stream_L20",
     "coinapi_stream_L50",
-    "coinapi_on_demand_L20"
+    "coinapi_on_demand_L20",
+    "coinapi_on_demand_L50"
   ],
   "thresholds": {
     "day_quality": {
@@ -103,6 +104,10 @@
     {
       "utc": "2026-07-10",
       "note": "Machine-enforcement amendment BEFORE any crossed-seed-day result was inspected (only the 2025-06-01 clean control had run): (1) shared-source arms must ALSO pass the injection-guarded parity verdict; (2) the economics bar is machine-evaluated on the conservative end of the cost band; (3) arm-name vocabulary reconciled with the runner. Thresholds unchanged; strictly tightening."
+    },
+    {
+      "utc": "2026-07-10",
+      "note": "Deep-review amendment, added BEFORE its results were seen: coinapi_on_demand_L50 sensitivity arm added to close the REST depth-cap question empirically (a 2026-07-10 deep-review claim of a 50-level limit_levels max conflicts with the live-indexed 20-level docs cap; the endpoint page is bot-gated). The arm stays UNPRICED under the conservative 20-level purchasability cap, so it can only inform parity, never pass economics."
     }
   ]
 }
