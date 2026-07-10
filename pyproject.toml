@@ -26,5 +26,5 @@ addopts = "-q"
 
 [tool.setuptools.packages.find]
 # Ship the Phase-1 baseline packages too, so a non-editable `pip install .[baseline]` can
-# import eval.*/data.* (not just runs from the repo root).
-include = ["recon*", "eval*", "data*"]
+# import eval.*/data.* (not just runs from the repo root), plus the bar producer (bars/).
+include = ["recon*", "eval*", "data*", "bars*"]
