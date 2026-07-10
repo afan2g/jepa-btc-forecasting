@@ -697,6 +697,65 @@ the §5a backfill gate (still enforced in `ingest/download_coinapi.py` / `ingest
 Bulk backfill remains gated until the multi-day quality map (and the §10 multi-day reseed validation)
 passes.
 
+**CoinAPI snapshot-only seeding (issue #54) — NO-GO (2026-07-10, offline, no live vendor calls).**
+**Status: DECIDED — the cross-vendor-seeding prohibition stands; the canonical #33 manifest and fill
+policy are unchanged; #34 Milestone A should proceed on the canonical manifest after normal human
+spend approval.** The experiment asked whether a bounded CoinAPI snapshot (day-open, on-demand at
+observable sustained-crossing triggers, or a 1 s top-X stream emulating Flat Files
+`limitbook_snapshot_X`) could seed/reseed the Lake `book_delta_v2` replay well enough to replace the
+457 `crossed_seed_source` full-day fills ($1,037.39 of the manifest's $1,369.45 book spend; 167
+days / $379.09 in the #34 pilot window — `scripts/reconcile_snapshot_seed_54.py`). Harness:
+`experiments/snapshot_seed.py` + `scripts/run_snapshot_seed_experiment.py` (experiment-scoped; the
+production seeded replay `recon/reseed.py`/native is reused UNMODIFIED with only the snapshot source
+swapped; snapshots emulated offline from the three locally-owned full-day `limitbook_full` days —
+fixture set + thresholds preregistered in `experiments/preregistration_54.json` BEFORE any real-data
+run; guarded-verdict/economics machine-gating amendment added before any crossed-seed-day result was
+inspected). Findings (k=10, 1 s grid, `--engine native`, tick scale 100; reports under
+`data/reports/snapshot_seed/`, git-ignored):
+
+1. **Snapshot seeding repairs crossing, not labels — missing Lake deltas are the binding defect.**
+   On both crossed-seed fixture days the 1 s stream arm collapses the crossed rate
+   (2024-12-04: 7.43% → **0.08%**; 2026-04-01: 39.10% → **1.46%**) yet 2 s label agreement barely
+   moves (0.8293 → **0.8342**; 0.9177 → **0.8861** vs the ≥0.92 preregistered bar and the 0.951
+   clean reference), and >$50-spike fractions stay 3–28× over the 1e-3 bar. The stream arm needed
+   31 (mild) / **620** (severe) reseeds/day — even re-anchoring every ~2 minutes to a same-source
+   snapshot cannot reconstruct the dynamics the lossy delta stream never delivered. Every snapshot
+   arm fails the preregistered verdict on both required degraded fixtures; the crossed `book` seed
+   source is a SYMPTOM of upstream capture loss, not the disease.
+2. **Day-open-only seeding is worthless on degraded days** (seed accepted, then immediately
+   destroyed: day-quality identical to cold start on both crossed days), and **on-demand
+   crossing-triggered requests hit the 24-request/day budget and still leave 24–73% crossed**
+   (terminated `max_requests`; also fails the ≤25%-of-full-day economics bar at the documented
+   10-credit worst-case per request).
+3. **Crossing triggers cannot see frozen books.** The `leading_gap` emulation (2025-06-01 deltas
+   dropped before 06:00) freezes every day-open-seeded book for 6 h at p99 $545.87 divergence with
+   ~0% crossing — the on-demand arm makes **0** requests. Gap days need the existing partial-day
+   CoinAPI fill, not seeding; a staleness/delta-gap trigger would be a different (unvalidated)
+   policy. The `sparse` emulation (10% uniform row loss) is unrecoverable by ANY seed source
+   including the Lake `book` control (28.5% crossed) — reinforcing finding 1.
+4. **Clean-control non-regression PASSES** (2025-06-01: stream and on-demand arms match the
+   Lake-book control to the digit — crossed 0.0116% vs 0.0150%, p99 $4.35, corr 0.999998, labels
+   0.9514/0.9830/0.9952; injection-guarded variant unchanged, non-regression pass; on-demand needed
+   3 requests). The technique is harmless where the delta stream is healthy — but those days do not
+   need it. The harness also reproduces the documented cold-start (67.04% crossed) and clean
+   reference numbers exactly, validating it against the production gate.
+5. **Offline product/billing feasibility (documented 2026-07-10, no API calls):** REST historical
+   order book is L2 hard-capped at 20 levels (confirmed live via docs + llms-full.txt: 100 data
+   items = 1 credit, $5.26/1k first-day credits; the "data item" unit for an order-book response is
+   UNDOCUMENTED → costed as a 1–10-credit band/request); no historical L3 REST and no WS replay
+   exist; Flat Files `limitbook_snapshot_X` (top-X, 1 s interval, $1/GB tier) exists but COINBASE
+   availability/size is unverified (pricing pages bot-gated 2026-07-10; rates match our measured
+   2026-06/07 billing). Economically the stream would have been attractive (~$0.013–0.041/day
+   emulated vs $0.80–2.37 full-day) — **economics are moot because technical parity fails.**
+
+NO-GO consequences: retain the full/partial-day CoinAPI fill policy and the `crossed_seed_source >
+5%` fill trigger unchanged; no policy relaxation PR; no live snapshot probe is required (the
+decision does not hinge on the unresolved billing/product unknowns). Limitations that bind this
+verdict: n=3 real fixture days (severity-bracketing, not a sample); gap/sparse classes are labeled
+emulations; snapshots and the parity reference share the same vendor file (mitigated by the
+injection-guarded verdict, and immaterial here since the arms fail even WITH that advantage — a
+real cross-vendor snapshot could only do worse, adding vendor-book divergence).
+
 **Seam-day live validation — 2026-07-02 (`--engine native`).**
 **Status: COMPLETE.** Both arms are validated on real data: (a) the fill-**decision**/plan wiring on both
 documented seam days (the two `--no-cold-ab` Lake-only quality-map runs below), and (b) the
