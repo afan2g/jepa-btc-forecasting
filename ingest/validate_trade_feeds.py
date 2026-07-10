@@ -18,7 +18,7 @@ The final report `trade_feed_validation.json` (git-ignored `data/reports/`) IS t
 Usage (Phase 2 is ask-first per AGENTS.md; --dry-run is always vendor-free):
   .venv/bin/python ingest/validate_trade_feeds.py --dry-run
   .venv/bin/python ingest/validate_trade_feeds.py --days 2025-06-01,2024-08-05
-  .venv/bin/python ingest/validate_trade_feeds.py --start 2024-06-22 --end 2026-05-05 \
+  .venv/bin/python ingest/validate_trade_feeds.py --start 2024-06-22 --end 2026-03-31 \
       --sample-n 20 --seed 7 --allow-broad
 
 Credentials: Crypto Lake AWS keys in .env (Lake-only; no COINAPI_KEY). Mirrors
@@ -49,23 +49,27 @@ CANONICAL_VENUES = tuple(tc.VENUES)
 # The safe small default sample (5 curated days, ≈1.3 GB, under the auto cap) run with no day args
 # (§3.4). 2024-08-06 is a full Coinbase gap kept ON PURPOSE so the one bounded run exercises the
 # `coinapi_fill` route §8 later makes a gate condition.
-DEFAULT_SAMPLE_DAYS = ("2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2026-04-15")
+PILOT_OOS_START = "2026-04-01"
+PILOT_OOS_END = "2026-04-30"
+
+DEFAULT_SAMPLE_DAYS = ("2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2026-03-15")
 
 # The regime cohort (§3): curated days spanning distinct regimes. Included AS-IS for a --start/--end
 # run when in range (curated, so gap days like 2024-08-06 are kept even though absent from
 # usable_days — the deliberate fill-routing case); the stratified random sample is drawn from
 # usable_days only and added on top.
 REGIME_COHORT = ("2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2024-12-04",
-                 "2026-04-15", "2026-06-15")
+                 "2026-03-15", "2026-06-15")
 
-# Provisional, disjoint train/val/test split spans for the seeded stratified sample (§3), covering
-# the effective modeling calendar's contiguous usable runs (docs/data.md §8: 2024-06-22→2026-02-04,
-# 2026-02-06→2026-05-05, OOS ≈ April 2026). First-pass boundaries — the sample only feeds the
-# Phase-2 bounded live run (ask-first); refine once the split calendar is finalized.
+# Provisional disjoint validation strata for the seeded sample (§3). April 2026 is deliberately
+# absent: it is the fixed pilot OOS and full trade metrics are outcome-bearing. The sample only feeds
+# the Phase-2 bounded live run (ask-first); a future #48/#52-controlled path owns post-freeze April
+# consumption.
 SPLIT_SPANS = (
     ("2024-06-22", "2025-12-31"),      # SSL-pretrain
     ("2026-01-01", "2026-02-04"),      # head-finetune / validation
-    ("2026-02-06", "2026-06-22"),      # OOS + late window (incl. the untouched ≈ April-2026 run)
+    ("2026-02-06", "2026-03-31"),      # pilot development
+    ("2026-05-01", "2026-06-22"),      # post-pilot integrity (not a formal holdout designation)
 )
 
 DEFAULT_END = os.environ.get("END", "2026-06-22")   # the repo `END=` anchor convention (§7)
@@ -95,6 +99,11 @@ def _validate_days(tokens) -> list[str]:
     return out
 
 
+def is_pilot_oos_day(day: str) -> bool:
+    """Whether canonical `day` is inside the fixed April-2026 pilot holdout."""
+    return PILOT_OOS_START <= day <= PILOT_OOS_END
+
+
 def stratified_sample_days(usable_days, sample_n: int, *, seed: int,
                            spans=SPLIT_SPANS) -> list[str]:
     """A deterministic seeded stratified sample of `sample_n` usable days across the split `spans`
@@ -106,7 +115,9 @@ def stratified_sample_days(usable_days, sample_n: int, *, seed: int,
     if sample_n <= 0:
         return []
     rng = random.Random(seed)
-    pool = sorted(set(usable_days))
+    # Full trade metrics expose price/size/notional/interarrival distributions. Never let a generic
+    # range sample consume the fixed pilot OOS before #52 freezes G0-XV.
+    pool = sorted(d for d in set(usable_days) if not is_pilot_oos_day(d))
     buckets: list[list[str]] = [[] for _ in spans]
     for d in pool:
         for i, (lo, hi) in enumerate(spans):
@@ -149,7 +160,8 @@ def resolve_days(args, cal: dict | None) -> tuple[list[str], str]:
         start = _canonical_day(args.start)                        # canonicalize the range endpoints
         end = _canonical_day(args.end)                            # so YYYY-MM-DD string compares hold
         cohort = [d for d in REGIME_COHORT if start <= d <= end]
-        usable = [d for d in (cal or {}).get("usable_days", []) if start <= d <= end]
+        usable = [d for d in (cal or {}).get("usable_days", [])
+                  if start <= d <= end and not is_pilot_oos_day(d)]
         sample = stratified_sample_days([d for d in usable if d not in cohort],
                                         args.sample_n, seed=args.seed)
         return sorted(set(cohort) | set(sample)), "range_sample"
@@ -301,6 +313,9 @@ def _print_plan(*, days, venues, mode, decision, routed, cal_path, cal, dry_run)
     print("=" * 74)
     print(f"  venues: {', '.join(venues)}")
     print(f"  days:   {', '.join(days)}")
+    if any(is_pilot_oos_day(d) for d in days):
+        print("  HOLDOUT NOTE: April 2026 full metrics are dry-run-only here; live access requires "
+              "the future #48/#52 manifest-authorized consumption path.")
     print(f"  est Crypto Lake trades download: ~{decision['est_gb']:.2f} GB "
           f"({n_load} required pair(s) load; fill/excluded routed without a load)")
     print(f"  quota decision: ok={decision['ok']} reason={decision['reason']} "
@@ -333,6 +348,18 @@ def run(args, *, load_fn=load_lake_trades, session_factory=lake_session,
         # "buildable"). Refuse loudly instead — main() maps the ValueError to exit 2.
         raise ValueError(f"empty selection: no (venue, day) pairs to validate "
                          f"(days={days}, venues={venues})")
+
+    pilot_oos_days = [d for d in days if is_pilot_oos_day(d)]
+    if pilot_oos_days and not args.dry_run:
+        # This validator emits outcome-bearing price/size/notional/interarrival summaries. The
+        # current CLI has no way to prove that #52's G0-XV ledger/selection artifact is frozen, so a
+        # live April run must fail before session creation or any partition load. #48/#52 will own a
+        # separate manifest-authorized post-freeze consumption path.
+        raise ValueError(
+            "pilot OOS days cannot run full trade metrics before the #48/#52-controlled "
+            f"post-freeze holdout path exists: {pilot_oos_days}; use --dry-run only or the "
+            "outcome-blind integrity tooling documented in the staged protocol"
+        )
 
     # Cross with the calendar ONCE. Only required-route pairs load (spend Lake quota); fill/excluded
     # pairs route without a load, so the estimate is over the required pairs only.
@@ -449,7 +476,8 @@ def parse_args(argv=None):
     ap.add_argument("--end", default=DEFAULT_END,
                     help=f"range end / anchor YYYY-MM-DD (the END= convention; default {DEFAULT_END})")
     ap.add_argument("--days", default=None,
-                    help="explicit days, CSV YYYY-MM-DD,YYYY-MM-DD (highest precedence)")
+                    help="explicit days, CSV YYYY-MM-DD,YYYY-MM-DD (highest precedence; live "
+                         "April-2026 pilot-OOS metrics are policy-blocked)")
     ap.add_argument("--days-file", default=None,
                     help="file of days (CSV and/or one-per-line); precedence below --days")
     ap.add_argument("--venues", default=None,

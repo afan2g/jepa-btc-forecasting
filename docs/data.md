@@ -20,9 +20,42 @@ information source (spec §1). Data needed:
 | Target / label venue | Coinbase **BTC-USD** (spot) | Crypto Lake + CoinAPI (hybrid) | `book_delta_v2`, `trades` |
 
 History span: **12–24 months** for SSL pretrain; recent 3–6 mo for head finetune; clean held-out OOS
-~1 mo (spec §4). **The OOS month must be chosen from the usable all-feed calendar (§5b), not simply
-"most recent"** — recent May–June 2026 has Binance gaps; the most-recent usable run ends 2026-05-05
-(OOS ≈ April 2026). Planning figures below use **18 months** (547 days) unless noted.
+~1 mo (spec §4). Acquisition is staged before that final span (§1.1). The pilot OOS is April 2026;
+G0-CB does not score it, and it becomes consumed acquisition evidence after G0-XV's sole modeling
+evaluation and cannot be reused for formal G1. **The
+formal G1 OOS month must be outside the pilot and chosen from the usable all-feed calendar (§5b)
+using coverage only, not model outcomes or simply "most recent".** Planning figures below use
+**18 months** (547 days) unless noted.
+
+### 1.1 Staged acquisition policy (adopted 2026-07-10)
+
+Binding protocol:
+[`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](superpowers/plans/2026-07-10-staged-signal-acquisition.md).
+The data target is unchanged, but vendor spend is sequenced:
+
+1. Coinbase pilot acquisition uses `2025-11-01` through `2026-04-30`, but the Coinbase-only G0-CB
+   modeling screen uses only span-contained `2025-11-01` through `2026-03-31` rows and never loads
+   April outcomes; unsafe March boundary rows are dropped before forward label reads.
+   Approve/download only the pilot-window subset of the reviewed CoinAPI manifest first. The
+   existing contiguous-range, book-only downloader cannot execute that sparse scope; #53 must add
+   the exact reviewed-manifest book/trade planner and executor before any pilot backfill.
+2. If the recorded G0-CB diagnosis authorizes the next spend, acquire the same six complete
+   calendar months for Binance futures and spot.
+3. Reconstruct the pilot and run matched Coinbase-only, Binance-only, and combined G0-XV arms.
+4. Pull the remaining approved Binance archive only after G0-XV passes. Remaining Coinbase fills
+   and full production reconstruction are separately resumable milestones.
+
+G0-CB is a target-data/economics and lower-bound screen; weak Coinbase-own-book predictivity alone
+does not disprove a Binance-leading signal. It produces development evidence only. G0-XV is the
+pilot's sole April-scored spend gate, not formal G1 or final E2.3.
+Pilot and full datasets have separate source manifests, build IDs, feature manifests, and holdouts.
+April integrity-only transfer/schema/footer/hash/row-count/coverage/reconstruction checks are allowed
+and logged; they do not consume the holdout. Access to April feature/label/cost/forecast/PnL/model
+results or outcome-driven manual analysis does consume it and is forbidden during G0-CB and before
+the #52 G0-XV candidate ledger and selection artifact are frozen.
+`ingest/validate_trade_feeds.py` is not integrity-only: its full price/size/notional/interarrival/lag/
+side report is outcome-bearing. Generic live April runs are rejected before vendor access; #48/#52
+must authorize the exact one-time post-freeze scope.
 
 ---
 
@@ -200,9 +233,13 @@ CoinAPI-fillable:
   704/730 (96.4%)` is *measured*, not assumed. The full artifact — `usable_days` (704), `lake_all_days`
   (652), `excluded_days_by_reason` (26, e.g. `missing:binF_book`), the fill-day book/trades status, and
   OOS runs — is written to **`data/usable_calendar.json`** (auditable without re-listing vendors).
-- **OOS month must come from the usable calendar, not "most recent."** Most-recent contiguous usable run
-  ≥21 d = **2026-02-06 → 2026-05-05**; the prior run is 2024-06-22 → 2026-02-04 (split by 1-day Binance
-  gaps). **Recent May–June 2026 is NOT usable** (Binance `book_delta_v2` gaps). Pick OOS ≈ **April 2026**.
+- **Any OOS month must come from the usable calendar, not "most recent."** At this snapshot the
+  most-recent contiguous usable run ≥21 d is **2026-02-06 → 2026-05-05**; the prior run is
+  2024-06-22 → 2026-02-04 (split by 1-day Binance gaps). **Recent May–June 2026 is NOT usable**
+  (Binance `book_delta_v2` gaps). April 2026 is reserved for and consumed by the G0-XV pilot; it is
+  **not eligible for formal G1**. Select formal G1 OOS later from a refreshed certified calendar,
+  using coverage only, wholly outside `2025-11-01..2026-04-30`; this snapshot does not predeclare a
+  formal month, so G1 remains blocked until one is frozen.
 
 Reproduce: `ingest/verify_trades_and_calendar.py --verify-backfill` (anchor via `--end`/`END`); writes
 `data/usable_calendar.json`.
@@ -981,6 +1018,14 @@ one-shot pull on this plan: stage by month/quota
 window, project only needed columns, process/recon day-by-day, and keep resumable manifests so a
 run can stop before the quota is tight.
 
+**Six-month Binance pilot budget:** `2025-11-01` through `2026-04-30` is 181 days. The Binance
+downloader plan's conservative `~1.23 GB/day` estimate gives **~222.63 GB**. The completed
+`2026-04-01` nine-unit Stage-1 smoke measured **687,215,789 bytes** (~0.687 decimal GB), which would
+extrapolate to ~124.4 GB, but one day is not a quota guarantee. Plan with 222.63 GB, reconcile each
+batch from the raw manifest, and keep the operating target ≤250 GB per quota window. At the recorded
+156.25 GB usage snapshot, the pilot is not a one-batch operation even though the vendor's 300 GB
+limit is soft; split it deterministically and resume in the next window.
+
 After `recon` + bar building, the **training set collapses to GB-scale** (§7).
 
 ---
@@ -1079,7 +1124,8 @@ Done:
 - [x] **Unit/timestamp sanity** (L1 mid, clean day) — $0.000 median / 0.999982 corr (§5a). *Not* parity.
 - [x] **Crypto Lake bucket region** — `eu-west-1` (pyarrow S3 read; head_bucket 403s).
 - [x] **Trade-feed validation** (1 day, 3 venues) — §5b; Coinbase needs origin_time sort.
-- [x] **Usable all-feed calendar** — §5b; OOS ≈ April 2026, 52 Coinbase fill days.
+- [x] **Usable all-feed calendar** — §5b; April 2026 is the pilot OOS, 52 Coinbase fill days; formal
+      G1 OOS is intentionally unselected and must be outside the pilot.
 - [x] **Coverage scripts de-hard-coded** — anchor on `END`/`--end` (§9).
 - [x] **CoinAPI billing/limits understood** — $1/GB flat-files, REST credits, ~10 req/min, shared
       balance (§2.2). **Pre-download action:** enable Spend Management (daily cap + hard-stop).
@@ -1131,7 +1177,7 @@ Other open items:
 - [ ] **Trade validation breadth** — extend §5b checks to multiple days/regimes per venue.
       Plan: `docs/superpowers/plans/2026-07-02-trade-validation-breadth-plan.md` (validator
       `ingest/validate_trade_feeds.py` + pure `ingest/trade_checks.py`; per-day/per-venue
-      pass/warn/fail JSON report, timestamp/sort policy, gating + 4-phase rollout).
+      pass/warn/fail JSON report, timestamp/sort policy, gating + staged rollout).
       **Phase 1a landed:** the pure, source-agnostic checks module `ingest/trade_checks.py`
       (engine-clock/`received_time` fallback + stable sort, monotonicity, dup-ts/dup-id, price/size
       sanity, sparse/missing-hour coverage, inter-arrival, calendar routing + gate booleans, GB/quota
@@ -1139,15 +1185,19 @@ Other open items:
       vendor calls.
       **Phase 1b landed:** the thin Lake CLI wrapper `ingest/validate_trade_feeds.py` over the pure
       module unchanged (bounded day/venue selection §3, calendar fill/excluded routing, GB/quota gate
-      reusing the pure helpers with an injectable load seam, `--dry-run`/`--strict`, the exit-code
-      contract `0`/`5`/`7`) with synthetic tests `tests/test_validate_trade_feeds.py` — **no live
-      vendor calls run** (import + synthetic paths stay vendor-free). Still open: the bounded live
-      run (Phase 2, ask-first) and calendar/CoinAPI-fill/bar-builder enforcement (Phase 3/3b/4).
+      reusing the pure helpers with an injectable load seam, `--dry-run`/`--strict`, exit codes
+      `0`/`2`/`5`/`7`) with synthetic tests `tests/test_validate_trade_feeds.py` — **no live vendor
+      calls run** (import + synthetic paths stay vendor-free). The default/cohort/random samples
+      exclude April 2026, and an explicit live April full-metric request fails before Lake session or
+      partition access; outcome-blind April integrity checks stay on the staged #36 path. Still open:
+      bounded non-holdout live validation (Phase 2, ask-first), calendar/CoinAPI-fill integration,
+      #48/#52's manifest-authorized one-time April validation, and bar-builder enforcement
+      (Phase 3/3b/3c/4).
 - [x] **Within-timestamp ordering for CoinAPI** — resolved 2026-07-02: file/`seq` order is
       canonical, ties break by original row index, `order_id` is never an ordering key
       (policy + regression tests: `docs/superpowers/plans/2026-07-02-coinapi-within-timestamp-ordering.md`,
       `tests/test_coinapi_within_timestamp_ordering.py`; quality counters `seq_disorder`/`seq_duplicate`).
-- [ ] **Binance downloader** — vendor stages not yet built; **plan:**
+- [ ] **Binance acquisition + reconstruction** — **plan:**
       [`docs/superpowers/plans/2026-07-02-binance-downloader-plan.md`](superpowers/plans/2026-07-02-binance-downloader-plan.md).
       Same throttled/resumable/partitioned pattern as `download_coinapi.py`, streaming per day
       (109 M rows). Read direct via pyarrow S3 (`eu-west-1`) or lakeapi.
@@ -1155,17 +1205,20 @@ Other open items:
       `ingest/lake_binance.py` (feed/instrument registry, Hive partition paths, manifest/resume
       state, joint `origin_time`→`received_time` engine-time resolver, quota estimate + broad-pull
       gate) and `scripts/plan_lake_binance_batches.py` (deterministic quota-window batch planner).
-      *Stage-1 vendor CLI landed 2026-07-02 (`ingest/download_lake_binance.py`, **no live Lake pull
-      run**):* streaming/atomic/resumable per-`(feed,exchange,symbol,day)` download to the normalized
+      *Stage-1 vendor CLI landed 2026-07-02 (`ingest/download_lake_binance.py`):*
+      streaming/atomic/resumable per-`(feed,exchange,symbol,day)` download to the normalized
       ZSTD Parquet raw store (incl. the `book` seed product), retry/backoff, quota gate before any
       transfer, and the 0/2/3/4 exit-code contract — fully unit-tested with injected fake
-      readers/listers (`tests/test_download_lake_binance.py`).
-      *Stage-2 recon runner landed 2026-07-09 (`scripts/run_binance_recon.py`, **offline only — no
-      live run**):* local raw store → certified top-K L2 + normalized trades/funding/OI/liquidations,
+      readers/listers (`tests/test_download_lake_binance.py`). *Bounded Stage-1 smoke completed
+      2026-07-10 for `2026-04-01`: all nine required futures/spot units `ok`, 147,377,429 rows,
+      687,215,789 bytes; Parquet rows/schemas/sizes/fingerprints/SHA-256 reconciled to the manifest,
+      with no temporary/missing/error units.*
+      *Stage-2 recon runner landed 2026-07-10 (`scripts/run_binance_recon.py`, offline tests only):*
+      local raw store → certified top-K L2 + normalized trades/funding/OI/liquidations,
       seed-source crossed-rate gate (>5% → `inconclusive`, no certified output), fail-closed
       publishing, resumable processed manifest; Python oracle now, native pending tick-scale
-      verification (Q1). Still open: live metadata/schema probes + one-day Phase-2 validation,
-      Binance tick-scale verification, and the staged historical archive pull.
+      verification (Q1). Still open: bounded smoke schema/tick-scale evidence, one-day Stage-2
+      validation, the six-month pilot, G0-XV, and (only after that gate) the remaining archive.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
 
 ---

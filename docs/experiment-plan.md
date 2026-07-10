@@ -15,6 +15,7 @@
 | Phase | Milestone | Decisive gate | Rough cost |
 |---|---|---|---|
 | **0** | Data integrity + measurement harness | Recon replay-equivalence is byte-identical (no lookahead) | Med (engineering) |
+| **0S** | **Staged signal/acquisition screens** | **G0-CB:** Coinbase pipeline/economics measured; **G0-XV:** six-month cross-venue pilot authorizes or blocks the remaining Binance spend | Low-Med |
 | **1** | **Signal-existence gate** (baseline ladder) | **G1:** LightGBM clears net-of-cost PnL, DSR>0.95, acceptable PBO at some horizon | Low-Med |
 | **2** | Validate the risky design decisions (on the cheap baseline) | G2 set: decoupling proven; Binance increment confirmed | Low |
 | **3** | Supervised deep baseline | **G3:** supervised-deep ≥ LightGBM | Med |
@@ -22,13 +23,51 @@
 | **5** | Heads + the decisive comparison | **G5:** frozen-CF-JEPA beats same-arch-supervised-from-scratch, net-of-cost | Med |
 | **6** | Walk-forward robustness + extensions | (only if G5 passes) | Med |
 
-**Hard stops:** Fail **G1** → stop or pivot to maker-execution / different horizon (JEPA cannot manufacture signal). Fail **G3** → ship LightGBM; SSL-frozen-deep won't help. Fail **G5** → ship the simpler model; pretraining isn't the edge.
+**Hard stops:** Fail **G0-XV** → do not acquire the remaining Binance archive without a documented pivot. Fail **G1** → stop or pivot to maker-execution / different horizon (JEPA cannot manufacture signal). Fail **G3** → ship LightGBM; SSL-frozen-deep won't help. Fail **G5** → ship the simpler model; pretraining isn't the edge. A Coinbase-only **G0-CB** predictivity failure is not, by itself, a project hard stop because it does not test the Binance→Coinbase premise.
 
-**Cross-cutting discipline (applies to every phase from Phase 1 on):**
+**Cross-cutting discipline (applies to every modeling screen/gate from Phase 0S on):**
 - **Pre-register** labels, CV scheme, no-trade-band rule, and primary metric before touching the held-out OOS month. Every post-hoc tweak is a new "trial" and must enter the DSR trial count `N`. (LR §6)
 - **Every predictivity claim is reported as a LIFT over a persistence/identity baseline**, OOS, under purged+embargoed CPCV. (LR §1, §3)
 - **Stratify all results by spread/tick and volatility regime** — never report a single pooled number. (LR §4, LOBFrame)
 - **Track effective `N`** (cluster correlated trials) for the Deflated Sharpe Ratio. (LR §6)
+
+---
+
+## Phase 0S — Staged signal and acquisition screens
+
+**Binding protocol:** [`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](superpowers/plans/2026-07-10-staged-signal-acquisition.md).
+
+The final architecture still targets 12–24 months of cross-venue data, but acquisition is staged so
+the full Binance archive is not pulled before the primary premise has bounded OOS evidence.
+
+1. **G0-CB (Coinbase-only):** build a Coinbase-only matrix and run the existing baseline ladder as a
+   preliminary data/label/cost and lower-bound signal screen. Weak own-book predictivity alone does
+   not falsify a leading Binance signal; a failure requires a recorded diagnosis and proceed/stop
+   decision. Selection/CPCV uses November-March only. G0-CB never loads or scores April modeling
+   data; issue #52 records its complete development trial history for the later G0-XV ledger.
+   Partitioning is span-based: before any forward read, drop a development row unless
+   `t_event + horizon_ns + guard_ns < 2026-04-01T00:00:00Z`; event-date filtering alone is invalid.
+2. **Six-month acquisition:** bound Coinbase fills and Binance Stage-1/Stage-2 work to
+   `2025-11-01` through `2026-04-30`. Development/CPCV ends `2026-03-31`; April 2026 is reserved as
+   the G0-XV pilot OOS month and is consumed by one frozen data-validation/model-scoring workflow.
+3. **G0-XV (matched cross-venue):** compare Coinbase-only, Binance-only, and combined feature
+   manifests over identical rows, labels, costs, horizons, and splits. The full Binance pull is
+   authorized only when a cross-venue arm clears the preregistered net/DSR/PBO block and combined
+   beats the matched Coinbase-only control beyond the preregistered bootstrap noise band. The arms,
+   model configs, horizons, and pilot variants belong to one #52 candidate ledger and PBO study;
+   G0-CB attempts enter its effective trial count. After the ledger and selection artifact are
+   frozen, G0-XV performs the first and only April modeling score. Three independent manifest runs
+   cannot authorize the archive.
+4. **Archive expansion:** after G0-XV passes, acquire/reconstruct the approved remaining span and
+   freeze a separate coverage-selected holdout outside the pilot before formal G1 tuning.
+
+Every pilot-driven variation enters the later trial ledger. G0-XV is a spend gate, not formal G1 or
+final E2.3; six post-ETF months cannot establish the required pre/post-ETF result.
+Operational acquisition/schema/hash/coverage/reconstruction checks in April are allowed when they
+are outcome-blind and use already-frozen integrity thresholds; feature, label, cost, forecast, PnL,
+or model-result access consumes the holdout. Full trade-feed distribution metrics (price, size,
+notional, interarrival, lag, and side summaries) are outcome-bearing, not integrity-only, and remain
+blocked until G0-XV freeze.
 
 ---
 
@@ -74,7 +113,7 @@
 
 ## Phase 1 — The signal-existence gate (project-defining) ⭐
 
-**Goal:** Answer the only question that matters before model-building: *is there any cost-surviving short-horizon signal?* This is spec §12 step 5, elevated to the project gate.
+**Goal:** Answer the only question that matters before model-building on the approved full dataset: *is there any cost-surviving short-horizon signal?* This is spec §12 step 5, elevated to the formal project gate. G0-CB/G0-XV are acquisition screens and do not replace this gate.
 
 ### E1.1 — Measure τ (the decay window)
 - **Question:** At what horizon does microstructure directional predictability decay to noise?
@@ -83,7 +122,7 @@
 - **Refs:** §5.4; LR §5.
 
 ### E1.2 — Feature engineering (the short list that carries signal)
-- **Setup:** Per-bar vector centered on **multi-level / integrated OFI** (Cont-style signed depth changes, PCA-integrated) as the #1 feature; **microprice** (feature + candidate target); queue imbalance; spread + spread/tick (also a regime tag); signed trade flow/CVD (supporting); VWAP-to-mid; book slope/depth; intra-bar path (realized var, MAE). Cross-venue: **lagged Binance OFI → Coinbase**, Binance−Coinbase basis. Perp state (funding/OI/liquidations) kept as **conditioners, not primary**. All stationarized.
+- **Setup:** Per-bar vector centered on **multi-level / integrated OFI** (Cont-style signed depth changes, PCA-integrated) as the #1 feature; **microprice** (feature + candidate target); queue imbalance; spread + spread/tick (also a regime tag); signed trade flow/CVD (supporting); VWAP-to-mid; book slope/depth; intra-bar path (realized var, MAE). Cross-venue: **lagged Binance OFI → Coinbase**, Binance−Coinbase basis. Perp state (funding/OI/liquidations) kept as **conditioners, not primary**. All stationarized. The producer emits explicit Coinbase-only and cross-venue feature manifests; absent Binance inputs are never zero-filled or inferred.
 - **Deliverable:** `bars/` feature module.
 - **Refs:** §6; LR §4, §7.
 
@@ -118,6 +157,7 @@
 - **Setup:** Three models: Coinbase-own-book only; Binance-signal only; combined. Lag Binance features by realistic loop latency. **Re-estimate separately pre- and post-2024 spot-ETF.**
 - **GATE (E2.3):** Combined beats Coinbase-own-book OOS net-of-cost by more than the bootstrap noise band.
 - **Decision:** If Binance adds nothing over own-book after costs, the premise's marginal value is questionable → reconsider scope. (LR §7)
+- **Pilot relationship:** G0-XV uses the same three-arm shape only as a six-month acquisition screen. It does not satisfy this experiment's full-coverage or pre/post-ETF claim; that claim remains blocked unless certified Coinbase target data covers both regimes.
 - **Refs:** §1; LR §7.
 
 ### E2.4 — Perp-signal value (re-rank §6)
@@ -213,9 +253,9 @@
 
 ## Self-review (spec coverage)
 
-- §1 premise → E2.3, E2.5. §4 data → E0.1, E0.2. §5 clock/horizon → E0.3, E1.1, E2.1, E2.2; recon → E0.1. §6 features → E1.2, E2.4. §7 model → E4.1–E4.3, E5.1, E5.3; physical-Δt predictor → E4.1. §8 labels/CV → E0.4. §9 training recipe → E3.1, E4.x, E5.2. §10 eval → E0.5, and every modeling gate. §12 build order → Phases 0→6 (baseline ladder inserted as Phase 1/3). §13 pitfalls → E0.1 (lookahead), E4.2 (collapse), E0.4 (CV leakage), E0.5 (forecasting≠tradeable).
+- §1 premise → G0-XV, E2.3, E2.5. §4 data → E0.1, E0.2, staged Phase 0S. §5 clock/horizon → E0.3, E1.1, E2.1, E2.2; recon → E0.1. §6 features → E1.2, E2.4. §7 model → E4.1–E4.3, E5.1, E5.3; physical-Δt predictor → E4.1. §8 labels/CV → E0.4. §9 training recipe → E3.1, E4.x, E5.2. §10 eval → E0.5, G0-CB/G0-XV, and every formal modeling gate. §12 build order → Phases 0→0S→1→6 (baseline ladder inserted as Phase 1/3). §13 pitfalls → E0.1 (lookahead), E4.2 (collapse), E0.4 (CV leakage), E0.5 (forecasting≠tradeable).
 - **Coverage gap noted:** spec §11 (hardware/compute) is not an experiment — it's a provisioning note; no task needed.
 
 ---
 
-*Sequence the spend: Phase 0 (harness) → G1 (is there signal at all?) → cheap design-validation ablations (Phase 2) → supervised-deep (G3) → only then the JEPA build (Phase 4) → the decisive frozen-vs-from-scratch comparison (G5). Three gates can stop the project early and save the most expensive work for last.*
+*Sequence the spend: Phase 0 (harness) → G0-CB (Coinbase lower-bound screen) → six-month Binance pilot → G0-XV (cross-venue acquisition gate) → remaining archive → formal G1 → cheap design-validation ablations (Phase 2) → supervised-deep (G3) → only then the JEPA build (Phase 4) → the decisive frozen-vs-from-scratch comparison (G5). Staging preserves the project hard gates while moving the largest data spend behind evidence.*

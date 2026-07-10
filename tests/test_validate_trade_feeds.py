@@ -100,6 +100,8 @@ def test_default_day_selection_is_the_safe_five_day_sample():
     # 2024-08-06 (a full Coinbase gap) is deliberately included so the one bounded run exercises
     # the coinapi_fill route (plan §3.4).
     assert "2024-08-06" in days
+    assert "2026-03-15" in days                     # recent development control replaces April OOS
+    assert not any(vf.is_pilot_oos_day(d) for d in days)
 
 
 def test_explicit_days_take_precedence_and_dedupe():
@@ -170,6 +172,23 @@ def test_range_selection_is_deterministic_and_reproducible():
     assert len(d1) > len([d for d in vf.REGIME_COHORT if "2024-07-01" <= d <= "2026-03-31"])
 
 
+def test_range_and_stratified_samples_exclude_pilot_oos():
+    # April is a fixed pilot holdout. Range/random selection must never pull it into the
+    # outcome-bearing full-metric validator before #52 freezes G0-XV.
+    usable = ([f"2026-03-{d:02d}" for d in range(1, 29)]
+              + [f"2026-04-{d:02d}" for d in range(1, 29)]
+              + [f"2026-05-{d:02d}" for d in range(1, 6)])
+    args = vf.parse_args(["--start", "2026-03-01", "--end", "2026-05-05",
+                          "--sample-n", "20", "--seed", "7"])
+    days, mode = vf.resolve_days(args, {"usable_days": usable})
+    assert mode == "range_sample"
+    assert days
+    assert not any(vf.is_pilot_oos_day(d) for d in days)
+    sample = vf.stratified_sample_days(usable, 30, seed=7)
+    assert sample
+    assert not any(vf.is_pilot_oos_day(d) for d in sample)
+
+
 def test_stratified_sample_is_deterministic_and_spans_splits():
     usable = ([f"2024-{m:02d}-{d:02d}" for m in range(7, 13) for d in range(1, 28)]
               + [f"2026-01-{d:02d}" for d in range(1, 28)]
@@ -213,6 +232,25 @@ def test_empty_selection_is_rejected(tmp_path):
         vf.run(vf.parse_args(["--days", "2025-06-01", "--venues", " , ", "--out-dir", str(out)]),
                load_fn=_raiser, session_factory=_raiser, used_data_fn=_raiser)
     assert not out.exists()
+
+
+def test_live_pilot_oos_metrics_are_rejected_before_vendor_access(tmp_path):
+    # A dry-run may resolve/print an April plan because it reads no data. A live run would emit
+    # outcome-bearing price/size/notional/interarrival metrics, so it must fail before session/load
+    # creation until the future #48/#52-controlled holdout-consumption path exists.
+    out = tmp_path / "reports"
+    dry = vf.parse_args(["--days", "2026-04-15", "--dry-run", "--out-dir", str(out),
+                         "--calendar", str(tmp_path / "none.json")])
+    assert vf.run(dry, load_fn=_raiser, session_factory=_raiser, used_data_fn=_raiser) == 0
+    assert not out.exists()
+
+    live = vf.parse_args(["--days", "2026-04-15", "--out-dir", str(out),
+                          "--calendar", str(tmp_path / "none.json")])
+    with pytest.raises(ValueError, match="pilot OOS.*full trade metrics"):
+        vf.run(live, load_fn=_raiser, session_factory=_raiser, used_data_fn=_raiser)
+    assert not out.exists()
+    assert vf.main(["--days", "2026-04-15", "--calendar",
+                    str(tmp_path / "none.json")]) == 2
 
 
 def test_main_maps_bad_input_to_exit_2(tmp_path):

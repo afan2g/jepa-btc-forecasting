@@ -1,11 +1,12 @@
 # Multi-Day Trade-Feed Validation Breadth — Implementation Plan
 
 > **For agentic workers:** this is a **spec + implementation plan** for the open `docs/data.md`
-> §10 item "Trade validation breadth." **This branch ships the doc only** — no code, no vendor
-> calls. The follow-up implementation branches (§Implementation Tasks) build
-> `ingest/trade_checks.py` (pure, synthetic-tested) + `ingest/validate_trade_feeds.py` (the Lake
-> CLI). Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans for
-> those follow-ups. Steps use checkbox (`- [ ]`) syntax for tracking.
+> §10 item "Trade validation breadth." The original plan branch shipped docs only; Phase 1a/1b
+> subsequently implemented the pure checks and Lake CLI. The 2026-07-10 staged-holdout amendment
+> updates that existing CLI and its synthetic tests but makes no vendor calls. The remaining tasks
+> (§Implementation Tasks) cover bounded live validation, calendar/CoinAPI integration, the
+> manifest-authorized pilot-OOS path, and bar-builder enforcement. Steps use checkbox (`- [ ]`)
+> syntax for tracking.
 
 **Goal:** Extend the one-day, three-venue §5b trade-feed validation to **multiple days and market
 regimes per venue** (Coinbase BTC-USD, Binance BTC-USDT spot, Binance BTC-USDT-PERP), with a
@@ -32,9 +33,10 @@ worktrees have **no `.venv`** — substitute the main checkout's interpreter
 `/home/aaron/jepa-btc-forecasting/.venv/bin/python` from the worktree root; the commands are
 otherwise unchanged.
 
-**Scope (this branch):** this document + one minimal `docs/data.md` pointer edit (§10). **No new
-Python, no tests run, no Crypto Lake / CoinAPI / native / bulk pulls, no full pytest.** No raw data,
-reports, parquet/csv.gz, caches, `.env`, or secrets committed.
+**Current amendment scope (2026-07-10):** update this document, `docs/data.md`, the existing
+`ingest/validate_trade_feeds.py` selection guard, and its synthetic tests. **No Crypto Lake /
+CoinAPI / native / bulk pulls and no raw data or generated reports.** The original docs-only scope
+and PR history remain recorded below.
 
 ## Non-Goals
 
@@ -49,6 +51,9 @@ reports, parquet/csv.gz, caches, `.env`, or secrets committed.
   extra (§8).
 - No bar-builder changes on this branch (Phase 4 enforces the gate; the builder does not exist yet).
 - No new market-regime taxonomy — regimes reuse the days already characterized in §5a-QualityMap.
+- No pre-freeze full-metric validation of April 2026. The generic CLI rejects live pilot-OOS days;
+  outcome-blind schema/hash/row-count/coverage/reconstruction checks use the staged protocol's
+  existing integrity tooling, not this metric report.
 
 ## Background (what exists today)
 
@@ -137,12 +142,13 @@ Selection is **bounded by design** — no broad default run. Precedence (first m
 1. `--days D1,D2,…` — an explicit comma-separated `YYYY-MM-DD` list (exact days).
 2. `--days-file PATH` — one `YYYY-MM-DD` per line (the format the batch planner emits and
    `run_coinbase_quality_map --days-file` accepts).
-3. `--start/--end` — the **regime cohort** whose members fall in `[start, end]` (below), **plus** a
+3. `--start/--end` — the **non-holdout regime cohort** whose members fall in `[start, end]` (below),
+   **plus** a
    deterministic, seeded stratified random sample of `--sample-n` additional *usable* days drawn
-   across the train/val/test split spans (reproducible via `--seed`). Intersected with the usable
-   calendar.
+   across non-holdout validation spans (reproducible via `--seed`). Intersected with the usable
+   calendar; April 2026 is removed before sampling.
 4. **no day args** — the **safe small default sample** (5 curated days, ≈1.3 GB, runs without
-   `--allow-broad`): `2025-06-01`, `2024-08-05`, `2024-08-06`, `2025-01-07`, `2026-04-15`.
+   `--allow-broad`): `2025-06-01`, `2024-08-05`, `2024-08-06`, `2025-01-07`, `2026-03-15`.
    `2024-08-06` is included on purpose because it is a **full Coinbase gap** (no Lake partition for
    either product), so the calendar's `coinbase_fill_days[2024-08-06].trades` is set and the one
    bounded live run exercises the real `coinapi_fill` routing §8 later makes a gate condition — the
@@ -165,14 +171,28 @@ a book seam. So the cohort exercises the checks; it does not hardcode their verd
 | Crash-adjacent full gap | `2024-08-06` | full Coinbase gap (no Lake partition for either product) → the calendar marks it a trade-fill day → must route to `coinapi_fill`, not fail |
 | Coinbase gap/fill seam | `2025-01-07` | 33-day-hole end; the `book_delta_v2` resume is 14:45:00Z — the validator measures whether `trades` is similarly sparse or fully present |
 | High-vol vendor seam | `2024-12-04` | 63.2 M L3 `book` events (high-vol regime); trades coverage measured independently |
-| Recent OOS | `2026-04-15` | inside the April-2026 OOS usable run (`2026-02-06→2026-05-05`); all 3 venues Lake-present |
+| Recent development control | `2026-03-15` | inside the recent usable run and pre-April development partition; all 3 venues Lake-present |
 | Late-window clean | `2026-06-15` | `lake_usable` (book) late-window control |
 
-**Random sample across splits** (requirement: "random sampled days across train/val/test"): given
-`--start/--end`, draw `--sample-n` days deterministically (seeded `random.Random(seed)`) stratified
-across the three split spans (SSL-pretrain / head-finetune / the untouched OOS ≈ April 2026),
+**Pilot-OOS exclusion (binding):** the full metric set in §4 exposes price, size, notional,
+interarrival, lag, and side distributions, so it is outcome-bearing under the staged protocol.
+`2026-04-01..2026-04-30` is absent from the default and regime cohort and filtered from every
+stratified sample. The implemented CLI also rejects an explicit live April selection **before Lake
+session creation or partition loading**; `--dry-run` remains harmless because it reads no data and
+writes no report. The outcome-blind April checks allowed by #36 use the schema/hash/row-count/
+coverage/reconstruction tooling, not `validate_trade_feeds.py`.
+
+After #52 freezes the G0-XV ledger, thresholds, and selection artifact, #48 may add a separate
+manifest-authorized holdout-consumption entrypoint for the exact April scope. Its full metric report
+marks the holdout consumed. Any threshold failure makes G0-XV blocking/inconclusive; it may not
+trigger threshold tuning, selective day removal, a replacement month, or another selection pass.
+
+**Random sample across non-holdout spans** (requirement: "random sampled days across train/val/test"):
+given `--start/--end`, draw `--sample-n` days deterministically (seeded `random.Random(seed)`) stratified
+across SSL-pretrain / head-finetune / pre-April development / post-pilot integrity spans,
 restricted to `usable_days` from `data/usable_calendar.json`. Deterministic so a re-run validates the
-same days (the report records the resolved `days_selected`).
+same days (the report records the resolved `days_selected`). The formal G1 holdout is selected later
+outside the pilot and is not defined by this trade-integrity sample.
 
 **Crash-context requirement** is satisfied by `2024-08-05` (+ its `2024-08-06` gap neighbour) in
 both the cohort and the default sample.
@@ -188,6 +208,10 @@ Computed per `(venue, day)` on the loaded frame **after** the §5 sort. Every me
 report's `days[].metrics`; the pass/warn/fail role is defined in §8. `<field>` names are the
 loaded/renamed columns (§2). `null` timestamp = the existing sentinel `value < pd.Timestamp(
 "2015-01-01")`.
+
+**Holdout classification:** this is the **full, outcome-bearing** metric set. It must not run on an
+April-2026 partition before #52's freeze. Merely hiding selected JSON keys after computing them is
+not sufficient; the current generic CLI refuses the live selection before any source read.
 
 **All time-based metrics use the post-fallback `engine_clock`, not raw `origin_time`** (§5): the
 `engine_clock` is `origin_time` with `received_time` substituted per null/sentinel row, and the sort
@@ -273,8 +297,8 @@ below are illustrative (schema shape, not measured) — the live run fills them 
     "table": "trades",
     "anchor_end": "2026-06-22",
     "venues": ["binance_perp", "binance_spot", "coinbase"],
-    "days_requested": ["2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2026-04-15"],
-    "days_selected": ["2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2026-04-15"],
+    "days_requested": ["2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2026-03-15"],
+    "days_selected": ["2025-06-01", "2024-08-05", "2024-08-06", "2025-01-07", "2026-03-15"],
     "selection_mode": "default_sample",
     "seed": 0,
     "timestamp_policy": {"engine_clock": "origin_time", "fallback": "received_time",
@@ -387,7 +411,7 @@ stable code first — the `run_coinbase_quality_map.classify_day` convention):
 | `max_missing_hours` | 1 | ≥2 fully-empty UTC hours on a continuously-traded BTC venue is a data gap, not quiet — a required non-fill day above this fails (§8) rather than passing as warn |
 | `lag_neg_frac_max` | 0.001 | `received ≥ origin` should hold; a nonzero negative-lag fraction is a clock fault |
 
-## 7. CLI shape (future implementation)
+## 7. CLI shape (Phase 1b implemented)
 
 Script: `ingest/validate_trade_feeds.py` (thin Lake wrapper over `ingest/trade_checks.py`).
 
@@ -417,8 +441,15 @@ per_venue_gb)` + `quota_decision(...)` returning `ok`/`quota_headroom`/`exceeds_
 plan exits `5` (`QUOTA_REFUSED_EXIT`); on failure to read `used_data` it fail-safe assumes
 `used_gb = quota_gb`.
 
-**Exit-code contract** (extends the repo's small-int convention `2` CoinAPI-quota / `3` parity / `4`
-CoinAPI-backfill / `5` Lake-quota / `6` native): `0` ok; `5` Lake quota refused; `7`
+**Pilot-OOS live guard:** default/cohort/random resolution excludes April. An explicit live
+`--days`/`--days-file` selection containing `2026-04-01..2026-04-30` is rejected as a policy/input
+error before session creation or `lakeapi.load_data`; `main()` exits `2`. A dry-run may display such
+a plan because it performs no vendor access and writes no metric report. There is deliberately no
+generic `--allow-pilot-oos` escape hatch; #48/#52 must introduce a hash-pinned, manifest-authorized
+post-freeze entrypoint.
+
+**Exit-code contract** (extends the repo's small-int convention): `0` ok; `2` bad input/policy,
+including a live pilot-OOS full-metric request; `5` Lake quota refused; `7`
 (`VALIDATION_FAILED_EXIT`) when `--strict` and ≥1 blocking fail.
 
 Examples:
@@ -428,10 +459,10 @@ Examples:
 .venv/bin/python ingest/validate_trade_feeds.py --dry-run
 
 # bounded live run over an explicit regime set, all 3 venues (Phase 2)
-.venv/bin/python ingest/validate_trade_feeds.py --days 2025-06-01,2024-08-05,2025-01-07,2026-04-15
+.venv/bin/python ingest/validate_trade_feeds.py --days 2025-06-01,2024-08-05,2025-01-07,2026-03-15
 
 # a broad sweep across a range (deliberate, budgeted) — refused without --allow-broad
-.venv/bin/python ingest/validate_trade_feeds.py --start 2024-06-22 --end 2026-05-05 \
+.venv/bin/python ingest/validate_trade_feeds.py --start 2024-06-22 --end 2026-03-31 \
     --sample-n 20 --seed 7 --allow-broad
 ```
 
@@ -522,7 +553,8 @@ booleans are deliberately distinct so a deferred, unvalidated fill can never rea
   whenever it is non-empty.
 
 **Interaction with the modeling calendar (§5b) & CV (§8/E0.4):** the effective modeling calendar is
-the contiguous usable runs (`2024-06-22→2026-02-04`, `2026-02-06→2026-05-05`, OOS ≈ April 2026).
+the contiguous usable runs (`2024-06-22→2026-02-04`, `2026-02-06→2026-05-05`); April 2026 is the
+pilot OOS, while formal G1 OOS remains unselected and must be outside the pilot.
 Purged+embargoed CPCV already drops label-span-overlapping bars at gap/seam boundaries, so a
 warn-heavy seam day (e.g. `2025-01-07`) loses its boundary bars to embargo regardless; trade
 validation gates the *interior* of each usable run.
@@ -659,6 +691,10 @@ clean day classifies `pass`, not a coverage `fail`.
     importing `ingest.validate_trade_feeds` does not touch Lake (`main()` guarded), and a
     `monkeypatch` that replaces the load seam with a raiser asserts the synthetic path never calls
     `lakeapi.load_data`.
+14. **Pilot-OOS non-consumption** — the default, regime cohort, and seeded range sample contain no
+    April-2026 day even when the usable input includes all of April. An explicit live April request
+    raises before the injected session/load seams; the same request with `--dry-run` makes no vendor
+    call and writes no report.
 
 ## 10. Rollout
 
@@ -668,8 +704,9 @@ clean day classifies `pass`, not a coverage `fail`.
   `ingest/validate_trade_feeds.py` (CLI, day selection, calendar crossing, `--dry-run`). Ship the
   full synthetic test suite (§9). **No vendor calls** — `--dry-run` prints the plan; CI runs the pure
   tests only.
-- **Phase 2 — bounded live validation (ask-first).** Run the **safe small default sample** (5 days ×
-  3 venues, ≈1.3 GB, incl. the `2024-08-06` fill-routing case) once against Crypto Lake, write
+- **Phase 2 — bounded live validation (ask-first).** Run the **safe small non-holdout default sample**
+  (5 days × 3 venues, ≈1.3 GB, incl. the `2024-08-06` fill-routing case and `2026-03-15` recent
+  development control) once against Crypto Lake, write
   `trade_feed_validation.json`, and record measured
   per-venue `trades_gb_per_day` to replace the provisional estimates. `AGENTS.md`: live/vendor pulls
   only when the user explicitly asks; document GB used and that the report artifact is git-ignored.
@@ -698,6 +735,11 @@ clean day classifies `pass`, not a coverage `fail`.
      day, emit its own pass/warn/fail verdict (same schema, `vendor_source: "coinapi"`), and on a
      pass/warn **remove that `(venue, day)` from `coinapi_fill_deferred`** so `bars_ready` can become
      true for its span. A CoinAPI-side fail keeps the day deferred (surfaced, not silently dropped).
+- **Phase 3c — pilot-OOS full validation (post-freeze; #48/#52).** Keep the generic CLI's April live
+  refusal. Add a separate entrypoint that derives the exact April scope from #52's hash-pinned frozen
+  selection/holdout artifact, records that the holdout is consumed, and applies the already-frozen
+  thresholds once. Any fail blocks or makes G0-XV inconclusive; no selective exclusion, retuning,
+  replacement month, or second validation/selection pass is allowed.
 - **Phase 4 — enforce in the bar builder.** The bar builder refuses to emit bars for a `(venue,
   span)` unless `summary.gate.bars_ready` holds for that span — i.e. `lake_required_pass` **and** no
   `coinapi_fill_deferred` entry touches it (every required day passed, and every fill day is a
@@ -707,8 +749,8 @@ clean day classifies `pass`, not a coverage `fail`.
 
 ## Implementation Tasks
 
-Follow-up branches (this branch ships only the doc + the §11 `docs/data.md` edit). Each is TDD;
-commit per task.
+The original plan branch was docs-only; Phase 1a/1b later landed. Remaining work stays split into
+reviewable TDD tasks.
 
 ### Task 1 (Phase 1a): pure checks module + tests
 
@@ -728,6 +770,8 @@ commit per task.
   codes (§7).
 - Add §9 case 13 (import-side-effect guard + load-seam monkeypatch) to `tests/test_trade_checks.py`
   (or a sibling `tests/test_validate_trade_feeds.py`).
+- **Landed amendment:** exclude April from default/cohort/random selection and reject an explicit
+  live April request before vendor access; case 14 pins the behavior.
 
 ### Task 3 (Phase 2): bounded live run + estimate refinement — **ask-first**
 
@@ -750,6 +794,13 @@ commit per task.
   schema → verdict) run with no vendor I/O; the live single-day CoinAPI pulls stay behind the §5a
   backfill gate and are **not run** until it unlocks.
 
+### Task 5c (Phase 3c): manifest-authorized pilot-OOS validation — **post-freeze only**
+
+- In #48/#52, add a separate exact-scope entrypoint authenticated by the frozen G0-XV selection and
+  holdout artifact. It may run April's full metrics once, marks the holdout consumed, and fails closed
+  without changing thresholds, exclusions, or candidate selection. Do not weaken the generic CLI's
+  pre-freeze April refusal.
+
 ### Task 6 (Phase 4): bar-builder enforcement (with the bar builder)
 
 - Gate bar emission on `summary.gate.bars_ready` (not `lake_required_pass`). Lake-only spans build
@@ -758,27 +809,29 @@ commit per task.
 
 ## Validation Commands
 
-This branch is **docs-only** — no code, so no pytest:
+For the 2026-07-10 staged-holdout amendment:
 
 ```bash
-git diff --check          # no whitespace/conflict errors
-git status -sb            # only the plan doc + the docs/data.md pointer edit
+.venv/bin/python -m pytest -q tests/test_validate_trade_feeds.py
+git diff --check
+git status -sb
 ```
 
-(Interpreter note for the follow-up branches: `.venv/bin/python -m pytest -q tests/test_trade_checks.py`;
-agent worktrees have no `.venv` — use `/home/aaron/jepa-btc-forecasting/.venv/bin/python`.)
+(Original plan-branch validation was docs-only. Agent worktrees have no `.venv`; use
+`/home/aaron/jepa-btc-forecasting/.venv/bin/python`.)
 
 ## PR Requirements
 
-- Title: `docs: plan trade validation breadth`.
-- Body: **Summary**; **Scope** (docs-only; the two-file split and rollout phases); **No vendor/API
-  calls run**; **Validation** (`git diff --check`, `git status -sb`); **Risks and assumptions**
-  (provisional `trades_gb_per_day` estimates until Phase 2 measures them; CoinAPI-fill-day trade
+- Original plan title: `docs: plan trade validation breadth`.
+- Current amendment body calls out the executable holdout guard, **no vendor/API calls run**, and
+  targeted synthetic validation.
+- Original plan risks remain: provisional `trades_gb_per_day` estimates until Phase 2 measures them;
+  CoinAPI-fill-day trade
   validation deferred behind the still-locked backfill gate; thresholds are first-pass and
   Phase-2-tunable; the CoinAPI trade-fill path (Task 5) is required to clear `coinapi_fill_deferred`
-  and stays behind the locked backfill gate); **Follow-ups** (Tasks 1–6).
-- Commit only docs — no data, reports, parquet/csv.gz, caches, or secrets. **CoinAPI backfill status:
-  still LOCKED.**
+  and stays behind the locked backfill gate. Follow-ups remain Tasks 3–6, including Task 5c.
+- Commit no data, reports, parquet/csv.gz, caches, or secrets. **CoinAPI backfill status: still
+  LOCKED.**
 
 ## Review Checklist
 
@@ -795,5 +848,7 @@ agent worktrees have no `.venv` — use `/home/aaron/jepa-btc-forecasting/.venv/
 - [ ] No vendor I/O in the pure module or its tests; `--dry-run` makes no Lake calls; the GB gate
       reuses the `run_coinbase_quality_map` quota pattern (exit 5).
 - [ ] Day selection has no broad default; the no-arg default sample stays under the auto cap.
+- [ ] Default/cohort/random selection excludes April; explicit live April full metrics fail before
+      vendor access, and no generic bypass exists.
 - [ ] `docs/data.md` §10 item is annotated (pointer only), **not** marked done; no unrelated
       Coinbase quality-map sections rewritten.

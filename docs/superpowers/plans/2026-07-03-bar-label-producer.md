@@ -10,10 +10,12 @@
 > §5–§8/§10 (design), [`docs/experiment-plan.md`](../../experiment-plan.md)
 > E0.3/E0.4/E0.5 + Phase 1/G1 (gates), [`docs/feature-manifest.md`](../../feature-manifest.md)
 > (the output contract), [`docs/data.md`](../../data.md) §5/§5a/§5b (coverage +
-> backfill gate). Section refs like "§5.4" point to the spec.
+> backfill gate), and
+> [`2026-07-10-staged-signal-acquisition.md`](2026-07-10-staged-signal-acquisition.md)
+> (Coinbase-first/pilot/full rollout). Section refs like "§5.4" point to the spec.
 
-**Goal.** Build the offline **producer** that turns reconstructed Binance +
-Coinbase event streams into the exact
+**Goal.** Build the offline **producer** that turns reconstructed Coinbase-only
+or Binance + Coinbase event streams into the exact
 `data/processed/model_matrix.parquet` + `data/processed/feature_manifest.json`
 that the already-built consumer `eval.runner.run_from_manifest`
 ([`eval/runner.py`](../../../eval/runner.py)) loads, validates, and gates (G1).
@@ -107,7 +109,7 @@ omits `bars*` — or a non-editable install / CLI import of the producer fails (
 runs would still pass, hiding it). T1 (the first `bars/` module) carries the `include = [...,
 "bars*"]` update and extends `tests/test_packaging.py::test_baseline_packages_are_shipped`.
 
-**Data flow (one instrument-day, then consolidate):**
+**Data flow (one instrument-day, then consolidate):** in cross-venue mode,
 a **streaming, day-partitioned k-way merge** of Binance+Coinbase deltas+trades on the
 engine-time axis (§C.1; `recon.merge_sorted` is the bounded-fixture oracle **only**, never
 the full-day path) → `bars.clock` (trailing-threshold schedule) emits bar boundaries →
@@ -124,6 +126,55 @@ slippage)/`half_spread_bps` → **guard-aware `stitch_policy` masks + `window_ve
 cross-seam/guard/uncovered rows** (§C.3) → per-day parquet → consolidate the labeled window
 → **`validate_frame` + `validate_matrix`** (fail closed — the NaN/inf/finite screens live in
 `validate_matrix`, §H/T8) → write `model_matrix.parquet` + `feature_manifest.json`.
+
+### Staged dataset modes (binding before T1)
+
+The staged acquisition protocol requires two source modes and four explicit manifest views. This is
+one producer architecture, not two forks:
+
+- **`coinbase_only`:** no Binance input is required or opened. The clock, observable feature book,
+  true label book, trades, labels, and costs all come from Coinbase. Its manifest lists only Coinbase
+  under `venues` and only Coinbase columns under `feature_cols`. Missing Binance columns are not
+  created or zero-filled.
+- **`cross_venue`:** requires certified coverage from both venues and uses the streaming merge above.
+  It emits one common row universe, then three manifests over identical row IDs, reserved columns,
+  labels, costs, horizons, split assignments, and regime tags: Coinbase-only control, Binance-only
+  signal, and combined. Only the ordered `feature_cols`/venue-source declarations differ.
+
+The first G0-CB run uses a Coinbase-only pilot build. After Binance pilot reconstruction, the
+Coinbase-only control is regenerated on the **matched cross-venue row universe**; comparing the
+earlier broader Coinbase build to the combined arm is forbidden. A row lacking certified Binance
+coverage is excluded from all three G0-XV arms, not represented by sentinel values. Dataset/build IDs
+and source-manifest hashes distinguish pilot from full production outputs.
+
+**Evaluator boundary (deep-review P1s/P2):** the producer writes a November-March
+Coinbase-only development build for G0-CB; that screen never requests or opens an April modeling
+artifact. After Binance pilot reconstruction it writes matched G0-XV development and April holdout
+partitions as separate immutable builds and never passes their union to `run_from_manifest`. The
+current runner has no fixed-holdout fit/score path and cannot compute PBO across different feature
+manifests. Issue #52 is therefore a hard prerequisite for T10: it persists G0-CB trial history, owns
+one G0-XV candidate ledger across arm × feature build × model × horizon × variant, performs
+development-only selection/PBO, freezes the selection artifact, fits pre-April, and performs the
+first and only April modeling score. T10 may prepare inputs but cannot report G0-CB/G0-XV by running
+each manifest independently.
+
+T10 has two milestones, not a closure-level cycle. **T10-A** emits G0-CB and matched G0-XV
+development inputs; #52 then freezes the ledger, thresholds, exact April scope, and selection.
+#48 starts the one-time holdout transaction and runs the manifest-authorized full April trade check.
+Only if that fixed check passes may **T10-B** materialize April features/labels for the exact frozen
+scope and #52 score them. A trade-check failure makes G0-XV blocking/inconclusive; it cannot change
+producer parameters, remove selected April days, or choose a replacement holdout.
+
+**Span-safe partition boundary (deep-review P2):** assigning a row by `t_event` date is not enough:
+its forward label can read the next partition. For each horizon, T9/T10 must apply a conservative
+prefilter **before label generation or adjacent-day loading**. A development candidate survives only
+when `t_event + horizon_ns + guard_ns < 2026-04-01T00:00:00Z`, where `guard_ns` is the consumed
+`SeamPolicy` guard. After construction, fail closed unless the actual guarded windows also stay
+before the boundary: the feature/cost support ends before April and
+`t_barrier + guard_ns < 2026-04-01T00:00:00Z`. Do not open April to resolve a March boundary label.
+Apply the same future-support rule at `2026-05-01T00:00:00Z` to the April holdout. Persist bounds,
+horizons, guard, rule version, and per-horizon drop counts in a hash-pinned partition-contract source
+artifact included in `build_id`; #52 validates the artifact before evaluation.
 
 ---
 
@@ -465,6 +516,12 @@ NaN-carried into the matrix (**`validate_matrix` rejects NaN/inf features** — 
 covers only columns/timing/dtypes). This is the value-level complement to the timing invariants
 below.
 
+**Pilot-partition integrity:** G0 development rows satisfy the pre-label conservative cutoff and
+their actual guarded feature/cost/label support ends strictly before April. April holdout label
+support ends strictly before May. This check runs before write and is independent of seam/vendor
+validity; adjacent-day stitching may bridge ordinary day partitions but never a pilot holdout
+boundary. The partition-contract source artifact and drop counts are part of the logical build.
+
 **Unique decision per `(t_event, horizon)` (Codex deep-review #2):** the monotone watermark can tie
 several backlog bars to one `t_event`; the producer emits **exactly one row per `(t_event, horizon)`**
 (coalesced to the last-closing bar, §C.2), so the evaluator's per-row PnL/trade counting
@@ -766,6 +823,11 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   gap case applies** (Changelog / #1).
 - **Leakage-control gate (E0.4):** random k-fold (no purge) shows inflated CV vs
   purged/embargoed on a synthetic overlapping-label series — the controls bite.
+- **Pilot partition boundary (P2):** plant March rows on both sides of the per-horizon conservative
+  cutoff. The unsafe row is dropped **without opening an April source**, the safe row survives, and
+  no emitted development row has `t_barrier + guard_ns >= 2026-04-01T00:00:00Z`. Mirror the fixture
+  at April's end to prove holdout labels do not load May; reconcile per-horizon drop counts to the
+  partition-contract artifact.
 - **Manifest round-trip:** producer emits matrix+manifest on a tiny fixture →
   `validate_frame` passes → `run_from_manifest` runs and returns the per-horizon result
   **schema** without crashing. Assert on **structure, not gate outcome** (Codex P3): a
@@ -779,43 +841,51 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   in `generated_at`.
 
 **Tier 2 — real-data (skipif-gated, runs only after backfill unlock):**
-`data/processed/*` present ⇒ the E0.3 median-bar histogram, τ ladder, and the first real
-G1 run. Skips cleanly today (matches `tests/test_baseline_integration.py`).
+`data/processed/*` present ⇒ the E0.3 median-bar histogram, τ ladder, G0-CB, and then
+the matched G0-XV arms when Binance pilot data exists. Formal G1 uses a later full-data
+build and separate holdout. G0-CB development reporting and G0-XV scoring require #52's
+trial-ledger/multi-arm evaluator; its fixed-holdout path is used only by G0-XV. Skips
+cleanly today (matches `tests/test_baseline_integration.py`).
 
 ---
 
 ## Before-backfill vs. after-backfill
 
-Backfill is **GATED and currently LOCKED** (data.md §5a/§9: `download_coinapi.py` refuses
->1-day full pulls (exit 4) until the §5a parity + reseed **multi-day** validation passes;
-memory `crypto-lake-access-state` / `coinbase-parity-gate-findings`: as of **2026-07-03**
-seam-day parity is validated but the broad full-window map is still the gate → backfill
-LOCKED). The split is therefore decisive:
+Backfill is **GATED and currently LOCKED** until issue #33's reviewed manifest reaches
+`ready`/`scope_complete=true`; `download_coinapi.py` retains its broad-pull and spend controls.
+The current downloader is contiguous-range and book-only, so issue #53's exact reviewed-manifest
+book/trade executor is also required before #34 can run the pilot backfill.
+The split is therefore decisive:
 
 **Buildable & fully testable NOW (pre-backfill) — synthetic + tiny fixtures:**
-all producer *code* (T1–T9): clock, trailing-threshold schedule, dual-book snapshot,
+all producer *code* (T1–T9): clock, trailing-threshold schedule,
+source-mode snapshot orchestration (Coinbase-only; dual-book in cross-venue mode),
 features, received-time per-venue feed-lag reads, **guard-aware seam-masking logic (on
 synthetic seams)**, triple-barrier labels, per-horizon uniqueness, cost columns, manifest emission, the
 end-to-end orchestrator; every Tier-1 test including value-level no-lookahead, sample-timing,
 seam masking, threshold causality, the leakage-control gate, and determinism. This
 exercises the **entire plumbing** through the built consumer without a byte of vendor data.
 
-**Requires the final backfilled dataset (post-backfill unlock) — T10:**
-the **final reviewed stitch plan / seam list** (the product of the §5a parity + reseed
-multi-day validation — the masking *code* is pre-backfill, the *seam list it consumes* is
-not); **threshold calibration** to hit the **E0.3 median-bar ≤ 2 s gate** on the **declared
+**Requires reviewed pilot data (post-backfill unlock) — T10:**
+the **pilot-window reviewed stitch plan / seam list** (the masking *code* is pre-backfill,
+the *seam list it consumes* is not); **threshold calibration** to hit the
+**E0.3 median-bar ≤ 2 s gate** on the **declared
 default clock's reference stream — real *Coinbase* trade volume** (Codex #B; Binance-volume
 calibration is scoped to the separate post-E2.5 Binance-clock path and must not size the
 Coinbase-default schedule); **τ measurement** (E1.1) to set the real horizon ladder; the
-**time-per-bar histogram** artifact; the **first real G1 run** over the usable calendar
-(704/730 d) with real regime stratification, real DSR trial count, and PBO over ≥32 OOS samples.
-**OOS held out FIRST (Codex deep-review #1):** the clean ~1-month OOS (≈**April 2026**, data.md:22-25)
-is **partitioned out and touched once, last**, for the final G1 report — T10 calibrates thresholds,
+**time-per-bar histogram** artifact; G0-CB and matched G0-XV with real regime stratification,
+the complete pilot-driven DSR trial count, and PBO over the preregistered pilot splits.
+**Pilot OOS held out FIRST:** G0-CB completes from its development build without opening April 2026.
+For G0-XV, T10-A calibrates thresholds,
 measures τ, and does all model/config selection on the **pre-OOS** data only, with labels/CV/metrics
 **pre-registered** before the OOS is read (experiment-plan:27-29). The runner just evaluates whatever
 rows it is given (`eval/runner.py:60-62`), so the producer/T10 must **exclude April from the
-calibration/selection matrix**, not merely annotate it. These are gated on backfill unlock and are
-**not** part of the code-complete producer.
+calibration/selection matrix**, not merely annotate it, and #52 must fit the frozen winner on
+pre-April matched rows before any outcome-bearing April read. #48 then runs the fixed, exact-scope
+April trade check as the first holdout-consuming action. On pass, T10-B emits April as a separate
+immutable build and #52 scores it once, last. These are gated on backfill unlock and are **not** part
+of the code-complete producer. April is consumed after G0-XV and cannot be reused as
+formal G1 OOS; the full-data run freezes a separate holdout outside the pilot.
 
 ---
 
@@ -833,9 +903,9 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T5** `feat/labels-triple-barrier` | Triple-barrier (**as-of/trailing** vol-scaled EWMA barriers — vol from returns `≤ t_event` only, params persisted, deep-review #4; vertical=horizon, **off Coinbase mid** — P2c; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, `P0` = TRUE reconstructed mid at `t_event` (#1)**; unresolved barrier → realized return + `label=0` (#4) | T2 target anchor | `data/labels.py` + span-anchor + as-of-vol tests | Pre |
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2×taker + slippage, fee-tier param; **slippage includes the `coinbase_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable Coinbase book at `coinbase_read_ts` (one-sided book → drop, #4) | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
-| **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection test | Pre |
-| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: no surviving row crosses a seam; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + determinism tests | Pre (synthetic seams) |
-| **T10** `feat/producer-calibration` (Post) | Consume the **final reviewed seam list**; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; first real G1. **Acceptance: seam masking holds on the real stitch plan** | T9, backfilled data + reviewed stitch plan | E0.3/E0.5 artifacts + G1 result | **Post** (backfill unlock) |
+| **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; staged `dataset_id`/`build_id`/`venues`/`sources`; emit Coinbase-only plus matched Coinbase/Binance/combined manifest views; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection + feature-subset identity tests | Pre |
+| **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; explicit `coinbase_only` / `cross_venue` source modes; wire `data/usable_calendar.json`; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; **consume the stitch plan + apply guard-aware seam masks + `window_vendor_sources`** (P2a); apply the **pre-label span-safe partition cutoff before adjacent-day reads** and emit its hash-pinned contract/drop counts; `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: Coinbase-only opens no Binance inputs; no surviving row crosses a seam or pilot holdout boundary; the three cross-venue arms have identical row/split/label/cost hashes; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, `recon/stitch_policy.py` | `bars/produce.py` + integration + seam-mask + partition-boundary + mode/matched-arm + determinism tests | Pre (synthetic seams) |
+| **T10** `feat/producer-calibration` (Post) | **T10-A:** consume the reviewed pilot seam list; threshold calibration to E0.3 gate; τ ladder (`eval/tau.py`); histogram; emit span-contained G0-CB and matched G0-XV development builds. G0-CB cannot open April, including for boundary labels. Freeze all G0-XV candidates, trade thresholds, and exact April scope after importing G0-CB trial history. **#48/#52 boundary:** run manifest-authorized full April trade validation once; fail ⇒ blocking/inconclusive with no scope/threshold change. **T10-B on pass only:** emit the exact separate April holdout builds; labels cannot open May. #52, not the producer or independent `run_from_manifest` calls, owns unified DSR/PBO selection, pre-April fit, and sole April model scoring. Formal G1 uses a later separate holdout. **Acceptance: milestone hashes reconcile; partition-contract counts reconcile; seam masking holds; pilot arms share row/split/label/cost hashes; development/holdout source hashes are disjoint and immutable** | T9, pilot backfilled data + reviewed stitch plan, #52 evaluator; T10-B additionally requires #48's frozen April trade-validation PASS | E0.3/E0.5 artifacts + frozen development inputs; then exact April holdout inputs; #52 emits G0 results | **Post** (pilot backfill + evaluator unlock) |
 
 ---
 
@@ -1045,9 +1115,10 @@ schema change.
   §C.2 member-observability parenthetical now says members are observable because **`t_event ≥` their
   max `received_time`** (the watermark is `≥`, not `=`), consistent with the monotone rule.
 - **Codex DEEP review (Codex on `b2be897`, requested per AGENTS.md Deep Review Guidelines) — 4
-  design-level P2 findings:** **#1** OOS (≈April 2026) is **held out first** — T10 calibrates/measures
-  τ/selects on **pre-OOS** data only, pre-registers labels/CV/metrics, and **excludes April from the
-  calibration/selection matrix** (data.md:22-25, experiment-plan:27-29; §split); **#2** the monotone
+  design-level P2 findings:** **#1** pilot OOS (April 2026) is **held out first** — G0-CB does not score
+  it; T10 calibrates/measures τ/selects on **pre-OOS** data only, pre-registers labels/CV/metrics,
+  and **excludes April from the calibration/selection matrix** before G0-XV's sole score
+  (data.md:22-25, experiment-plan:27-29; §split); **#2** the monotone
   watermark can **tie backlog bars to one `t_event`** — emit **one row per `(t_event, horizon)`**
   (coalesce to the last-closing bar) so the per-row-scoring evaluator (`eval/baseline.py:88-105`)
   can't count one decision as several trades (§C.2/§E/§J); **#3** feature **normalizers must be causal

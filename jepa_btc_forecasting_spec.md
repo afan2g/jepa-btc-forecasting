@@ -173,6 +173,7 @@ Each bar is a feature vector (the encoder ingests a sequence of these, not raw b
 ### 10.1 Supervised baseline FIRST (non-negotiable, milestone 0)
 Before any JEPA: build the bar pipeline + features, then fit a **dead-simple supervised baseline** — LightGBM or a small supervised transformer predicting forward return from the same features, with purged CV and a fees-included PnL metric.
 - **Why:** it confirms there's *any* signal at your horizon, sets the benchmark JEPA must beat, and shakes out the data/label/CV plumbing. **If the supervised baseline shows no edge, JEPA will not conjure one** — it adds representation quality + multi-horizon transfer on top of a real signal; it does not manufacture signal from noise.
+- **Stage the data spend:** follow [`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md). Run a development-only Coinbase preliminary screen, then a matched six-month Coinbase/Binance pilot before acquiring the remaining Binance archive. These are acquisition screens, not substitutes for the formal full-data G1. Weak Coinbase-own-book signal alone does not refute the primary Binance→Coinbase hypothesis. G0-CB never scores April: development rows whose guarded forward support reaches April are dropped before label reads. G0-XV selection uses one ledger across all arms/configs/horizons/variants and performs the first and only modeling evaluation of the physically separate April holdout. Three independent manifest runs are not valid evidence.
 
 ### 10.2 Metric
 - **Fees-included PnL with a no-trade band:** act only when `|forecast| > cost + margin`. The round-trip fee defines a no-trade band around the forecast.
@@ -190,11 +191,11 @@ Before any JEPA: build the bar pipeline + features, then fit a **dead-simple sup
 ---
 
 ## 12. Suggested build order
-1. **Ingest + archive:** vendor download (Crypto Lake Binance) + live Coinbase WS capture → raw Parquet, partitioned by (exchange, symbol, day). Verify §4 sample checks.
+1. **Ingest + staged archive:** verify bounded vendor samples and produce raw Parquet partitioned by (exchange, symbol, day). Complete the Coinbase pilot inputs first; acquire the predeclared six-month Binance pilot next; acquire the remaining 12–24-month Binance archive only after the cross-venue spend gate passes.
 2. **Event-time reconstruction (`recon`):** merge trades + book deltas on engine-time; produce a consistent book-state-at-T API + replay.
-3. **Notional-bar sampler + features (`bars`):** §5 clock (with time cap), §6 feature vector. Output model-ready tensors.
+3. **Notional-bar sampler + features (`bars`):** §5 clock (with time cap), §6 feature vector. Support explicit Coinbase-only and matched cross-venue datasets; never zero-fill an unavailable venue. Output model-ready tensors plus versioned feature manifests.
 4. **Labels + purged/embargoed CV (`data`).**
-5. **Supervised baseline (`eval`):** LightGBM on features → forward return; purged CV; fees-included PnL + no-trade band. **Gate: is there signal?**
+5. **Supervised baseline (`eval`):** run the Coinbase-only preliminary screen, then the matched six-month cross-venue acquisition gate. After approved full-data acquisition, run formal G1: LightGBM on explicit features → forward return; purged CV; fees-included PnL + no-trade band. **Gate: is there signal?**
 6. **CF-JEPA pretraining (`model`/`train`):** §7. Sanity-check for collapse (monitor embedding variance / VICReg terms).
 7. **Heads + comparison:** does the SSL representation beat the supervised baseline **after costs**?
 8. **Walk-forward + (later) extensions:** MTS-JEPA multi-resolution, imbalance/run bars, richer cross-venue context.
