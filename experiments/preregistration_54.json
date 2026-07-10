@@ -1,0 +1,113 @@
+{
+  "issue": 54,
+  "preregistered_utc": "2026-07-10",
+  "note": "Preregistered thresholds and fixture set for the CoinAPI snapshot-only seeding experiment. Committed BEFORE any real-data arm was executed; the module constant experiments.snapshot_seed.PREREGISTERED is pinned equal by tests/test_snapshot_seed_experiment.py. A parity.spike_gt50_fraction failure may be overridden ONLY by PR-#28-style volatility attribution (spikes concentrated in hours where the CoinAPI reference itself moved), documented spike-by-spike in the experiment report.",
+  "anchors": {
+    "clean_reference_2025-06-01": {
+      "mid_median": 0.0,
+      "p95": 0.48,
+      "p99": 4.35,
+      "max": 66.59,
+      "corr": 0.99999778,
+      "labels_2_10_60": [
+        0.951,
+        0.983,
+        0.995
+      ]
+    },
+    "crossed_seed_cv_failures": {
+      "2024-12-04": {
+        "p99": 25.4,
+        "corr": 0.9999779,
+        "gt50_spikes": 177,
+        "n_grid": 79576,
+        "label_2s": 0.832
+      },
+      "2026-04-01": {
+        "p99": 157.0,
+        "corr": 0.995865,
+        "gt50_spikes": 1430,
+        "n_grid": 51208,
+        "label_2s": 0.917
+      }
+    },
+    "lake_usable_bars": {
+      "crossed_max": 0.01,
+      "missing_max": 0.02,
+      "thin_max": 0.1
+    }
+  },
+  "arms": [
+    "cold_control",
+    "lake_book_control",
+    "coinapi_day_open_L20",
+    "coinapi_day_open_full",
+    "coinapi_stream_L5",
+    "coinapi_stream_L10",
+    "coinapi_stream_L20",
+    "coinapi_stream_L50",
+    "coinapi_on_demand_L20",
+    "coinapi_on_demand_L50"
+  ],
+  "thresholds": {
+    "day_quality": {
+      "crossed_rate_max": 0.01,
+      "missing_book_fraction_max": 0.02,
+      "thin_depth_fraction_max": 0.1,
+      "crossed_duration_s_max": 900.0
+    },
+    "parity": {
+      "mid_median_usd_max": 0.01,
+      "mid_signed_mean_abs_usd_max": 0.5,
+      "mid_corr_min": 0.9995,
+      "mid_p95_usd_max": 10.0,
+      "mid_p99_usd_max": 35.0,
+      "spike_gt50_fraction_max": 0.001,
+      "label_agreement_min": {
+        "2": 0.92,
+        "10": 0.96,
+        "60": 0.985
+      }
+    },
+    "clean_control_non_regression": {
+      "crossed_rate_delta_max": 0.001,
+      "mid_p99_delta_usd_max": 1.0,
+      "mid_corr_delta_max": 0.0001,
+      "label2_delta_max": 0.005
+    },
+    "economics": {
+      "max_fraction_of_full_day_cost": 0.25
+    }
+  },
+  "fixture_days": {
+    "clean_control": [
+      "2025-06-01"
+    ],
+    "crossed_seed_mild": [
+      "2024-12-04"
+    ],
+    "crossed_seed_severe": [
+      "2026-04-01"
+    ],
+    "emulated_degradations": [
+      "no_lake_book_snapshots",
+      "leading_gap_seam",
+      "sparse_deltas"
+    ]
+  },
+  "emulated_variants": [
+    "leading_gap",
+    "sparse",
+    "no_lake_book_snapshots"
+  ],
+  "amendments": [
+    {
+      "utc": "2026-07-10",
+      "note": "Machine-enforcement amendment BEFORE any crossed-seed-day result was inspected (only the 2025-06-01 clean control had run): (1) shared-source arms must ALSO pass the injection-guarded parity verdict; (2) the economics bar is machine-evaluated on the conservative end of the cost band; (3) arm-name vocabulary reconciled with the runner. Thresholds unchanged; strictly tightening."
+    },
+    {
+      "utc": "2026-07-10",
+      "note": "Deep-review amendment, added BEFORE its results were seen: coinapi_on_demand_L50 sensitivity arm added to close the REST depth-cap question empirically (a 2026-07-10 deep-review claim of a 50-level limit_levels max conflicts with the live-indexed 20-level docs cap; the endpoint page is bot-gated). The arm stays UNPRICED under the conservative 20-level purchasability cap, so it can only inform parity, never pass economics."
+    }
+  ]
+}

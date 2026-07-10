@@ -1,0 +1,49 @@
+{
+  "issue": 54,
+  "generated_utc": "2026-07-10",
+  "reports_generated_at_commit": "c39fb3c1444cb4ac19f613ccf76e88893ee1db5f",
+  "evidence_rebuilt_at_commit": "a915325070805dc400552b1f6948d75ec2287277",
+  "provenance_note": "reports_generated_at_commit = the harness code that produced the pinned day reports (git rev-parse-able); evidence_rebuilt_at_commit = the tree whose arm_summary_rows rebuilt the CSVs from those reports. The CSV/index refresh changed no replay output.",
+  "note": "Tracked audit bundle for the #54 NO-GO decision: per-arm metric CSVs and the #33-manifest reconciliation carry every decision-bearing number quoted in docs/data.md, issue #54, and PR #63. Full day-report JSONs stay git-ignored under data/reports/snapshot_seed/ (aggregate metrics only, <1 MB each) and are pinned here by sha256 + their internal report_hash; inputs pinned by the CoinAPI parquet sha256 and Lake cache file URLs.",
+  "tracked_files": {
+    "reconciliation_54.json": "ef329146102b47b095f75b96b30efc8f6374c82bdbef28d2d3c8b6d29cd5e1da",
+    "snapshot_seed_2024-12-04_arms.csv": "c292c739297c4b05238dad97912df4e3564a1abd0aba9efd827cf6cbc6b672ab",
+    "snapshot_seed_2025-06-01_arms.csv": "836c3272296ede44b4106c26624c17ce117660209bd2d4993a45001257d31b04",
+    "snapshot_seed_2025-06-01_leading_gap_arms.csv": "327d195e23df9da34628d349ac6f5fd81f57aecb8f1911daf745f30f0cc60636",
+    "snapshot_seed_2025-06-01_sparse_arms.csv": "c9b0e8f3d4737254d58e78a5f2741008a640bd4bdaa1a6e5fb6e2a3aab5bc708",
+    "snapshot_seed_2026-04-01_arms.csv": "fa616d8b62d53ddbabb56f550c684a8fce33fb35a8b94224fa56578da35417ae"
+  },
+  "ignored_reports_sha256": {
+    "snapshot_seed_2024-12-04.json": "4652fe2f8f450880c5434f2298ff97e0747c2821e17ff2400c173217d7ad3d73",
+    "snapshot_seed_2025-06-01.json": "d07226731ee1a940e61bad8dd9d3f4572a9cc650fa4ff1df3dfc32deec5f1113",
+    "snapshot_seed_2025-06-01_leading_gap.json": "3d3f3b7768a540ec678ccd1f41d4f48e0d032527485242959a24d56d5c530870",
+    "snapshot_seed_2025-06-01_sparse.json": "d8a71a3078b291b18524253f6d2081c4655b9ae0faf9de56b3822d9121fa6aab",
+    "snapshot_seed_2026-04-01.json": "288d13928bc6000d1795bf72c69d3eff45cffbd5dfcc6f1fdb9bd42e7d7f7e34"
+  },
+  "inputs": {
+    "2024-12-04": {
+      "coinapi_parquet_sha256": "6b207e30c66a9cf9d0e6a59175f3316eaa4c7fec084afd5eccf9756a8a1c6583",
+      "lake_files": [
+        "https://data.crypto-lake.com/market-data/cryptofeed/book_delta_v2/exchange=COINBASE/symbol=BTC-USD/dt=2024-12-04/1.snappy.parquet"
+      ],
+      "full_day_book_gb": 1.930871074,
+      "day_report_hash": "82fb051137a1db8502c3e4f92063d653c43c52a968311d11cf1dce855dba126b"
+    },
+    "2025-06-01": {
+      "coinapi_parquet_sha256": "fd6bc4782e58ec5827286101231f4af6a80c0aa70b5688640c429bccb29a8004",
+      "lake_files": [
+        "https://data.crypto-lake.com/market-data/cryptofeed/book_delta_v2/exchange=COINBASE/symbol=BTC-USD/dt=2025-06-01/1.snappy.parquet"
+      ],
+      "full_day_book_gb": 0.799598234,
+      "day_report_hash": "8f54487ba84ef23478a984b0ffcfe59b49cb5f02cc7bf3c9ff2b1ec17453e852"
+    },
+    "2026-04-01": {
+      "coinapi_parquet_sha256": "2b63e94122b36a945351875e5a77641959516895ca50307edab658cde30a120f",
+      "lake_files": [
+        "https://data.crypto-lake.com/market-data/cryptofeed/book_delta_v2/exchange=COINBASE/symbol=BTC-USD/dt=2026-04-01/1.snappy.parquet"
+      ],
+      "full_day_book_gb": 2.371844307,
+      "day_report_hash": "ac72cb2c1557c650557e6160a74b59a539bbe1c64ef7251bfcbf138196dcff5e"
+    }
+  }
+}

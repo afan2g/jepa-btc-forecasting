@@ -1,0 +1,55 @@
+{
+  "issue": 54,
+  "pilot_window": [
+    "2025-11-01",
+    "2026-04-30"
+  ],
+  "buckets": {
+    "addressable_crossed_seed_source": {
+      "days": 457,
+      "gb": 1037.39,
+      "usd": 1037.39,
+      "pilot_days": 167,
+      "pilot_gb": 379.09,
+      "pilot_usd": 379.09
+    },
+    "other_lake_present_degraded": {
+      "days": 15,
+      "gb": 34.05,
+      "usd": 34.05,
+      "pilot_days": 0,
+      "pilot_gb": 0.0,
+      "pilot_usd": 0.0
+    },
+    "not_addressable_partial_fills": {
+      "days": 85,
+      "gb": 192.95,
+      "usd": 192.95,
+      "pilot_days": 7,
+      "pilot_gb": 15.89,
+      "pilot_usd": 15.89
+    },
+    "not_addressable_lake_absent": {
+      "days": 47,
+      "gb": 84.6279,
+      "usd": 84.6279,
+      "pilot_days": 0,
+      "pilot_gb": 0.0,
+      "pilot_usd": 0.0
+    },
+    "resolution_policy_days": {
+      "days": 9,
+      "gb": 20.43,
+      "usd": 20.43,
+      "pilot_days": 2,
+      "pilot_gb": 4.54,
+      "pilot_usd": 4.54
+    }
+  },
+  "totals": {
+    "book_fill_days": 613,
+    "gross_usd": 1377.2992,
+    "book_usd": 1369.4479
+  },
+  "note": "'addressable' = a snapshot-seeded Lake replay could in principle replace the full-day fill (Lake deltas present, failure mode is the seed source); whether it ACTUALLY may is the #54 experiment verdict \u2014 a NO-GO leaves every bucket on the canonical manifest unchanged."
+}
