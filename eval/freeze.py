@@ -173,6 +173,13 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
             == bool(vr["noise_band"]["beats_control"]),
         "matched_rows": dev_result["matched"]["row_content_sha256"]
             == vr["matched_row_sha256"],
+        # The per-arm FULL content hashes the freeze copies into sources (and the
+        # holdout refit later verifies against) must be the ledger-pinned ones — an
+        # edited dev result cannot point the feature-substitution guard at recomputed
+        # feature matrices.
+        "arm_matrix_hashes": {a: e["matrix_content_sha256"]
+                              for a, e in arms_echo.items()}
+            == vr["arm_matrix_hashes"],
     }
     bad = sorted(k for k, ok in checks.items() if not ok)
     if bad:

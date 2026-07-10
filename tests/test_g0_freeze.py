@@ -212,6 +212,22 @@ def test_freeze_rejects_verdict_flip_when_pbo_failed_closed(g0_world, monkeypatc
                               generated_at="2026-07-10T12:00:00+00:00")
 
 
+def test_freeze_pins_arm_matrix_hashes_to_ledger_verdict(g0_pipeline):
+    """Codex PR#60 round-5 P1: the per-arm full matrix hashes the freeze copies into
+    sources (and the holdout refit verifies against) must be the LEDGER-pinned ones — an
+    edited dev result cannot point the feature-substitution guard at a recomputed
+    feature matrix."""
+    edited = copy.deepcopy(g0_pipeline["res_xv"])
+    arm = edited["winner"]["arm"]
+    edited["arms"][arm]["matrix_content_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="arm_matrix_hashes"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope=g0_pipeline["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+
 def test_freeze_with_append_only_ledger_across_studies(g0_world):
     """Codex PR#60 round-4 P2/P3: a ledger carrying a PRIOR study's g0xv trials and
     verdict entries (imported as search history) must neither poison the winner's DSR

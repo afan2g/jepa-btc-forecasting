@@ -41,7 +41,8 @@ from eval.freeze import build_freeze_artifact, load_freeze, write_freeze  # noqa
 from eval.g0 import (g0cb_manifest_prechecks, run_g0cb_study,          # noqa: E402
                      run_g0xv_development)
 from eval.hashing import hash_obj                                      # noqa: E402
-from eval.holdout import preflight_holdout_inputs, score_fixed_holdout  # noqa: E402
+from eval.holdout import (preflight_holdout_inputs, score_fixed_holdout,  # noqa: E402
+                          verify_frozen_dev_matrix)
 from eval.ledger import TrialLedger, _json_safe                        # noqa: E402
 from eval.manifest import load_manifest                                # noqa: E402
 from eval.partition import load_partition_contract, require_binding    # noqa: E402
@@ -229,6 +230,11 @@ def cmd_holdout_score(args, read_matrix) -> int:
     preflight_holdout_inputs(freeze, contract=contract, dev_manifest=dev_manifest,
                              holdout_manifest=holdout_manifest)
     dev_matrix = read_matrix(args.dev_matrix)
+    # The dev matrix's frozen content pins are verified BEFORE the holdout matrix is
+    # opened: tampered/stale dev rows must not re-open outcome-bearing holdout data
+    # through repeated failing invocations.
+    verify_frozen_dev_matrix(freeze, contract=contract, dev_matrix=dev_matrix,
+                             dev_manifest=dev_manifest)
     holdout_matrix = read_matrix(args.holdout_matrix)
     res = score_fixed_holdout(freeze_artifact=freeze, records_dir=args.records_dir,
                               contract=contract, dev_matrix=dev_matrix,

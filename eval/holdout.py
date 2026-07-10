@@ -101,6 +101,32 @@ def preflight_holdout_inputs(freeze_artifact: dict, *, contract: dict,
         raise ValueError(f"holdout build lacks frozen winner features: {missing}")
 
 
+def verify_frozen_dev_matrix(freeze_artifact: dict, *, contract: dict,
+                             dev_matrix: pd.DataFrame, dev_manifest: dict) -> None:
+    """Every dev-matrix pin, runnable WITHOUT holdout data: frame/span validity, the
+    frozen matched reserved-row hash, and the winner arm's full feature-content hash.
+    The CLI runs this between the dev read and the holdout read, so tampered/stale dev
+    rows cannot repeatedly re-open the holdout matrix through failing invocations."""
+    winner = freeze_artifact["winner"]
+    validate_frame(dev_matrix, dev_manifest)
+    validate_development_span(dev_matrix, contract)
+    if matrix_content_hash(dev_matrix, list(RESERVED)) \
+            != freeze_artifact["sources"]["row_content_sha256"]:
+        raise ValueError("development matrix reserved-row content does not match the "
+                         "frozen matched row universe; the frozen winner must be refit on "
+                         "exactly the rows it was selected on")
+    # The reserved-row hash cannot see feature substitution (arms share reserved columns
+    # but differ in features), so the refit input is ALSO pinned by the per-arm FULL
+    # content hash frozen at selection time — features recomputed after the freeze
+    # (e.g. with holdout knowledge) fail here.
+    frozen_full = freeze_artifact["sources"]["arm_matrix_hashes"][winner["arm"]]
+    if matrix_content_hash(dev_matrix,
+                           list(RESERVED) + feature_list(dev_manifest)) != frozen_full:
+        raise ValueError(f"development matrix FEATURE content does not match the frozen "
+                         f"{winner['arm']!r} arm build; the frozen winner must be refit "
+                         "on exactly the feature values it was selected on")
+
+
 def score_fixed_holdout(*, freeze_artifact: dict, records_dir, contract: dict,
                         dev_matrix: pd.DataFrame, dev_manifest: dict,
                         holdout_matrix: pd.DataFrame, holdout_manifest: dict,
@@ -139,25 +165,10 @@ def score_fixed_holdout(*, freeze_artifact: dict, records_dir, contract: dict,
     winner = freeze_artifact["winner"]
     scope = freeze_artifact["holdout_scope"]
 
-    validate_frame(dev_matrix, dev_manifest)
+    verify_frozen_dev_matrix(freeze_artifact, contract=contract, dev_matrix=dev_matrix,
+                             dev_manifest=dev_manifest)
     validate_frame(holdout_matrix, holdout_manifest)
-    validate_development_span(dev_matrix, contract)
     validate_holdout_span(holdout_matrix, contract)
-    if matrix_content_hash(dev_matrix, list(RESERVED)) \
-            != freeze_artifact["sources"]["row_content_sha256"]:
-        raise ValueError("development matrix reserved-row content does not match the "
-                         "frozen matched row universe; the frozen winner must be refit on "
-                         "exactly the rows it was selected on")
-    # The reserved-row hash cannot see feature substitution (arms share reserved columns
-    # but differ in features), so the refit input is ALSO pinned by the per-arm FULL
-    # content hash frozen at selection time — features recomputed after the freeze
-    # (e.g. with holdout knowledge) fail here.
-    frozen_full = freeze_artifact["sources"]["arm_matrix_hashes"][winner["arm"]]
-    if matrix_content_hash(dev_matrix,
-                           list(RESERVED) + feature_list(dev_manifest)) != frozen_full:
-        raise ValueError(f"development matrix FEATURE content does not match the frozen "
-                         f"{winner['arm']!r} arm build; the frozen winner must be refit "
-                         "on exactly the feature values it was selected on")
     dup = holdout_matrix.duplicated(subset=["t_event", "horizon"])
     if dup.any():
         raise ValueError(f"{int(dup.sum())} duplicate (t_event, horizon) holdout rows; "

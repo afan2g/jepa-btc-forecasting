@@ -479,6 +479,7 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
     # recomputable from per-trial results alone).
     verdict_build = hash_obj({p["arm"]: p["manifest"]["build_id"] for p in preps})
     control_prep = next(p for p in preps if p["arm"] == control_arm)
+    arms_out = {p["arm"]: _arm_echo(p) for p in preps}
     for tag, h in horizons.items():
         verdict_ident = trial_identity(
             protocol="g0xv-verdict", arm="unified",
@@ -499,6 +500,11 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
             "noise_band": dict(h["noise_band"]),
             "gate_sha256": hash_obj(gate),
             "matched_row_sha256": matched["row_content_sha256"],
+            # Per-arm FULL content pins (reserved + feature values), ledger-pinned so an
+            # edited dev-result JSON cannot substitute the hash the holdout refit
+            # verifies against.
+            "arm_matrix_hashes": {a: e["matrix_content_sha256"]
+                                  for a, e in arms_out.items()},
         })
 
     winner = None
@@ -520,7 +526,7 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
         "development_only": True,
         "g1_claim": False,
         "gate": gate,
-        "arms": {p["arm"]: _arm_echo(p) for p in preps},
+        "arms": arms_out,
         "control_arm": control_arm,
         "combined_arm": combined_arm,
         "matched": matched,

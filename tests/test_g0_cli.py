@@ -200,6 +200,17 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
     assert rg.main(wrong_build, read_matrix=store) == 2
     assert store.calls == pre_calls
 
+    # ... and tampered dev ROWS (manifests matching the freeze) must refuse after the
+    # dev read but BEFORE the holdout matrix is opened
+    tampered = store.frames[f[f"dev_{arm}_mat"]].copy()
+    tampered.loc[0, "y_fwd_bps"] += 1.0
+    tampered_path = store.put("tampered_dev.parquet", tampered)
+    bad_dev = [a for a in score_args]
+    bad_dev[bad_dev.index(f[f"dev_{arm}_mat"])] = tampered_path
+    pre_calls = list(store.calls)
+    assert rg.main(bad_dev, read_matrix=store) == 2
+    assert store.calls == pre_calls + [tampered_path]   # holdout never opened
+
     # an unwritable --out must fail BEFORE the transaction is consumed — both a missing
     # parent dir and an existing DIRECTORY at the leaf (a writable parent is not enough)
     bad_out = [a if not a.endswith("score.json") else str(tmp_path / "nodir" / "s.json")
