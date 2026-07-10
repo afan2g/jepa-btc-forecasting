@@ -302,11 +302,13 @@ def _validate_csv_columns(gz_path, required, what) -> None:
                          f"(got {cols}) — refusing to normalize (schema drift?)")
 
 
-def process_unit(s3, bucket, unit, args, manifest_sha256) -> dict:
+def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
     """Download + normalize ONE planned fill unit (product×day). Same discipline as process_day:
     one throttled streamed GET, chunked csv->parquet, atomic publish — plus a fingerprint-keyed
-    state record so resume can never count a stale or foreign output as done. Quota ClientErrors
-    propagate (the run loop aborts); anything else is recorded as a per-unit `error`."""
+    state record so resume can never count a stale or foreign output as done, and a runtime
+    budget guard (the vendor LIST size is known before the billable GET, so a unit that would
+    push measured spend past --approve-usd is refused, never downloaded). Quota ClientErrors
+    propagate (the run loop aborts); any other vendor/parse failure is a per-unit `error`."""
     product, day = unit["product"], unit["day"]
     handler = HANDLERS[product]
     compact = day.replace("-", "")
@@ -323,17 +325,25 @@ def process_unit(s3, bucket, unit, args, manifest_sha256) -> dict:
         st = bf.load_state(bf.state_path(args.out, manifest_sha256, product, day)) or {}
         res.update(status="done", key=st.get("key"), out_bytes=st.get("out_bytes") or 0,
                    out_sha256=st.get("out_sha256"), out_path=final)
-        print(f"  {day}  {product}  done (state + output verified for this manifest)")
+        print(f"  {day}  {product}  done (state + output bytes re-verified for this manifest)")
         return res
     if resume == "conflict":
         res.update(status="conflict", out_path=final, error=(
-            "existing output has no matching state record for this manifest fingerprint — "
-            "refusing to adopt or overwrite it (move it aside, or re-download with --overwrite)"))
+            "existing output has no state record matching this manifest fingerprint and these "
+            "exact bytes — refusing to adopt or overwrite it (move it aside, or re-download "
+            "with --overwrite)"))
         print(f"  {day}  {product}  CONFLICT (foreign/stale output at {final})")
         return res
 
-    located = find_file(s3, bucket, compact, args.exchange, args.symbol_tag,
-                        data_type=handler["data_type"])
+    t0 = dt.datetime.now()
+    try:
+        located = find_file(s3, bucket, compact, args.exchange, args.symbol_tag,
+                            data_type=handler["data_type"])
+    except ClientError as e:
+        if is_quota_error(str(e)):
+            raise                                            # abort the whole run (quota gate)
+        res.update(status="error", error=f"{type(e).__name__}: {e}"[:300])
+        return res
     if not located:
         res.update(status="missing", error="no consolidated daily file")
         manifest_append(args.out, {"dt": day, "product": product, "status": "missing",
@@ -342,11 +352,24 @@ def process_unit(s3, bucket, unit, args, manifest_sha256) -> dict:
         return res
     key, src_bytes = located
 
+    rate = None
+    if budget is not None:
+        rate = budget["rates"][product]
+        projected = src_bytes / 1e9 * rate
+        if budget["spent_usd"] + projected > budget["approve_usd"] + 1e-9:
+            res.update(status="refused_budget", key=key, src_bytes=src_bytes, error=(
+                f"projected ${projected:.2f} ({src_bytes/1e9:.3f} GB actual) would push measured "
+                f"spend past the approved --approve-usd ${budget['approve_usd']:.2f} "
+                f"(${budget['spent_usd']:.2f} already committed) — refused before any billable "
+                "GET; raise the approval or narrow the window"))
+            print(f"  {day}  {product}  REFUSED (budget: projected ${projected:.2f} over cap)")
+            return res
+
     os.makedirs(part_dir, exist_ok=True)
     tmp_parq = final + ".tmp"
     tmp_gz = os.path.join(args.out, "_tmp"); os.makedirs(tmp_gz, exist_ok=True)
     gz_path = os.path.join(tmp_gz, key.split("/")[-1] + ".partial")
-    t0 = dt.datetime.now()
+    ok = False
     try:
         try:
             got, src_sha = stream_to_file(s3, bucket, key, gz_path)
@@ -358,7 +381,17 @@ def process_unit(s3, bucket, unit, args, manifest_sha256) -> dict:
             rows, _ = write_parquet(chunks, tmp_parq, schema=handler["schema"],
                                     to_table_fn=handler["to_table"],
                                     dict_cols=handler["dict_cols"])
+            out_bytes = os.path.getsize(tmp_parq)
+            out_sha = bf.sha256_file(tmp_parq)
+            # state BEFORE publish: a crash between the two leaves state-without-output, which
+            # resumes as a plain re-download (todo) — never a conflict demanding --overwrite
+            bf.write_state(args.out, manifest_sha256, unit,
+                           {"status": "ok", "key": key, "src_bytes": src_bytes,
+                            "src_sha256": src_sha, "rows": rows, "out_bytes": out_bytes,
+                            "out_sha256": out_sha, "out_path": final,
+                            "completed_utc": now_iso()})
             os.replace(tmp_parq, final)                      # atomic publish
+            ok = True
         except ClientError as e:
             if is_quota_error(str(e)):
                 raise                                        # abort the whole run (quota gate)
@@ -371,7 +404,7 @@ def process_unit(s3, bucket, unit, args, manifest_sha256) -> dict:
         if os.path.exists(tmp_parq):
             os.remove(tmp_parq)
         if os.path.exists(gz_path):
-            if args.keep_raw:
+            if ok and args.keep_raw:   # never archive a failed/partial download as canonical raw
                 raw_dir = os.path.join(args.out, "_raw_gz", product,
                                        f"exchange={args.exchange_out}",
                                        f"symbol={args.symbol_out}")
@@ -381,14 +414,10 @@ def process_unit(s3, bucket, unit, args, manifest_sha256) -> dict:
                 os.remove(gz_path)
 
     secs = round((dt.datetime.now() - t0).total_seconds(), 1)
-    out_bytes = os.path.getsize(final)
-    out_sha = bf.sha256_file(final)
     res.update(status="ok", key=key, src_bytes=src_bytes, src_sha256=src_sha, rows=rows,
                out_bytes=out_bytes, out_sha256=out_sha, out_path=final, secs=secs)
-    bf.write_state(args.out, manifest_sha256, unit,
-                   {"status": "ok", "key": key, "src_bytes": src_bytes, "src_sha256": src_sha,
-                    "rows": rows, "out_bytes": out_bytes, "out_sha256": out_sha,
-                    "out_path": final, "completed_utc": now_iso()})
+    if budget is not None:
+        budget["spent_usd"] += src_bytes / 1e9 * rate
     manifest_append(args.out, {"dt": day, "product": product, "status": "ok", "key": key,
                                "src_bytes": src_bytes, "rows": rows, "out_bytes": out_bytes,
                                "manifest_sha256": manifest_sha256, "secs": secs,
@@ -418,12 +447,30 @@ def _live_s3_factory():
     return s3, ff.discover_bucket(s3)
 
 
+QUOTA_ABORT_EXIT = 5   # manifest-mode quota abort — distinct from input-error 2 / refusal 3 /
+                       # gate 4 (range mode keeps its legacy exit 2 on quota)
+
+# The reviewed manifest is pinned COINBASE/BTC-USD; a CLI market override in manifest mode would
+# download another market's files and record them as Coinbase fills. (flag, args attr, pin)
+_MANIFEST_MODE_MARKET_PINS = (("--exchange", "exchange", "COINBASE"),
+                              ("--symbol-tag", "symbol_tag", "COINBASE_SPOT_BTC_USD"),
+                              ("--exchange-out", "exchange_out", "COINBASE"),
+                              ("--symbol-out", "symbol_out", "BTC-USD"))
+
+
 def run_manifest_mode(args, s3_factory=None) -> int:
-    """Reviewed-manifest execution (issue #53). Fail-closed order: refuse missing authorization
-    flags, build+reconcile the plan (refusals exit 3, input errors exit 2), write the plan, stop
-    there on a dry run; else enforce the spend cap and the §5a backfill gate BEFORE any vendor
-    client exists, run exactly the planned units, and emit the reconciled execution report."""
+    """Reviewed-manifest execution (issue #53). Fail-closed order: refuse market overrides and
+    missing authorization flags, build+reconcile the plan (refusals exit 3, input errors exit 2),
+    write the plan, stop there on a dry run; else enforce the spend cap and the §5a backfill gate
+    BEFORE any vendor client exists, run exactly the planned units (with a runtime budget guard
+    against the approved cap), and emit the reconciled execution report."""
     generated = args.generated_utc or now_iso()
+    overridden = [f"{flag}={getattr(args, attr)!r}" for flag, attr, pin in
+                  _MANIFEST_MODE_MARKET_PINS if getattr(args, attr) != pin]
+    if overridden:
+        print("REFUSING manifest mode with market overrides (" + ", ".join(overridden) + "): "
+              "the reviewed manifest is pinned to COINBASE/BTC-USD.", file=sys.stderr)
+        return bf.REFUSAL_EXIT
     if args.execute:
         missing = [flag for flag, v in (("--manifest-sha256", args.manifest_sha256),
                                         ("--approve-usd", args.approve_usd),
@@ -464,6 +511,10 @@ def run_manifest_mode(args, s3_factory=None) -> int:
               "band) — raise the approval or narrow the pilot window.", file=sys.stderr)
         return bf.REFUSAL_EXIT
     manifest_sha = plan["meta"]["manifest"]["sha256"]
+    cm = plan["meta"]["cost_model"]
+    budget = {"approve_usd": approve, "spent_usd": 0.0,
+              "rates": {bf.PRODUCT_BOOK: float(cm["book_usd_per_gb"]),
+                        bf.PRODUCT_TRADES: float(cm["trades_usd_per_gb"])}}
     results, quota_hit = [], False
     if plan["units"]:
         days = sorted({u["day"] for u in plan["units"]})
@@ -472,11 +523,22 @@ def run_manifest_mode(args, s3_factory=None) -> int:
         s3, bucket = (s3_factory or _live_s3_factory)()
         os.makedirs(args.out, exist_ok=True)
         cleanup_tmp(args.out)
+        # durable, append-only record of the run authorization: report files at --report-out are
+        # replaced per run, so the spend evidence for EVERY run (incl. deliberate --overwrite
+        # re-bills) must survive somewhere the next run cannot clobber
+        manifest_append(args.out, {"kind": "backfill_run", "manifest_sha256": manifest_sha,
+                                   "approve_usd": approve,
+                                   "spend_evidence": args.spend_evidence,
+                                   "allow_backfill": bool(args.allow_backfill),
+                                   "overwrite": bool(args.overwrite),
+                                   "window": plan["meta"]["window"],
+                                   "n_units": len(plan["units"]), "ts": now_iso()})
         print(f"Executing {len(plan['units'])} reviewed fill unit(s) -> {args.out}  "
               f"(bucket={bucket} throttle={ff.REQ_PER_MIN}/min)")
         for unit in plan["units"]:
             try:
-                results.append(process_unit(s3, bucket, unit, args, manifest_sha))
+                results.append(process_unit(s3, bucket, unit, args, manifest_sha,
+                                            budget=budget))
             except ClientError as e:
                 if is_quota_error(str(e)):
                     print(QUOTA_HINT)
@@ -487,16 +549,18 @@ def run_manifest_mode(args, s3_factory=None) -> int:
         print("  0 units selected — nothing to download (empty fill scope)")
     report = bf.build_execution_report(
         plan, results, generated_utc=generated,
-        spend={"approve_usd": float(args.approve_usd), "spend_evidence": args.spend_evidence,
-               "allow_backfill": bool(args.allow_backfill)})
+        spend={"approve_usd": approve, "spend_evidence": args.spend_evidence,
+               "allow_backfill": bool(args.allow_backfill),
+               "overwrite": bool(args.overwrite)})
     bf.write_json_atomic(report, args.report_out)
     rec = report["reconciliation"]
     print(f"\nDone. planned={rec['planned']} ok={rec['ok']} done_prior={rec['done_prior']} "
-          f"missing={rec['missing']} conflict={rec['conflict']} error={rec['error']} | "
+          f"missing={rec['missing']} conflict={rec['conflict']} error={rec['error']} "
+          f"refused_budget={rec['refused_budget']} | "
           f"downloaded {rec['bytes_downloaded']/1e9:.3f} GB, {rec['rows_written']:,} rows | "
           f"complete={rec['complete']} | report: {args.report_out}")
     if quota_hit:
-        return 2
+        return QUOTA_ABORT_EXIT
     return 0 if rec["complete"] else 1
 
 

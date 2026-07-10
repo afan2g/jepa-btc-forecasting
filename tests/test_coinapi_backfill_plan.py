@@ -29,6 +29,13 @@ def _units_by_key(plan):
     return {(u["product"], u["day"]): u for u in plan["units"]}
 
 
+# =========================================================================== contract pins
+def test_pinned_keys_aligned_with_reviewer():
+    assert set(bf.BLOCKER_KEYS) == set(fx.rv.BLOCKER_KEYS)
+    assert set(bf.SECTION_KEYS) == set(fx.rv._sections([]))
+    assert bf.MANIFEST_VERSION == fx.rv.MANIFEST_VERSION
+
+
 # =========================================================================== acceptance gate
 def test_accepts_ready_manifest_and_derives_exact_sparse_units(tmp_path):
     path, manifest = fx.ready_manifest(tmp_path)
@@ -155,6 +162,94 @@ def test_refuses_manifest_hash_mismatch(tmp_path):
     path, _ = fx.ready_manifest(tmp_path)
     with pytest.raises(bf.BackfillRefusal, match="sha256"):
         _plan(path, expected_sha256="0" * 64)
+
+
+@pytest.mark.parametrize("bad_gb", ["abc", None, [1], True])
+def test_refuses_malformed_gb_cleanly(tmp_path, bad_gb):
+    # a malformed gb must be a clean refusal, never a raw ValueError/TypeError from the cost math
+    path, _ = fx.ready_manifest(tmp_path)
+    def poison(m):
+        for r in m["days"]:
+            if r["day"] == "2025-01-02":
+                r["book_fill"]["gb"] = bad_gb
+    fx.mutate_manifest(path, poison)
+    with pytest.raises(bf.BackfillRefusal, match="gb"):
+        _plan(path, verify_inputs=False)
+
+
+@pytest.mark.parametrize("mutator", [
+    lambda m: [r["book_fill"].update(gb=10 ** 400) for r in m["days"] if r["day"] == "2025-01-02"],
+    lambda m: m["meta"]["cost_model"].update(book_usd_per_gb=10 ** 400),
+])
+def test_huge_integer_literals_are_clean_input_errors(tmp_path, mutator):
+    # json parses arbitrary-size ints; unbounded they crash float()/int() downstream — reject at
+    # the load boundary like the reviewer does, never an OverflowError/ValueError traceback
+    path, _ = fx.ready_manifest(tmp_path)
+    fx.mutate_manifest(path, mutator)
+    with pytest.raises(bf.BackfillInputError, match="integer"):
+        _plan(path, verify_inputs=False)
+
+
+def test_integer_beyond_cpython_digit_limit_is_clean_input_error(tmp_path):
+    # >4300 digits trips the CPython str->int limit inside json parsing (raw text injection —
+    # json.dump itself refuses to serialize such an int)
+    path, _ = fx.ready_manifest(tmp_path)
+    with open(path) as f:
+        text = f.read()
+    assert '"gb": 2.27' in text
+    with open(path, "w") as f:
+        f.write(text.replace('"gb": 2.27', '"gb": 1' + "0" * 5000, 1))
+    with pytest.raises(bf.BackfillInputError, match="integer"):
+        _plan(path, verify_inputs=False)
+
+
+def test_refuses_blockers_object_missing_contract_keys(tmp_path):
+    # blockers like coverage_gaps leave no days[]-level trace, so deleting their (non-empty) list
+    # would silently unblock a manifest: the blockers object must carry the exact reviewer key set
+    path, _ = fx.ready_manifest(tmp_path)
+    fx.mutate_manifest(path, lambda m: m["blockers"].pop("coverage_gaps"))
+    with pytest.raises(bf.BackfillRefusal, match="blocker"):
+        _plan(path, verify_inputs=False)
+
+
+@pytest.mark.parametrize("rate", [0, -1.0])
+def test_refuses_nonpositive_cost_rates(tmp_path, rate):
+    # a zero/negative rate would price the whole backfill at <= $0 and defeat the spend cap
+    path, _ = fx.ready_manifest(tmp_path)
+    fx.mutate_manifest(path, lambda m: m["meta"]["cost_model"].update(book_usd_per_gb=rate))
+    with pytest.raises(bf.BackfillRefusal, match="cost_model"):
+        _plan(path, verify_inputs=False)
+
+
+def test_refuses_non_canonical_day_strings(tmp_path):
+    # date.fromisoformat accepts compact forms like 20250102 on 3.11+; a non-canonical day (kept
+    # consistent across days[] AND sections, so the cross-checks alone can't catch it) would
+    # defeat duplicate detection and produce a non-canonical dt= partition
+    path, _ = fx.ready_manifest(tmp_path)
+    def compact(m):
+        for r in m["days"]:
+            if r["day"] == "2025-01-02":
+                r["day"] = "20250102"
+        for k, days in m["sections"].items():
+            m["sections"][k] = sorted("20250102" if d == "2025-01-02" else d for d in days)
+    fx.mutate_manifest(path, compact)
+    with pytest.raises(bf.BackfillRefusal, match="day"):
+        _plan(path, verify_inputs=False)
+
+
+def test_load_returns_manifest_and_hash_of_the_same_bytes(tmp_path):
+    # single read: the sha256 the plan/pin/resume attest must be of the bytes that were parsed
+    path, _ = fx.ready_manifest(tmp_path)
+    manifest, sha = bf.load_reviewed_manifest(str(path))
+    assert manifest["meta"]["status"] == "ready"
+    assert sha == bf.sha256_file(str(path))
+
+
+def test_plan_is_deterministic(tmp_path):
+    path, _ = fx.ready_manifest(tmp_path)
+    a = _plan(path)
+    b = _plan(path)
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
 
 def test_accepts_matching_pinned_hash(tmp_path):
@@ -291,6 +386,12 @@ def _final(tmp_path, content=b"parquet-bytes"):
     return str(final)
 
 
+def _ok_state(content=b"parquet-bytes"):
+    import hashlib
+    return {"status": "ok", "out_bytes": len(content),
+            "out_sha256": hashlib.sha256(content).hexdigest()}
+
+
 def test_resume_semantics(tmp_path):
     sha, unit = "a" * 64, {"product": "limitbook_full", "day": "2025-01-02"}
     out = str(tmp_path)
@@ -298,13 +399,28 @@ def test_resume_semantics(tmp_path):
     # nothing on disk -> todo
     assert bf.unit_resume_status(out, sha, unit, final) == "todo"
     # state without output -> stale, must re-run
-    bf.write_state(out, sha, unit, {"status": "ok", "out_bytes": 13})
+    bf.write_state(out, sha, unit, _ok_state())
     assert bf.unit_resume_status(out, sha, unit, final) == "todo"
-    # matching state + output -> done
+    # matching state + output (size AND sha) -> done
     final = _final(tmp_path)
     assert bf.unit_resume_status(out, sha, unit, final) == "done"
     # size drift -> conflict (stale output cannot count as done)
-    bf.write_state(out, sha, unit, {"status": "ok", "out_bytes": 999})
+    bf.write_state(out, sha, unit, {**_ok_state(), "out_bytes": 999})
+    assert bf.unit_resume_status(out, sha, unit, final) == "conflict"
+
+
+def test_resume_verifies_content_not_just_size(tmp_path):
+    sha, unit = "a" * 64, {"product": "limitbook_full", "day": "2025-01-02"}
+    out = str(tmp_path)
+    final = _final(tmp_path)
+    bf.write_state(out, sha, unit, _ok_state())
+    assert bf.unit_resume_status(out, sha, unit, final) == "done"
+    # same-size in-place drift must NOT count as done — the state vouches for exact bytes
+    _final(tmp_path, content=b"PARQUET-BYTES")
+    assert bf.unit_resume_status(out, sha, unit, final) == "conflict"
+    # a state record without an out_sha256 cannot vouch either (fail-closed)
+    _final(tmp_path)
+    bf.write_state(out, sha, unit, {"status": "ok", "out_bytes": 13})
     assert bf.unit_resume_status(out, sha, unit, final) == "conflict"
 
 
@@ -312,7 +428,7 @@ def test_resume_is_manifest_fingerprint_scoped(tmp_path):
     unit = {"product": "limitbook_full", "day": "2025-01-02"}
     out = str(tmp_path)
     final = _final(tmp_path)
-    bf.write_state(out, "a" * 64, unit, {"status": "ok", "out_bytes": 13})
+    bf.write_state(out, "a" * 64, unit, _ok_state())
     assert bf.unit_resume_status(out, "a" * 64, unit, final) == "done"
     # a DIFFERENT manifest fingerprint owns no state for this output -> conflict, fail closed
     assert bf.unit_resume_status(out, "b" * 64, unit, final) == "conflict"
@@ -386,3 +502,40 @@ def test_report_refuses_unaccounted_units(tmp_path):
                                        generated_utc="2026-07-10T02:00:00Z")
     assert report["reconciliation"]["complete"] is False
     assert report["reconciliation"]["accounted"] == 4
+    assert report["reconciliation"]["unaccounted_units"] == ["trades/2025-01-11"]
+
+
+def test_report_reconciles_result_identity_not_just_counts(tmp_path):
+    # a duplicated result for one unit plus a dropped unit keeps the COUNTS balanced (5 results,
+    # 5 planned, all ok) — identity reconciliation must still flag the run incomplete
+    path, _ = fx.ready_manifest(tmp_path)
+    plan = _plan(path)
+    results = [_result(u, "ok") for u in plan["units"][:-1]]
+    results.append(_result(plan["units"][0], "ok"))            # duplicate, not the missing unit
+    report = bf.build_execution_report(plan, results, spend={},
+                                       generated_utc="2026-07-10T02:00:00Z")
+    rec = report["reconciliation"]
+    assert rec["complete"] is False
+    assert rec["duplicate_results"] == ["limitbook_full/2025-01-02"]
+    assert rec["unaccounted_units"] == ["trades/2025-01-11"]
+    # a result for a unit the plan never contained is unplanned
+    results2 = [_result(u, "ok") for u in plan["units"]]
+    results2.append(_result({"product": "trades", "day": "2025-03-01"}, "ok"))
+    rec2 = bf.build_execution_report(plan, results2, spend={},
+                                     generated_utc="2026-07-10T02:00:00Z")["reconciliation"]
+    assert rec2["complete"] is False
+    assert rec2["unplanned_results"] == ["trades/2025-03-01"]
+
+
+def test_report_units_carry_provenance_verbatim(tmp_path):
+    # stitch metadata must survive into the EXECUTION report, not just the plan
+    path, manifest = fx.ready_manifest(tmp_path)
+    plan = _plan(path)
+    results = [_result(u, "ok") for u in plan["units"]]
+    report = bf.build_execution_report(plan, results, spend={},
+                                       generated_utc="2026-07-10T02:00:00Z")
+    by_key = {(u["product"], u["day"]): u for u in report["units"]}
+    day = {r["day"]: r for r in manifest["days"]}
+    partial = by_key[("limitbook_full", "2025-01-03")]
+    assert partial["provenance"]["fill"] == day["2025-01-03"]["book_fill"]
+    assert by_key[("trades", "2025-01-11")]["provenance"]["fill"] == day["2025-01-11"]["trade_fill"]

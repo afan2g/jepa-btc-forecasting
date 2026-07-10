@@ -44,6 +44,11 @@ GB_BASES = ("measured", "estimated")
 SECTION_KEYS = ("full_day_book_fills", "partial_day_book_fills", "trade_fills",
                 "lake_usable_days", "lake_present_degraded_days", "excluded_days",
                 "unresolved_days")
+# Pinned copy of the reviewer's BLOCKER_KEYS (scripts/review_coinbase_backfill_manifest.py) —
+# kept aligned by a contract test. The acceptance gate requires this EXACT key set.
+BLOCKER_KEYS = ("structural", "missing_keys", "coverage_gaps", "inconsistencies",
+                "resolution_issues", "unresolved_days", "batch_incomplete",
+                "book_fill_unavailable", "trade_fill_unavailable", "calendar_drift")
 
 INPUT_ERROR_EXIT = 2                       # structural/input error — matches the reviewer
 REFUSAL_EXIT = 3                           # fail-closed refusal verdict — matches the reviewer
@@ -71,10 +76,13 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def load_reviewed_manifest(path: str) -> dict:
-    """Load the reviewed manifest as a strict JSON object. Missing/invalid/non-object input is a
-    structural BackfillInputError (exit 2); NaN/Infinity are rejected at the boundary — a
-    non-finite GB/cost figure must never reach the spend math."""
+def load_reviewed_manifest(path: str) -> tuple:
+    """Load the reviewed manifest as a strict JSON object. Returns (manifest, sha256hex) where the
+    hash is computed over the SAME bytes that were parsed (single read) — so the operator pin, the
+    plan's recorded fingerprint, and the resume-state keying all attest exactly what was executed,
+    with no parse-then-rehash window. Missing/invalid/non-object input is a structural
+    BackfillInputError (exit 2); NaN/Infinity and out-of-range integer literals are rejected at
+    the boundary — a non-finite GB/cost figure must never reach the spend math."""
     if not os.path.exists(path):
         raise BackfillInputError(f"reviewed manifest not found: {path}")
 
@@ -87,14 +95,27 @@ def load_reviewed_manifest(path: str) -> dict:
         if not math.isfinite(v):
             raise BackfillInputError(f"reviewed manifest {path} contains a non-finite number ({s})")
         return v
+
+    def _bounded_int(s):
+        # a huge integer literal either exceeds the CPython str->int digit limit (ValueError) or
+        # overflows when later used as a float (OverflowError) — both become a clean input error.
+        try:
+            v = int(s)
+            float(v)
+        except (ValueError, OverflowError):
+            raise BackfillInputError(f"reviewed manifest {path} contains an out-of-range or "
+                                     f"unparseable integer ({s[:32]})") from None
+        return v
+    with open(path, "rb") as f:
+        data = f.read()
     try:
-        with open(path) as f:
-            obj = json.load(f, parse_constant=_reject, parse_float=_finite)
+        obj = json.loads(data, parse_constant=_reject, parse_float=_finite,
+                         parse_int=_bounded_int)
     except json.JSONDecodeError as e:
         raise BackfillInputError(f"reviewed manifest {path} is not valid JSON: {e}") from None
     if not isinstance(obj, dict):
         raise BackfillInputError(f"reviewed manifest {path} must be a JSON object")
-    return obj
+    return obj, hashlib.sha256(data).hexdigest()
 
 
 def _as_dict(v):
@@ -102,7 +123,12 @@ def _as_dict(v):
 
 
 def _is_num(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:   # defense in depth: an int too large for float() must read as "not a usable number"
+        return math.isfinite(float(v))
+    except OverflowError:
+        return False
 
 
 def write_json_atomic(obj: dict, path: str) -> str:
@@ -137,13 +163,23 @@ def _acceptance_issues(manifest: dict) -> list:
         issues.append(f"exchange/symbol:{meta.get('exchange')!r}/{meta.get('symbol')!r} "
                       f"(expected {EXPECTED_EXCHANGE}/{EXPECTED_SYMBOL})")
     cm = meta.get("cost_model")
+    # rates must be positive: a zero/negative rate would price the whole backfill at <= $0 and
+    # hollow out the --approve-usd spend cap even though every reconciliation still balances
     if not (isinstance(cm, dict) and _is_num(cm.get("book_usd_per_gb"))
-            and _is_num(cm.get("trades_usd_per_gb"))):
-        issues.append("cost_model:missing_or_malformed")
+            and _is_num(cm.get("trades_usd_per_gb"))
+            and float(cm.get("book_usd_per_gb")) > 0
+            and float(cm.get("trades_usd_per_gb")) > 0):
+        issues.append("cost_model:missing_malformed_or_nonpositive_rates")
     blockers = manifest.get("blockers")
     if not isinstance(blockers, dict) or not blockers:
         issues.append("blockers:missing_or_not_object")
     else:
+        # exact key set: coverage_gaps/batch_incomplete/calendar_drift &c. leave no days[]-level
+        # trace, so a deleted blocker key would silently unblock — refuse anything but the
+        # reviewer's full v1 key set (pinned as BLOCKER_KEYS, contract-tested below).
+        if set(blockers) != set(BLOCKER_KEYS):
+            issues.append(f"blockers:key_set_mismatch:missing={sorted(set(BLOCKER_KEYS) - set(blockers))}:"
+                          f"extra={sorted(set(blockers) - set(BLOCKER_KEYS))}")
         for k, v in blockers.items():
             if not isinstance(v, list):
                 issues.append(f"blockers:{k}:not_a_list")
@@ -239,9 +275,12 @@ def derive_units(manifest: dict) -> tuple:
     for rec in manifest.get("days") or []:
         day = rec.get("day")
         try:
-            dt.date.fromisoformat(day)
+            # canonical YYYY-MM-DD only: fromisoformat also accepts compact forms (20250102) on
+            # 3.11+, which would defeat duplicate detection and produce non-canonical partitions
+            if dt.date.fromisoformat(day).isoformat() != day:
+                raise ValueError(day)
         except (TypeError, ValueError):
-            issues.append(f"bad_day:{day!r}")
+            issues.append(f"bad_day:{day!r} (canonical YYYY-MM-DD required)")
             continue
         if day in seen:
             issues.append(f"duplicate_day_record:{day}")
@@ -393,8 +432,7 @@ def build_plan(manifest_path: str, *, generated_utc: str, expected_sha256: str |
     """Load + fail-closed-validate the reviewed manifest and emit the deterministic download plan.
     Raises BackfillInputError (exit 2) for structural problems and BackfillRefusal (exit 3) for
     any acceptance/staleness/reconciliation failure. The emitted plan always reconciles."""
-    manifest = load_reviewed_manifest(manifest_path)
-    actual_sha = sha256_file(manifest_path)
+    manifest, actual_sha = load_reviewed_manifest(manifest_path)
     if expected_sha256 is not None and expected_sha256 != actual_sha:
         raise BackfillRefusal(f"manifest sha256 mismatch: pinned {expected_sha256} != actual "
                               f"{actual_sha} — refusing (approve the exact manifest by hash)")
@@ -406,7 +444,12 @@ def build_plan(manifest_path: str, *, generated_utc: str, expected_sha256: str |
         if stale:
             raise BackfillRefusal(f"refusing reviewed manifest {manifest_path}: "
                                   + "; ".join(stale))
+    # refuse malformed units BEFORE any section/cost math touches them: a non-numeric or
+    # non-canonical field must surface as a clean refusal, never a ValueError/TypeError from
+    # sorting or the cost aggregation
     units, issues = derive_units(manifest)
+    if issues:
+        raise BackfillRefusal(f"refusing reviewed manifest {manifest_path}: " + "; ".join(issues))
     issues += _sections_issues(manifest, units)
     meta = manifest["meta"]
     full_totals = unit_totals(units, meta["cost_model"])
@@ -434,7 +477,9 @@ def build_plan(manifest_path: str, *, generated_utc: str, expected_sha256: str |
                   "skipped_by_window": len(units) - len(selected)},
         "units": selected,
         "totals": unit_totals(selected, meta["cost_model"]),
-        "reconciliation": {"matches_manifest_cost_summary": True, "issues": []},
+        # derived, not asserted: `issues` is provably empty here (any entry raised above), so an
+        # emitted plan always reconciles — the field documents that the check ran
+        "reconciliation": {"matches_manifest_cost_summary": not issues, "issues": list(issues)},
     }
 
 
@@ -466,10 +511,12 @@ def load_state(path: str):
 def unit_resume_status(out_root: str, manifest_sha256: str, unit: dict, final_path: str,
                        overwrite: bool = False) -> str:
     """'done' | 'todo' | 'conflict' for one unit.
-    done      — final output exists AND this manifest's state record vouches for those exact bytes.
+    done      — final output exists AND this manifest's state record vouches for those exact bytes
+                (size and sha256 both re-verified: same-size drift/bit-rot must not count done).
     todo      — no final output (a dangling state record is stale and does not count).
-    conflict  — final output exists without a matching state record for THIS manifest fingerprint
-                (foreign/stale/size-drifted output): fail closed, never adopt or overwrite it.
+    conflict  — final output exists without a state record for THIS manifest fingerprint that
+                matches the actual bytes (foreign/stale/drifted output): fail closed, never adopt
+                or overwrite it.
     --overwrite is the explicit operator override: everything is re-downloaded."""
     if overwrite:
         return "todo"
@@ -477,36 +524,50 @@ def unit_resume_status(out_root: str, manifest_sha256: str, unit: dict, final_pa
         return "todo"
     st = load_state(state_path(out_root, manifest_sha256, unit["product"], unit["day"]))
     if (st is not None and st.get("status") == "ok"
-            and st.get("out_bytes") == os.path.getsize(final_path)):
+            and st.get("out_bytes") == os.path.getsize(final_path)
+            and isinstance(st.get("out_sha256"), str)
+            and st.get("out_sha256") == sha256_file(final_path)):
         return "done"
     return "conflict"
 
 
 # ----------------------------------------------------------- execution report
-_RESULT_STATUSES = ("ok", "done", "missing", "conflict", "error")
+_RESULT_STATUSES = ("ok", "done", "missing", "conflict", "error", "refused_budget")
 
 
 def build_execution_report(plan: dict, results: list, *, spend: dict, generated_utc: str) -> dict:
-    """Reconcile per-unit results against the plan: every planned unit must be accounted for, and
-    the report carries bytes/rows/hashes plus the spend evidence so the run is auditable from the
-    report alone. `complete` is strict: planned == ok + done_prior, nothing missing/conflicted/
-    errored, nothing unaccounted."""
+    """Reconcile per-unit results against the plan BY IDENTITY, not just by count: every planned
+    (product, day) unit must appear exactly once, nothing unplanned may appear at all, and each
+    reported unit carries its manifest provenance (verbatim stitch metadata) plus bytes/rows/
+    hashes and the spend evidence — the run is auditable from the report alone. `complete` is
+    strict: planned == ok + done_prior, nothing missing/conflicted/errored/budget-refused,
+    nothing unaccounted, duplicated, or unplanned."""
     counts = {s: 0 for s in _RESULT_STATUSES}
     bytes_dl = rows = 0
     prod_bytes = {PRODUCT_BOOK: 0, PRODUCT_TRADES: 0}
+    seen: dict = {}
     for r in results:
         s = r.get("status")
         counts[s] = counts.get(s, 0) + 1
+        key = (r.get("product"), r.get("day"))
+        seen[key] = seen.get(key, 0) + 1
         if s == "ok":
             bytes_dl += int(r.get("src_bytes") or 0)
             rows += int(r.get("rows") or 0)
             prod_bytes[r.get("product")] = (prod_bytes.get(r.get("product"), 0)
                                             + int(r.get("src_bytes") or 0))
+    provenance = {(u["product"], u["day"]): u["provenance"] for u in plan["units"]}
+    planned_keys = set(provenance)
+    unaccounted = sorted(f"{p}/{d}" for p, d in planned_keys - set(seen))
+    unplanned = sorted(f"{p}/{d}" for p, d in set(seen) - planned_keys)
+    duplicates = sorted(f"{p}/{d}" for (p, d), n in seen.items() if n > 1)
     planned = len(plan["units"])
     accounted = len(results)
     complete = (accounted == planned
                 and counts["ok"] + counts["done"] == planned
-                and not (counts["missing"] or counts["conflict"] or counts["error"]))
+                and not (counts["missing"] or counts["conflict"] or counts["error"]
+                         or counts["refused_budget"])
+                and not (unaccounted or unplanned or duplicates))
     cm = plan["meta"]["cost_model"]
     measured_gb = round(bytes_dl / 1e9, 4)
     measured_usd = round(prod_bytes[PRODUCT_BOOK] / 1e9 * float(cm["book_usd_per_gb"])
@@ -521,15 +582,22 @@ def build_execution_report(plan: dict, results: list, *, spend: dict, generated_
         "spend": {"approve_usd": spend.get("approve_usd"),
                   "spend_evidence": spend.get("spend_evidence"),
                   "allow_backfill": spend.get("allow_backfill"),
+                  "overwrite": spend.get("overwrite"),
                   "planned_usd_high": totals["usd_high"],
                   "planned_usd_low": totals["usd_low"],
                   "measured_gb_downloaded": measured_gb,
                   "measured_usd_at_model_rates": measured_usd},
-        "units": list(results),
+        "units": [{**r, "provenance": provenance.get((r.get("product"), r.get("day")))}
+                  for r in results],
         "reconciliation": {"planned": planned, "accounted": accounted,
                            "ok": counts["ok"], "done_prior": counts["done"],
                            "missing": counts["missing"], "conflict": counts["conflict"],
-                           "error": counts["error"], "complete": complete,
+                           "error": counts["error"],
+                           "refused_budget": counts["refused_budget"],
+                           "unaccounted_units": unaccounted,
+                           "unplanned_results": unplanned,
+                           "duplicate_results": duplicates,
+                           "complete": complete,
                            "bytes_downloaded": bytes_dl, "rows_written": rows,
                            "planned_gb_high": round(totals["book_gb_total"]
                                                     + totals["trades_gb_total"], 4),

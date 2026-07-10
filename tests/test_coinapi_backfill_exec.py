@@ -159,8 +159,10 @@ def test_execute_downloads_exactly_the_planned_units(ready):
     assert state["manifest_sha256"] == ready["sha"] and state["status"] == "ok"
 
     # legacy manifest rows preserved, now stamped with product + manifest fingerprint
+    # (the run-authorization row has kind=backfill_run and no per-day fields — exclude it here)
     lines = [json.loads(x) for x in
              (ready["out"] / "_manifest.jsonl").read_text().splitlines()]
+    lines = [r for r in lines if r.get("kind") != "backfill_run"]
     assert {(r["product"], r["dt"]) for r in lines} == {
         ("limitbook_full", "2025-01-02"), ("limitbook_full", "2025-01-03"),
         ("limitbook_full", "2025-01-10"), ("trades", "2025-01-10"), ("trades", "2025-01-11")}
@@ -318,6 +320,194 @@ def test_missing_vendor_file_is_recorded_not_fatal(ready):
     assert rc == 1
     rec = _report(ready)["reconciliation"]
     assert rec["missing"] == 1 and rec["ok"] == 4 and rec["complete"] is False
+
+
+def test_book_parquet_is_normalized(ready):
+    import pyarrow.parquet as pq
+    fake = FakeS3(default_objects())
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    t = pq.ParquetFile(_final(ready, "limitbook_full", "2025-01-02")).read()
+    assert t.column_names == ["seq", "time_exchange_ns", "time_coinapi_ns", "update_type",
+                              "is_buy", "entry_px", "entry_sx", "order_id"]
+    assert t.column("seq").to_pylist() == [0, 1, 2]
+    assert t.column("update_type").to_pylist() == ["ADD", "ADD", "ADD"]
+    assert t.column("is_buy").to_pylist() == [True, True, True]
+    assert t.column("order_id").to_pylist() == ["ord-0", "ord-1", "ord-2"]
+    assert t.column("entry_sx").to_pylist() == [0.20, 0.21, 0.22]
+    assert t.column("time_exchange_ns").to_pylist() == [(12 * 3600 + i) * 10**9 for i in range(3)]
+
+
+def test_book_header_drift_fails_closed(ready):
+    objs = default_objects()
+    bad = BOOK_HEADER.replace(";order_id", "")     # order_id column gone
+    rows = ["12:00:00.0000000;12:00:00.0100000;ADD;1;100.5;0.25"]
+    objs[_key("LIMITBOOK_FULL", "2025-01-02")] = gzip.compress(
+        ("\n".join([bad] + rows) + "\n").encode())
+    fake = FakeS3(objs)
+    rc = run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 1
+    assert not _final(ready, "limitbook_full", "2025-01-02").exists()
+    unit = {(u["product"], u["day"]): u
+            for u in _report(ready)["units"]}[("limitbook_full", "2025-01-02")]
+    assert unit["status"] == "error" and "order_id" in unit["error"]
+
+
+def test_quota_abort_writes_report_and_exits_distinctly(ready):
+    from botocore.exceptions import ClientError
+
+    class QuotaS3(FakeS3):
+        def get_object(self, Bucket, Key, **kw):
+            if "20250103" in Key:
+                self.calls.append(("get", Key))
+                raise ClientError({"Error": {"Code": "403",
+                                             "Message": "Insufficient Usage Credits"}},
+                                  "GetObject")
+            return super().get_object(Bucket, Key, **kw)
+
+    fake = QuotaS3(default_objects())
+    rc = run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi"))
+    assert rc == dl.QUOTA_ABORT_EXIT == 5          # distinct from input-error exit 2
+    rec = _report(ready)["reconciliation"]         # report still written on abort
+    assert rec["planned"] == 5 and rec["accounted"] == 1 and rec["complete"] is False
+    # nothing after the aborting unit was touched
+    assert not any("20250110" in c[1] or "20250111" in c[1] for c in fake.calls)
+
+
+def test_nonquota_clienterror_is_a_per_unit_error(ready):
+    from botocore.exceptions import ClientError
+
+    class FlakyS3(FakeS3):
+        def list_objects_v2(self, Bucket, Prefix, **kw):
+            if "20250103" in Prefix:
+                raise ClientError({"Error": {"Code": "500", "Message": "InternalError"}},
+                                  "ListObjectsV2")
+            return super().list_objects_v2(Bucket, Prefix, **kw)
+
+    fake = FlakyS3(default_objects())
+    rc = run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 1                                 # run continues; report written
+    rec = _report(ready)["reconciliation"]
+    assert rec["error"] == 1 and rec["ok"] == 4 and rec["complete"] is False
+
+
+def test_budget_guard_refuses_oversized_unit_before_any_get(ready):
+    # the vendor LIST size is known before the billable GET: a unit whose projected cost would
+    # push measured spend past --approve-usd is refused fail-closed, never downloaded
+    class InflatedS3(FakeS3):
+        def list_objects_v2(self, Bucket, Prefix, **kw):
+            resp = super().list_objects_v2(Bucket, Prefix, **kw)
+            if "20250102" in Prefix:
+                for o in resp["Contents"]:
+                    o["Size"] = 10_000_000_000     # 10 GB actual vs 2.27 GB estimated
+            return resp
+
+    fake = InflatedS3(default_objects())
+    rc = run_cli(ready, execute_args(ready, approve="5.69"),
+                 s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 1
+    assert not any(c[0] == "get" and "20250102" in c[1] for c in fake.calls)
+    assert not _final(ready, "limitbook_full", "2025-01-02").exists()
+    rec = _report(ready)["reconciliation"]
+    assert rec["refused_budget"] == 1 and rec["complete"] is False
+
+
+def test_overwrite_rerun_is_recorded_in_spend_evidence(ready):
+    fake = FakeS3(default_objects())
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    assert _report(ready)["spend"]["overwrite"] is False
+    fake2 = FakeS3(default_objects())
+    rc = run_cli(ready, execute_args(ready) + ["--overwrite"],
+                 s3_factory=lambda: (fake2, "coinapi"))
+    assert rc == 0
+    assert len([c for c in fake2.calls if c[0] == "get"]) == 5   # deliberate re-bill
+    assert _report(ready)["spend"]["overwrite"] is True
+    # the run authorization is durable in the append-only jsonl even if reports get replaced
+    runs = [json.loads(x) for x in (ready["out"] / "_manifest.jsonl").read_text().splitlines()
+            if '"backfill_run"' in x]
+    assert len(runs) == 2
+    assert runs[1]["overwrite"] is True and runs[1]["approve_usd"] == 10.0
+    assert all(r["manifest_sha256"] == ready["sha"] for r in runs)
+
+
+def test_execute_after_manifest_regenerated_conflicts(ready, tmp_path):
+    fake = FakeS3(default_objects())
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    # regenerate the manifest (same content shape, new bytes -> new fingerprint)
+    fx.mutate_manifest(ready["manifest_path"],
+                       lambda m: m["meta"].update(generated_utc="2026-07-11T00:00:00Z"))
+    new_sha = bf.sha256_file(ready["manifest_path"])
+    assert new_sha != ready["sha"]
+    fake2 = FakeS3(default_objects())
+    args = execute_args(ready)
+    args[args.index("--manifest-sha256") + 1] = new_sha
+    rc = run_cli(ready, args, s3_factory=lambda: (fake2, "coinapi"))
+    assert rc == 1
+    assert fake2.calls == []                       # nothing adopted, nothing re-downloaded
+    rec = _report(ready)["reconciliation"]
+    assert rec["conflict"] == 5 and rec["complete"] is False
+
+
+def test_corrupt_state_file_is_a_conflict(ready):
+    fake = FakeS3(default_objects())
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    st = bf.state_path(str(ready["out"]), ready["sha"], "trades", "2025-01-11")
+    with open(st, "w") as f:
+        f.write("{corrupt")
+    fake2 = FakeS3(default_objects())
+    rc = run_cli(ready, execute_args(ready), s3_factory=lambda: (fake2, "coinapi"))
+    assert rc == 1
+    rec = _report(ready)["reconciliation"]
+    assert rec["conflict"] == 1 and rec["done_prior"] == 4
+
+
+def test_keep_raw_never_archives_a_failed_unit(ready):
+    objs = default_objects()
+    objs[_key("TRADES", "2025-01-11")] = trades_gz(
+        3, header="time_exchange;time_coinapi;guid;price;size;taker_side")
+    fake = FakeS3(objs)
+    rc = run_cli(ready, execute_args(ready) + ["--keep-raw"],
+                 s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 1
+    raw = ready["out"] / "_raw_gz"
+    assert (raw / "trades" / "exchange=COINBASE" / "symbol=BTC-USD" / "2025-01-10.csv.gz").exists()
+    assert not (raw / "trades" / "exchange=COINBASE" / "symbol=BTC-USD"
+                / "2025-01-11.csv.gz").exists()
+
+
+def test_execution_report_units_carry_provenance(ready):
+    fake = FakeS3(default_objects())
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    with open(ready["manifest_path"]) as f:
+        day = {r["day"]: r for r in json.load(f)["days"]}
+    unit = {(u["product"], u["day"]): u
+            for u in _report(ready)["units"]}[("limitbook_full", "2025-01-03")]
+    assert unit["provenance"]["fill"] == day["2025-01-03"]["book_fill"]   # stitch plan verbatim
+
+
+def test_manifest_mode_refuses_market_overrides(ready):
+    # the reviewed manifest is pinned COINBASE/BTC-USD; a CLI override would download another
+    # market's files and record them as Coinbase fills
+    rc = run_cli(ready, ["--exchange", "BINANCE"])
+    assert rc == 3
+    rc = run_cli(ready, ["--symbol-out", "ETH-USD"])
+    assert rc == 3
+
+
+def test_process_day_range_path_still_works(tmp_path):
+    # the pre-existing single-day parity path (issue #53: behavior preserved) driven by FakeS3
+    import argparse
+    import datetime
+    fake = FakeS3(default_objects())
+    ns = argparse.Namespace(out=str(tmp_path / "raw"), exchange="COINBASE",
+                            symbol_tag="COINBASE_SPOT_BTC_USD", exchange_out="COINBASE",
+                            symbol_out="BTC-USD", keep_raw=False, overwrite=False, sample_mb=0)
+    os.makedirs(ns.out, exist_ok=True)
+    status, rows = dl.process_day(fake, "coinapi", datetime.date(2025, 1, 2), ns)
+    assert (status, rows) == ("ok", 3)
+    final = (tmp_path / "raw" / "limitbook_full" / "exchange=COINBASE" / "symbol=BTC-USD"
+             / "dt=2025-01-02" / "data.parquet")
+    assert final.exists()
+    assert dl.process_day(fake, "coinapi", datetime.date(2025, 1, 2), ns) == ("skip", 0)
 
 
 # =========================================================================== CLI contract
