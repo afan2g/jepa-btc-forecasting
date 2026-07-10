@@ -43,6 +43,10 @@ BOOK_KINDS = ("full_day", "partial")
 GB_BASES = ("measured", "estimated")
 # Pinned copy of recon.stitch_policy.SOURCES (via the reviewer's SEGMENT_SOURCES; contract test).
 SEGMENT_SOURCES = ("lake", "coinapi", "excluded")
+# Pinned key set of recon.stitch_policy.DEFAULT_SEAM_POLICY (via the reviewer; contract test).
+SEAM_POLICY_KEYS = ("seam_guard_s", "warmup_consecutive", "fill_min_s", "min_lake_segment_s",
+                    "span_invalid_max", "exclude_labels_crossing_seam",
+                    "exclude_features_crossing_seam")
 NS_PER_S = 1_000_000_000
 DAY_NS = 86_400 * NS_PER_S
 SECTION_KEYS = ("full_day_book_fills", "partial_day_book_fills", "trade_fills",
@@ -296,6 +300,32 @@ def _fill_segments_issues(day: str, segments: list, seams) -> list:
     return issues
 
 
+def _seam_policy_issues(day: str, policy: dict) -> list:
+    """The seam policy rides verbatim into downstream stitch masking, so the spend gate refuses
+    unsafe VALUES, not just non-dicts: a zeroed guard band, a non-positive warmup/fill floor, or
+    a disabled exclude_*_crossing_seam switch would let labels/features cross a vendor seam
+    (leakage) despite the segment re-validation."""
+    if set(policy) != set(SEAM_POLICY_KEYS):
+        return [f"seam_policy_key_mismatch:{day}:"
+                f"missing={sorted(set(SEAM_POLICY_KEYS) - set(policy))}:"
+                f"extra={sorted(set(policy) - set(SEAM_POLICY_KEYS))}"]
+    issues = []
+    for k in ("seam_guard_s", "fill_min_s", "min_lake_segment_s"):
+        if not _is_num(policy[k]) or float(policy[k]) <= 0:
+            issues.append(f"seam_policy_bad_value:{day}:{k}:{policy[k]!r}")
+    if not _is_num(policy["warmup_consecutive"]) or float(policy["warmup_consecutive"]) < 1:
+        issues.append(f"seam_policy_bad_value:{day}:warmup_consecutive:"
+                      f"{policy['warmup_consecutive']!r}")
+    if (not _is_num(policy["span_invalid_max"])
+            or not 0 <= float(policy["span_invalid_max"]) < 1):
+        issues.append(f"seam_policy_bad_value:{day}:span_invalid_max:"
+                      f"{policy['span_invalid_max']!r}")
+    for k in ("exclude_labels_crossing_seam", "exclude_features_crossing_seam"):
+        if policy[k] is not True:   # the leakage guards must be hard-on, never relaxed here
+            issues.append(f"seam_policy_bad_value:{day}:{k}:{policy[k]!r}")
+    return issues
+
+
 def _fill_unit_issues(day: str, fill: dict, product: str) -> list:
     """A fill unit must be executable and costable: a valid kind, a verbatim stitch plan that
     actually partitions the day and pulls from CoinAPI (book), and finite non-negative GB/$
@@ -321,6 +351,8 @@ def _fill_unit_issues(day: str, fill: dict, product: str) -> list:
             issues.append(f"book_fill_missing_seams:{day}")
         if not isinstance(fill.get("seam_policy"), dict):
             issues.append(f"book_fill_missing_seam_policy:{day}")
+        else:
+            issues.extend(_seam_policy_issues(day, fill["seam_policy"]))
     if not _is_num(fill.get("gb")) or float(fill.get("gb")) < 0:
         issues.append(f"fill_bad_gb:{product}:{day}:{fill.get('gb')!r}")
     if fill.get("gb_basis") not in GB_BASES:

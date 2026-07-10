@@ -551,6 +551,44 @@ def test_budget_guard_refuses_oversized_unit_before_any_get(ready):
     assert rec["refused_budget"] == 1 and rec["complete"] is False
 
 
+def test_failed_get_is_not_billed_but_delivered_bytes_are(ready):
+    # billing commits when get_object returns a body (the billable moment): a GET that raises
+    # before delivery must not consume the budget or report billed bytes, while a post-delivery
+    # failure still bills — otherwise later units are refused against money never spent
+    from botocore.exceptions import ClientError
+
+    class FailingGetS3(FakeS3):
+        def list_objects_v2(self, Bucket, Prefix, **kw):
+            resp = super().list_objects_v2(Bucket, Prefix, **kw)
+            if "20250102" in Prefix or "20250103" in Prefix:
+                for o in resp["Contents"]:
+                    o["Size"] = 4_000_000_000          # $4 projected per unit at $1/GB
+            return resp
+
+        def get_object(self, Bucket, Key, **kw):
+            if "20250102" in Key:
+                self.calls.append(("get", Key))
+                raise ClientError({"Error": {"Code": "500", "Message": "InternalError"}},
+                                  "GetObject")
+            return super().get_object(Bucket, Key, **kw)
+
+    fake = FailingGetS3(default_objects())
+    rc = run_cli(ready, execute_args(ready, approve="5.69"),
+                 s3_factory=lambda: (fake, "coinapi"))
+    assert rc == 1
+    rep = _report(ready)
+    by_key = {(u["product"], u["day"]): u for u in rep["units"]}
+    # 01-02: GET raised before a body was delivered -> error, NOT billed
+    assert by_key[("limitbook_full", "2025-01-02")]["status"] == "error"
+    assert by_key[("limitbook_full", "2025-01-02")]["billed_bytes"] == 0
+    assert by_key[("limitbook_full", "2025-01-02")]["src_sha256"] is None
+    # 01-03: budget NOT consumed by the failed GET, so its own GET runs (4 <= 5.69) and its
+    # delivered-then-size-mismatched bytes ARE billed
+    assert any(c[0] == "get" and "20250103" in c[1] for c in fake.calls)
+    assert by_key[("limitbook_full", "2025-01-03")]["billed_bytes"] == 4_000_000_000
+    assert rep["reconciliation"]["refused_budget"] == 0
+
+
 def test_overwrite_rerun_is_recorded_in_spend_evidence(ready):
     fake = FakeS3(default_objects())
     assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0

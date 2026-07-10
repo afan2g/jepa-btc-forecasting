@@ -145,11 +145,16 @@ def find_file(s3, bucket, day_compact, exchange, symbol_tag, data_type=DATA_TYPE
     return o["Key"], o["Size"]
 
 
-def stream_to_file(s3, bucket, key, dest) -> tuple[int, str]:
+def stream_to_file(s3, bucket, key, dest, on_body=None) -> tuple[int, str]:
     """Single throttled get_object streamed to disk (1 request). Returns (bytes, sha256hex) —
-    the source hash is computed on the fly so the execution report can pin what was pulled."""
+    the source hash is computed on the fly so the execution report can pin what was pulled.
+    `on_body` fires once get_object returns a body — the BILLABLE moment: the manifest executor
+    commits its spend budget there, so a GET that raises before any body exists (transient 5xx,
+    NoSuchKey) is never billed, while a failure during/after streaming still is."""
     ff.RL.wait()
     body = s3.get_object(Bucket=bucket, Key=key)["Body"]
+    if on_body is not None:
+        on_body()
     total, h = 0, hashlib.sha256()
     with open(dest, "wb") as f:
         while True:
@@ -410,6 +415,7 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
         return res
     key, src_bytes = located
 
+    projected = None
     if budget is not None:
         rate = budget["rates"][product]
         projected = src_bytes / 1e9 * rate
@@ -421,11 +427,15 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
                 "GET; raise the approval or narrow the window"))
             print(f"  {day}  {product}  REFUSED (budget: projected ${projected:.2f} over cap)")
             return res
-        # commit the projection NOW: once the GET below starts, CoinAPI bills these bytes
-        # whether or not header validation / parsing / publishing succeeds afterwards —
-        # later units must be budgeted against money already spent (Codex P1)
-        budget["spent_usd"] += projected
-    res["billed_bytes"] = src_bytes   # the GET is now committed; report it as billed even on error
+
+    def _commit_billing():
+        # the BILLABLE moment: get_object returned a body, so the vendor delivered (or is
+        # delivering) these bytes — commit the projection even if header validation / parsing /
+        # publishing fails afterwards. A GET that raises before a body exists never reaches
+        # here, so a transient 5xx/NoSuchKey neither consumes the budget nor reports billed GB.
+        if budget is not None:
+            budget["spent_usd"] += projected
+        res["billed_bytes"] = src_bytes
 
     os.makedirs(part_dir, exist_ok=True)
     tmp_parq = final + ".tmp"
@@ -434,7 +444,7 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
     ok = False
     try:
         try:
-            got, src_sha = stream_to_file(s3, bucket, key, gz_path)
+            got, src_sha = stream_to_file(s3, bucket, key, gz_path, on_body=_commit_billing)
             # the GET is done: keep the source audit trail on EVERY later outcome, so a post-GET
             # failure (header drift, parse error) still identifies the exact billed bytes
             res.update(src_bytes=src_bytes, src_sha256=src_sha)
