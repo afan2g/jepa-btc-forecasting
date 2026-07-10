@@ -798,6 +798,23 @@ class TestLoadLakeCachedDay:
             load_lake_cached_day(tmp_path, table="book_delta_v2", exchange="COINBASE",
                                  symbol="BTC-USD", day="2025-06-01")
 
+    def test_ten_plus_shards_load_in_numeric_not_lexicographic_order(self, tmp_path):
+        # '10.snappy.parquet' sorts lexicographically before '2.snappy.parquet';
+        # shards must concatenate in NUMERIC vendor order (row order feeds the
+        # sparse emulation's index-based thinning).
+        from experiments.snapshot_seed import load_lake_cached_day
+        base = ("https://data.crypto-lake.com/market-data/cryptofeed/book_delta_v2/"
+                "exchange=COINBASE/symbol=BTC-USD/dt=2025-06-01/")
+        for i in range(1, 11):
+            df = pd.DataFrame({"timestamp": [i], "sequence_number": [i],
+                               "side_is_bid": [True], "price": [1.0], "size": [1.0]})
+            self._make_cache(tmp_path, f"{base}{i}.snappy.parquet", df)
+        out, info = load_lake_cached_day(tmp_path, table="book_delta_v2",
+                                         exchange="COINBASE", symbol="BTC-USD",
+                                         day="2025-06-01")
+        assert list(out["timestamp"]) == list(range(1, 11))
+        assert info["shards"] == list(range(1, 11))
+
     def test_shard_sequence_gaps_fail_instead_of_partial_load(self, tmp_path):
         # Numbered shards must be contiguous from 1: a day cached as only shard 2
         # (missing 1), or 1+3 (missing 2), means an interrupted cache population —

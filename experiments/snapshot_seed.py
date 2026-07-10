@@ -736,12 +736,13 @@ def load_lake_cached_day(cache_root, *, table: str, exchange: str, symbol: str,
         raise FileNotFoundError(
             f"no cached lakeapi body for {table} {exchange} {symbol} dt={day} under "
             f"{root} — this experiment never downloads; run it on a cached day")
-    hits.sort(key=lambda h: h[0])
     import re
-    shards = []
-    for url, _ in hits:
+
+    def _shard_no(url: str) -> int | None:
         m = re.search(r"/(\d+)\.snappy\.parquet$", url)
-        shards.append(int(m.group(1)) if m else None)
+        return int(m.group(1)) if m else None
+
+    shards = [_shard_no(url) for url, _ in hits]
     if all(s is not None for s in shards):
         expected = list(range(1, max(shards) + 1))
         if sorted(shards) != expected:
@@ -750,6 +751,11 @@ def load_lake_cached_day(cache_root, *, table: str, exchange: str, symbol: str,
                 f"dt={day} has gaps: found shards {sorted(shards)}, expected "
                 f"{expected} — interrupted cache population; refusing a "
                 "partial-day load")
+        # NUMERIC vendor order, not lexicographic ('10' would sort before '2');
+        # concat row order feeds order-sensitive paths like the sparse emulation
+        hits.sort(key=lambda h: _shard_no(h[0]))
+    else:
+        hits.sort(key=lambda h: h[0])
     frames = [joblib.load(body) for _, body in hits]
     df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     info = {"n_files": len(hits), "files": [u for u, _ in hits],
