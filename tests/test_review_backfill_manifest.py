@@ -1907,6 +1907,43 @@ def test_resolution_rerun_fill_judged_by_availability_checks(tmp_path):
     assert rec["resolution"]["applied"] is True and rec["resolution"]["resolved"] is True
 
 
+def test_resolution_rerun_report_with_any_corrupt_day_rejected_as_unit(tmp_path):
+    # deep-review P2: one corrupt claimed day poisons the WHOLE rerun report — a valid sibling
+    # day from the same report must not supersede its original (rerun reports pass or fail as a
+    # unit, like batch reports)
+    reports = [_report([
+        _day("2025-01-01", "inconclusive", _fill_block(None, "no_verdict"),
+             reasons=list(_SR_REASONS)),
+        _day("2025-01-02", "lake_present_degraded",
+             _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                         full_day_reason="quality_over_usable_bar",
+                         fill_segments=[_full_day_seg("2025-01-02")],
+                         seams=[], seam_policy={"seam_guard_s": 60.0}),
+             fillable=True),
+        _day("2025-01-11", "inconclusive", _fill_block(None, "no_verdict"),
+             calendar=_TRADE_ONLY_CTX, reasons=["no_seed_snapshots"]),
+    ])]
+    plan_path, cal_path = _write_tree(tmp_path, reports=reports)
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_usable", _fill_block(False, "lake_usable")),
+                   _day("2025-01-11", "lake_present_degraded",
+                        _fill_block(True, "quality_over_usable_bar"),   # fill without a plan
+                        calendar=_TRADE_ONLY_CTX)])
+    res = _resolutions_file(tmp_path, [
+        _entry("2025-01-01", action="rerun", report=rerun),
+        _entry("2025-01-11", action="rerun", report=rerun,
+               expect_reasons=["no_seed_snapshots"])])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert any("needs_fill_without_plan" in x for x in m["blockers"]["resolution_issues"])
+    assert m["blockers"]["unresolved_days"] == ["2025-01-01", "2025-01-11"]   # NEITHER applied
+    rec = _day_rec(m, "2025-01-01")
+    assert rec["classification"] == "inconclusive"   # valid sibling did NOT supersede
+    assert rec["resolution"]["applied"] is False
+    assert any("rerun_report_invalid:2025-01-01" in x
+               for x in m["blockers"]["resolution_issues"])
+
+
 def test_resolution_one_rerun_report_resolves_two_days(tmp_path):
     # the intended production shape: one targeted rerun report covering several unresolved days,
     # each claimed by its own entry

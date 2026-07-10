@@ -1074,9 +1074,11 @@ def _load_rerun_report(path: str) -> dict:
 def check_rerun_report(report: dict, claimed: set, ref_pin, cal: dict) -> list:
     """Report-level checks a targeted rerun must pass before ANY of its day records may supersede
     an original: the same bars a batch report faces (missing keys, ran-to-completion quota proof,
-    summary count cross-check, right market, pinned-parameter identity with the batch reports,
-    calendar agreement) PLUS the resolution coverage contract — every day the report carries must
-    be explicitly claimed by an entry (no silent cherry-picking) and appear exactly once."""
+    summary count cross-check, per-day record validity, right market, pinned-parameter identity
+    with the batch reports, calendar agreement) PLUS the resolution coverage contract — every day
+    the report carries must be explicitly claimed by an entry (no silent cherry-picking) and
+    appear exactly once. The report passes or fails AS A UNIT: one corrupt day record rejects it
+    for every entry, so a valid sibling day never supersedes off untrustworthy evidence."""
     issues = [f"missing {k}" for k in report_missing_keys(report)]
     issues += _batch_ran(report)
     issues += summary_count_issues(report)
@@ -1093,10 +1095,13 @@ def check_rerun_report(report: dict, claimed: set, ref_pin, cal: dict) -> list:
             if pin[key] != ref_pin[key]:
                 issues.append(f"meta_drift:{key}:{ref_pin[key]!r}!={pin[key]!r}")
     seen = set()
-    for d in (rec.get("day") for rec in report.get("days") or []):
+    for rec in report.get("days") or []:
+        d = rec.get("day")
         if d in seen:
             issues.append(f"rerun_day_duplicated:{d}")
         seen.add(d)
+        # every carried record passes the SAME per-day validation as batch days
+        issues.extend(f"rerun_day_record:{d}:{issue}" for issue in day_record_issues(rec))
     for d in sorted(seen - claimed):
         issues.append(f"unclaimed_day:{d}")
     drift = new_blockers()
@@ -1195,9 +1200,9 @@ def apply_resolutions(resolutions: dict, reports: list, day_index: dict, cal: di
                 if not recs:
                     ent.append(f"rerun_day_absent:{d}:{e['report']}")
                 else:
-                    # the superseding record passes the SAME per-day validation as batch days
+                    # per-day record validity was already enforced report-wide by
+                    # check_rerun_report (an rr with any corrupt record has ok=False)
                     rec = recs[0]
-                    ent.extend(f"rerun:{d}:{issue}" for issue in day_record_issues(rec))
         if ent:
             issues.extend(ent)
             block["issues"] = ent
