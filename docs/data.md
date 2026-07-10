@@ -21,7 +21,8 @@ information source (spec §1). Data needed:
 
 History span: **12–24 months** for SSL pretrain; recent 3–6 mo for head finetune; clean held-out OOS
 ~1 mo (spec §4). Acquisition is staged before that final span (§1.1). The pilot OOS is April 2026;
-it becomes consumed model-selection evidence after G0 and cannot be reused for formal G1. **The
+G0-CB does not score it, and it becomes consumed acquisition evidence after G0-XV's sole modeling
+evaluation and cannot be reused for formal G1. **The
 formal G1 OOS month must be outside the pilot and chosen from the usable all-feed calendar (§5b)
 using coverage only, not model outcomes or simply "most recent".** Planning figures below use
 **18 months** (547 days) unless noted.
@@ -32,7 +33,8 @@ Binding protocol:
 [`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](superpowers/plans/2026-07-10-staged-signal-acquisition.md).
 The data target is unchanged, but vendor spend is sequenced:
 
-1. Coinbase-only G0-CB uses the pilot window `2025-11-01` through `2026-04-30`.
+1. Coinbase pilot acquisition uses `2025-11-01` through `2026-04-30`, but the Coinbase-only G0-CB
+   modeling screen uses only `2025-11-01` through `2026-03-31` and never loads April outcomes.
    Approve/download only the pilot-window subset of the reviewed CoinAPI manifest first. The
    existing contiguous-range, book-only downloader cannot execute that sparse scope; #53 must add
    the exact reviewed-manifest book/trade planner and executor before any pilot backfill.
@@ -43,12 +45,13 @@ The data target is unchanged, but vendor spend is sequenced:
    and full production reconstruction are separately resumable milestones.
 
 G0-CB is a target-data/economics and lower-bound screen; weak Coinbase-own-book predictivity alone
-does not disprove a Binance-leading signal. G0-XV is a spend gate, not formal G1 or final E2.3.
+does not disprove a Binance-leading signal. It produces development evidence only. G0-XV is the
+pilot's sole April-scored spend gate, not formal G1 or final E2.3.
 Pilot and full datasets have separate source manifests, build IDs, feature manifests, and holdouts.
 April integrity-only transfer/schema/footer/hash/row-count/coverage/reconstruction checks are allowed
 and logged; they do not consume the holdout. Access to April feature/label/cost/forecast/PnL/model
-results or outcome-driven manual analysis does consume it and is forbidden before the #52 candidate
-ledger and selection artifact are frozen.
+results or outcome-driven manual analysis does consume it and is forbidden during G0-CB and before
+the #52 G0-XV candidate ledger and selection artifact are frozen.
 
 ---
 

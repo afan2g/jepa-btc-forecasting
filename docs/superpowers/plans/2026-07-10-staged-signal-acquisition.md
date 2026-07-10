@@ -19,8 +19,8 @@ bar/label, or baseline implementation plans.
 Stage data spend and model evidence in this order:
 
 1. Complete the Coinbase quality/backfill gate for a predeclared pilot window.
-2. Build a Coinbase-only ModelMatrix and run a preliminary signal/economics screen
-   (`G0-CB`).
+2. Build a pre-April Coinbase-only ModelMatrix and run a development-only preliminary
+   signal/economics screen (`G0-CB`).
 3. Acquire and reconstruct six months of Binance data.
 4. On one matched row universe, compare Coinbase-only, Binance-only, and combined
    LightGBM arms (`G0-XV`).
@@ -39,9 +39,10 @@ evidence.
 
 `G0-CB` validates target-venue data, labels, costs, CPCV, and the lower bound supplied
 by Coinbase's own book and trade flow. It uses the existing manifest-driven baseline
-ladder and a preregistered gate block. Selection/CPCV uses only November-March; after
-the trial ledger and winner are frozen, a fixed-holdout evaluator fits on pre-April
-rows and scores April exactly once.
+ladder and a preregistered development gate block. Selection/CPCV uses only
+November-March. `G0-CB` must not load or score April features, labels, costs, or model
+outputs. Every candidate, configuration, horizon, threshold, and post-hoc variant it
+tries is persisted as trial history for the later #52 G0-XV ledger.
 
 - PASS: proceed to the six-month Binance pilot.
 - FAIL because the target data, label timing, cost model, or execution economics are
@@ -50,7 +51,8 @@ rows and scores April exactly once.
   the Binance-to-Coinbase hypothesis. The default is a documented human decision on
   whether to run the bounded Binance pilot, not an automatic project stop.
 
-`G0-CB` is not formal G1 and must not be reported as the project-defining gate.
+`G0-CB` is not formal G1, has no fixed-holdout claim, and must not be reported as the
+project-defining gate.
 
 ### G0-XV: six-month cross-venue spend gate
 
@@ -75,11 +77,12 @@ the DSR/PBO trial ledger. A no-verdict or unavailable PBO fails closed. A failed
 
 The three arms are **not** three independent `run_from_manifest` studies. One G0-XV
 study ledger covers every registered `(arm, feature-manifest build, model config,
-horizon, variant)` candidate. DSR uses that complete effective trial count, and PBO
-uses common development-OOS candidate-PnL matrices across arms/configurations before
-any arm or winner is selected. The frozen selection artifact then controls one-time
-April scoring on the matched holdout rows. Per-arm significance cannot authorize the
-archive when the unified ledger fails.
+horizon, variant)` candidate and carries forward every G0-CB trial as prior search
+history. DSR uses the complete effective trial count. PBO uses common development-OOS
+candidate-PnL matrices across the matched G0-XV arms/configurations before any arm or
+winner is selected. Only then does the frozen selection artifact control the first and
+only modeling evaluation of April on matched holdout rows. Per-arm significance cannot
+authorize the archive when the unified ledger fails.
 
 `G0-XV` is an acquisition screen, not final E2.3. Six post-ETF months cannot satisfy
 E2.3's pre/post-ETF comparison.
@@ -102,13 +105,18 @@ over every supplied row and accepts one feature list at a time. It therefore can
 implement either fixed April scoring or the unified multi-arm ledger above. Issue #52
 must land before G0-CB/G0-XV execution. Its minimum contract is:
 
-- physically/logically separate development and holdout inputs;
+- a development-only G0-CB mode that cannot accept a holdout input and persists every
+  attempted candidate/variant;
+- physically/logically separate G0-XV development and holdout inputs;
 - development-only CPCV, threshold/config/feature selection, DSR, and PBO;
-- a deterministic candidate ledger spanning arms, models, horizons, and variants;
+- a deterministic G0-XV candidate ledger spanning arms, models, horizons, and variants,
+  with the G0-CB trial history included in the effective trial count;
 - a hash-pinned winner/config/split/source artifact produced before holdout loading;
-- fit on pre-April data only, followed by one-time April scoring; and
-- outputs that separate development evidence from fixed-holdout evidence and cannot
-  feed April results back into another selection pass.
+- fit on pre-April matched data only, followed by the first and only April modeling
+  score; and
+- outputs that keep the G0-CB development diagnosis, G0-XV development evidence, and
+  G0-XV fixed-holdout evidence separate and cannot feed April results back into
+  selection.
 
 ## 3. Frozen Pilot Window
 
@@ -116,7 +124,7 @@ must land before G0-CB/G0-XV execution. Its minimum contract is:
 |---|---|---|
 | Six-month pilot | `2025-11-01` through `2026-04-30` | Six complete calendar months; all pilot vendor acquisition is bounded to this range. |
 | Development/CPCV | `2025-11-01` through `2026-03-31` | Training, CPCV, calibration, and registered trials. |
-| Pilot OOS | `2026-04-01` through `2026-04-30` | Touched once after manifests/configuration are frozen; consumed after G0 decisions. |
+| Pilot OOS | `2026-04-01` through `2026-04-30` | No outcome-bearing access in G0-CB; first and only modeling score occurs in G0-XV after its complete ledger/selection freeze, then the month is consumed. |
 
 The existing `2026-04-01` Binance Stage-1 smoke is inside the pilot window. Coverage
 gaps remain explicit exclusions; neither producer nor evaluator may silently shorten
@@ -144,18 +152,21 @@ The formal G1 holdout must:
 The producer emits explicit, versioned datasets rather than zero-filling unavailable
 venue features:
 
-- `coinbase_only_pilot`: Coinbase clock, book, trade, labels, and costs; the manifest
-  lists only Coinbase in `venues` and only Coinbase features in `feature_cols`.
+- `coinbase_only_pilot_dev`: November-March Coinbase clock, book, trade, labels, and
+  costs for G0-CB; the manifest lists only Coinbase in `venues` and only Coinbase
+  features in `feature_cols`. It has no April companion consumed by G0-CB.
 - `cross_venue_pilot`: common matched rows with certified Coinbase and Binance
-  coverage. It supports three explicit manifests (Coinbase-only control,
-  Binance-only, combined) whose feature lists differ but whose reserved columns,
-  labels, costs, row IDs, horizons, and splits are identical.
+  coverage and separate development/April partitions. It supports three explicit
+  manifests (Coinbase-only control, Binance-only, combined) whose feature lists differ
+  but whose reserved columns, labels, costs, row IDs, horizons, and splits are
+  identical within each partition.
 - `full_cross_venue`: produced only after the archive gate passes.
 
 Every manifest pins source manifests/hashes, usable-calendar hash, stitch policy,
 window, exclusions, bar-clock schedule, feature order, gate block, and build ID.
 Missing Binance data is an exclusion in cross-venue mode, not a column of zeros.
-G0 additionally pins the #52 candidate-ledger and frozen-selection artifact hashes.
+G0-XV additionally pins the #52 candidate-ledger, imported G0-CB trial-history, and
+frozen-selection artifact hashes.
 
 ## 5. Acquisition and Resource Gates
 
@@ -189,8 +200,8 @@ one day is not a quota guarantee.
 - Issue #38 remains formal full-data G1.
 - Issue #47 tracks `G0-CB`; #48 tracks `G0-XV`; #49 tracks remaining Binance
   acquisition; #50 tracks full production reconstruction.
-- Issue #52 tracks the fixed-holdout/unified-ledger evaluator; #53 tracks exact
-  reviewed-manifest CoinAPI execution.
+- Issue #52 tracks the development-only G0-CB and fixed-holdout/unified-ledger G0-XV
+  evaluator; #53 tracks exact reviewed-manifest CoinAPI execution.
 
 Operational downloads and generated reports remain untracked. Any code or durable-doc
 change discovered by a pilot run uses its own issue, branch, review, and PR.

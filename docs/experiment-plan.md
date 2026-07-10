@@ -43,18 +43,19 @@ the full Binance archive is not pulled before the primary premise has bounded OO
 1. **G0-CB (Coinbase-only):** build a Coinbase-only matrix and run the existing baseline ladder as a
    preliminary data/label/cost and lower-bound signal screen. Weak own-book predictivity alone does
    not falsify a leading Binance signal; a failure requires a recorded diagnosis and proceed/stop
-   decision. Selection/CPCV uses November-March only; issue #52 freezes the selected candidate,
-   fits pre-April rows, and scores April once through a fixed-holdout path. Passing April through the
-   existing all-row CPCV runner is forbidden.
+   decision. Selection/CPCV uses November-March only. G0-CB never loads or scores April modeling
+   data; issue #52 records its complete development trial history for the later G0-XV ledger.
 2. **Six-month acquisition:** bound Coinbase fills and Binance Stage-1/Stage-2 work to
-   `2025-11-01` through `2026-04-30`. Development/CPCV ends `2026-03-31`; April 2026 is the pilot OOS
-   month and is consumed after use.
+   `2025-11-01` through `2026-04-30`. Development/CPCV ends `2026-03-31`; April 2026 is reserved as
+   the G0-XV pilot OOS month and is consumed after that one modeling evaluation.
 3. **G0-XV (matched cross-venue):** compare Coinbase-only, Binance-only, and combined feature
    manifests over identical rows, labels, costs, horizons, and splits. The full Binance pull is
    authorized only when a cross-venue arm clears the preregistered net/DSR/PBO block and combined
    beats the matched Coinbase-only control beyond the preregistered bootstrap noise band. The arms,
    model configs, horizons, and pilot variants belong to one #52 candidate ledger and PBO study;
-   three independent manifest runs cannot authorize the archive.
+   G0-CB attempts enter its effective trial count. After the ledger and selection artifact are
+   frozen, G0-XV performs the first and only April modeling score. Three independent manifest runs
+   cannot authorize the archive.
 4. **Archive expansion:** after G0-XV passes, acquire/reconstruct the approved remaining span and
    freeze a separate coverage-selected holdout outside the pilot before formal G1 tuning.
 
