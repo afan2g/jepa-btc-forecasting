@@ -304,7 +304,10 @@ def _read_raw(raw_root: str, feed: str, exchange: str, symbol: str,
     if not os.path.exists(path):
         return None
     import pyarrow.parquet as pq
-    return pq.read_table(path).to_pandas()
+    # ParquetFile, NOT read_table: the dataset-API reader infers hive partition columns from the
+    # `exchange=/symbol=/dt=` path segments and APPENDS them to the frame (pyarrow >= 24).
+    with pq.ParquetFile(path) as pf:
+        return pf.read().to_pandas()
 
 
 def _write_frame_atomic(frame: pd.DataFrame, final: str, *, schema_version: str, output: str,
