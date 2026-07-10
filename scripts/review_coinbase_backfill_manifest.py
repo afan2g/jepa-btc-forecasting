@@ -956,22 +956,36 @@ def check_fill_availability(cal: dict, blockers: dict, skip=frozenset()) -> None
             blockers["trade_fill_unavailable"].append(d)
 
 
+def _book_fill_unavailability_evidence(cal: dict, d: str) -> bool:
+    """POSITIVE or CORRUPT calendar evidence that a CoinAPI book fill for `d` is unavailable —
+    a measured book probe, a malformed (non-dict) day record, a probe error (error != False), or
+    membership in the unfillable/probe-error day lists — each routed through the strict
+    is_fillable, which fails closed on every one. Mere ABSENCE of evidence (no record; a healthy
+    record without a book probe) is False: blocking on absence would defeat pre-spend approval."""
+    fs = _fill_status(cal, d)
+    bad_lists = (d in set(cal.get("fill_days_unfillable") or [])
+                 or d in set(cal.get("fill_days_probe_error") or []))
+    measured = fs is not None and (not isinstance(fs, dict)
+                                   or fs.get("book") is not None
+                                   or fs.get("error") is not False)
+    return (bad_lists or measured) and not is_fillable(cal, d, "book")
+
+
 def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -> None:
-    """Report-driven book fills (mapped days with coinapi_fill.needs_fill True). A present-but-
-    degraded/crossed-seed day is never a calendar book-gap, so `check_fill_availability` never sees
-    it. These quality-map-added present fills are NORMAL fills priced by the nominal estimate;
-    requiring pre-downloaded proof would be circular for a PRE-spend approval gate. So this blocks
-    only on POSITIVE, INDEPENDENT evidence of unavailability, never on a mere absence of evidence:
-      * a local CoinAPI parquet re-stat'd on disk NOW makes the fill available even against the block
-        case below (the data is already in hand);
-      * a MEASURED calendar book status that is present-but-not-ok / malformed blocks (an
-        unverifiable flat file must not reach `ready` priced from bad MB).
+    """Report-driven book fills (mapped days with coinapi_fill.needs_fill True — batch records
+    AND rerun-superseded records). A present-but-degraded/crossed-seed day is never a calendar
+    book-gap, so `check_fill_availability` never sees it. These quality-map-added present fills
+    are NORMAL fills priced by the nominal estimate; requiring pre-downloaded proof would be
+    circular for a PRE-spend approval gate. So this blocks only on POSITIVE, INDEPENDENT evidence
+    of unavailability (see _book_fill_unavailability_evidence), never on a mere absence of
+    evidence — except that a local CoinAPI parquet re-stat'd on disk NOW makes the fill available
+    even against that evidence (the data is already in hand).
     The report's own `coinapi.fillable` is deliberately NOT a block signal: run_coinbase_quality_map
     derives it as `bool(fill_status.book and book.present)`, so it is None for days never probed
     (present-degraded fills) AND spuriously False for trade-only days whose `fill_status.book` is
     null (no book probe) — neither is evidence CoinAPI lacks the book. A genuine present-but-absent
-    book (`book.present == false`) has a non-null measured status and is caught by the branch below;
-    calendar book-gap / trade-fill days are covered by check_fill_availability."""
+    book (`book.present == false`) has a non-null measured status and is caught by the evidence
+    check; calendar book-gap / trade-fill days are covered by check_fill_availability."""
     for d, rec in day_index.items():
         cf = _as_dict(rec.get("coinapi_fill"))
         if cf.get("needs_fill") is not True:
@@ -982,11 +996,7 @@ def check_report_fill_availability(day_index: dict, cal: dict, blockers: dict) -
         # time, so a stale/removed file must not count as evidence (local stat, not vendor I/O).
         if coinapi.get("parquet_local") is True and isinstance(pq, str) and os.path.exists(pq):
             continue   # local CoinAPI parquet re-verified on disk → the fill is available
-        # A non-null MEASURED book status — a real dict OR a MALFORMED value (string/list) — goes
-        # through the strict is_fillable, which fails closed on a non-dict. A null/absent book status
-        # carries no positive unavailability evidence, so the fill is a normal nominal-priced fill.
-        fs = _fill_status(cal, d)
-        if isinstance(fs, dict) and fs.get("book") is not None and not is_fillable(cal, d, "book"):
+        if _book_fill_unavailability_evidence(cal, d):
             blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
 
 
@@ -1201,22 +1211,11 @@ def apply_resolutions(resolutions: dict, reports: list, day_index: dict, cal: di
         else:
             block["resolved"] = True
             if e["decision"] == "coinapi_fill_full_day":
-                # positive-unavailability evidence bar, deliberately STRICTER than
-                # check_report_fill_availability: only its measured calendar branch, no
-                # local-parquet escape — a policy fill is a fresh human spend decision, not
-                # data-in-hand evidence. A mere ABSENCE of evidence (no per-day record, or a
-                # healthy record without a book probe) must not block (pre-spend approval
-                # would be circular) — but a MALFORMED non-dict record, a probe ERROR
-                # (error != False), or membership in the unfillable/probe-error day lists is
-                # corrupt/positive evidence and fails closed via is_fillable, like the
-                # calendar-day availability path.
-                fs = _fill_status(cal, d)
-                bad_lists = (d in set(cal.get("fill_days_unfillable") or [])
-                             or d in set(cal.get("fill_days_probe_error") or []))
-                measured = fs is not None and (not isinstance(fs, dict)
-                                               or fs.get("book") is not None
-                                               or fs.get("error") is not False)
-                if (bad_lists or measured) and not is_fillable(cal, d, "book"):
+                # same positive-evidence bar as report-driven fills but deliberately STRICTER:
+                # no local-parquet escape — a policy fill is a fresh human spend decision, not
+                # data-in-hand evidence. (Rerun-introduced fills are covered downstream by
+                # check_report_fill_availability, since the rerun record replaces day_index[d].)
+                if _book_fill_unavailability_evidence(cal, d):
                     blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
         out[d] = block
     return out

@@ -1823,6 +1823,37 @@ def test_resolution_policy_fill_blocks_on_malformed_fill_status(tmp_path):
     assert m["blockers"]["unresolved_days"] == []
 
 
+def test_report_fill_availability_blocks_probe_error_listed_day():
+    # deep-review P2 root fix: an unfillable/probe-error LISTING is positive unavailability
+    # evidence for ANY report-driven fill (batch or rerun) even with no book probe record
+    for lst in ("fill_days_unfillable", "fill_days_probe_error"):
+        cal = {lst: ["d1"], "fill_status": None}
+        day_index = {"d1": {"coinapi_fill": {"needs_fill": True}, "coinapi": {}}}
+        blockers = rv.new_blockers()
+        rv.check_report_fill_availability(day_index, cal, blockers)
+        assert blockers["book_fill_unavailable"] == ["d1:calendar_book_not_ok"], lst
+
+
+def test_resolution_rerun_fill_blocks_on_probe_error_evidence(tmp_path):
+    # deep-review P2: a rerun-introduced fill faces the same positive-evidence bar as policy
+    # fills — a probe-error listing must fail closed even though the book probe is absent
+    cal = _calendar()
+    cal["fill_days_probe_error"] = ["2025-01-01"]
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal, reports=_reports_with_unresolved())
+    rerun = _write_rerun_report(
+        tmp_path, [_day("2025-01-01", "lake_present_degraded",
+                        _fill_block(True, "quality_over_usable_bar", fill_profile="full_day_fill",
+                                    full_day_reason="quality_over_usable_bar",
+                                    fill_segments=[_full_day_seg("2025-01-01")],
+                                    seams=[], seam_policy={"seam_guard_s": 60.0}))])
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="rerun", report=rerun)])
+    m = _build(plan_path, cal_path, res)
+    assert m["blockers"]["resolution_issues"] == []
+    assert m["blockers"]["unresolved_days"] == []
+    assert m["meta"]["status"] == "blocking"
+    assert m["blockers"]["book_fill_unavailable"] == ["2025-01-01:calendar_book_not_ok"]
+
+
 def test_resolution_policy_fill_blocks_on_probe_error_evidence(tmp_path):
     # deep-review P2: a day-level probe ERROR record ({'book': None, 'error': true}) or
     # membership in fill_days_unfillable / fill_days_probe_error is positive unavailability
