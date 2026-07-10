@@ -158,7 +158,8 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
     assert dev_res["ledger"]["n_effective_trials"] == 16
     arm = dev_res["winner"]["arm"]
 
-    scope = {"days": g0_world["holdout_days"], "venues": ["coinbase"],
+    scope = {"days": g0_world["holdout_days"],
+             "venues": dev_res["arms"][arm]["venue_keys"],
              "dataset_id": "synthetic-xv-pilot", "build_id": f"holdout-seeded-{arm}",
              "excluded_days": {}}
     freeze_path = str(tmp_path / "freeze.json")
@@ -187,7 +188,7 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
     assert rg.main(score_args, read_matrix=store) == 2
     assert store.calls == pre_calls
 
-    report = {"scope_days": scope["days"], "scope_venues": ["coinbase"],
+    report = {"scope_days": scope["days"], "scope_venues": scope["venues"],
               "thresholds": {"min_rows": 10}, "passed": True}
     assert rg.main(["holdout-validate", "--freeze", freeze_path,
                     "--records-dir", str(records),
@@ -260,7 +261,8 @@ def test_cli_validate_rejects_non_boolean_passed(tmp_path, g0_pipeline):
                     "--dev-result", dev_out, "--ledger", xv_ledger,
                     "--contract", contract,
                     "--records-dir", str(records)], read_matrix=store) == 0
-    report = {"scope_days": g0_pipeline["scope"]["days"], "scope_venues": ["coinbase"],
+    report = {"scope_days": g0_pipeline["scope"]["days"],
+              "scope_venues": g0_pipeline["scope"]["venues"],
               "thresholds": g0_pipeline["thresholds"], "passed": "false"}
     rc = rg.main(["holdout-validate", "--freeze", freeze_path,
                   "--records-dir", str(records),
@@ -287,7 +289,8 @@ def test_cli_validation_failure_blocks_scoring_without_loading(tmp_path, g0_pipe
                     "--dev-result", dev_out, "--ledger", xv_ledger,
                     "--contract", f["contract"],
                     "--records-dir", str(records)], read_matrix=store) == 0
-    report = {"scope_days": g0_pipeline["scope"]["days"], "scope_venues": ["coinbase"],
+    report = {"scope_days": g0_pipeline["scope"]["days"],
+              "scope_venues": g0_pipeline["scope"]["venues"],
               "thresholds": g0_pipeline["thresholds"], "passed": False}
     assert rg.main(["holdout-validate", "--freeze", freeze_path,
                     "--records-dir", str(records),

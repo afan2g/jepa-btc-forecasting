@@ -358,7 +358,8 @@ def g0_multi_pipeline():
     led = TrialLedger()
     res = run_g0xv_development(arms, w["contract"], gate=gate, ledger=led)
     assert res["g0xv_dev_pass"] and res["winner"], "multi-horizon fixture must pass"
-    scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
+    scope = {"days": list(w["holdout_days"]),
+             "venues": res["arms"][res["winner"]["arm"]]["venue_keys"],
              "dataset_id": "synthetic-xv-pilot",
              "build_id": f"holdout-seeded-{res['winner']['arm']}",
              "excluded_days": {}}
@@ -473,3 +474,29 @@ def test_fabricated_freeze_cannot_open_the_transaction(tmp_path, g0_pipeline):
     assert verify_freeze(fake)                        # ... so the self-hash passes
     with pytest.raises(ValueError, match="cannot be reproduced"):
         open_transaction(tmp_path, fake, **_authz(g0_pipeline))
+
+
+def test_scope_venues_must_cover_every_consumed_feed(tmp_path, g0_pipeline):
+    """Codex PR#60 round-22 P1: a Coinbase-only validation scope must not unlock scoring
+    of a build that consumes Binance feeds — enforced at freeze time (winner arm's venue
+    keys) and re-enforced against the actual holdout manifest at scoring preflight."""
+    pipe = g0_pipeline
+    # freeze-time: a scope omitting the signal venue refuses to freeze
+    with pytest.raises(ValueError, match="cover the winner arm's venues"):
+        build_freeze_artifact(pipe["res_xv"], contract=pipe["world"]["contract"],
+                              ledger=pipe["led_xv"],
+                              trade_validation_thresholds=pipe["thresholds"],
+                              holdout_scope={**pipe["scope"], "venues": ["coinbase"]},
+                              generated_at="2026-07-10T12:00:00+00:00")
+    # scoring preflight: a holdout build consuming MORE feeds than the frozen scope
+    # covered refuses before any matrix read
+    _open(tmp_path, pipe)
+    _validate(tmp_path, pipe, passed=True)
+    w = pipe["world"]
+    arm = pipe["res_xv"]["winner"]["arm"]
+    wider = copy.deepcopy(w["holdout"]["arms"][arm]["manifest"])
+    wider["venues"] = wider["venues"] + [{"exchange": "BINANCE", "symbol": "BTC-USDT",
+                                          "role": "signal"}]
+    with pytest.raises(ValueError, match="cover the holdout build's venues"):
+        _score(tmp_path, pipe, holdout_manifest=wider)
+    assert _load(tmp_path, pipe)["state"] == "validated"

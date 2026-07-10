@@ -385,6 +385,15 @@ def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedg
                          "the pinned ledger's effective trials")
     _verify_winner(dev_result, ledger)
     validate_holdout_scope(holdout_scope, contract)
+    # The trade-validation scope must cover EVERY venue the winner's build consumes: a
+    # Coinbase-only validation PASS must never unlock scoring of Binance-derived
+    # features whose feeds were outside the exact-scope check. (Re-enforced against the
+    # actual holdout manifest at scoring preflight.)
+    winner_venues = dev_result["arms"][dev_result["winner"]["arm"]]["venue_keys"]
+    if sorted(holdout_scope["venues"]) != winner_venues:
+        raise ValueError(f"holdout scope venues {sorted(holdout_scope['venues'])} must "
+                         f"exactly cover the winner arm's venues {winner_venues}; the "
+                         "trade validation must cover every consumed feed")
     _validate_thresholds(trade_validation_thresholds)
 
     artifact = {

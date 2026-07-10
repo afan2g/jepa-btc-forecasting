@@ -41,7 +41,9 @@ def g0_pipeline(g0_world):
                                   prior_ledgers=[led_cb])
     assert res_xv["g0xv_dev_pass"] and res_xv["winner"], "session fixture must pass"
     thresholds = {"min_rows_hard": 1000, "price_spike_warn": 0.5}
-    scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
+    winner_arm = res_xv["winner"]["arm"]
+    scope = {"days": list(w["holdout_days"]),
+             "venues": res_xv["arms"][winner_arm]["venue_keys"],
              "dataset_id": "synthetic-xv-pilot",
              "build_id": f"holdout-seeded-{res_xv['winner']['arm']}",
              "excluded_days": {}}

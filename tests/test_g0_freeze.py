@@ -152,7 +152,8 @@ def test_freeze_recomputes_solo_gate_from_pinned_ledger():
                         "dataset_id": entry["identity"]["dataset_id"],
                         "build_id": entry["identity"]["build_id"],
                         "net_pnl": row["net_pnl"]}
-    scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
+    scope = {"days": list(w["holdout_days"]),
+             "venues": res["arms"]["combined"]["venue_keys"],
              "dataset_id": "synthetic-xv-pilot", "build_id": "holdout-seeded-combined",
              "excluded_days": {}}
     # the pinned ledger verdict (registered at study time) refuses the forged pass
@@ -203,7 +204,8 @@ def test_freeze_rejects_verdict_flip_when_pbo_failed_closed(g0_world, monkeypatc
                         "dataset_id": entry["identity"]["dataset_id"],
                         "build_id": entry["identity"]["build_id"],
                         "net_pnl": row["net_pnl"]}
-    scope = {"days": list(g0_world["holdout_days"]), "venues": ["coinbase"],
+    scope = {"days": list(g0_world["holdout_days"]),
+             "venues": res["arms"][row["arm"]]["venue_keys"],
              "dataset_id": "synthetic-xv-pilot",
              "build_id": f"holdout-seeded-{row['arm']}", "excluded_days": {}}
     with pytest.raises(ValueError, match="pinned ledger verdict .* not a pass"):
@@ -244,7 +246,8 @@ def test_freeze_enforces_the_deterministic_winner_selection():
                         "dataset_id": entry["identity"]["dataset_id"],
                         "build_id": entry["identity"]["build_id"],
                         "net_pnl": row["net_pnl"]}
-    scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
+    scope = {"days": list(w["holdout_days"]),
+             "venues": base["arms"][row["arm"]]["venue_keys"],
              "dataset_id": "synthetic-xv-pilot",
              "build_id": f"holdout-seeded-{row['arm']}", "excluded_days": {}}
     with pytest.raises(ValueError, match="deterministic selection"):
@@ -350,7 +353,8 @@ def test_freeze_with_append_only_ledger_across_studies(g0_world):
                     if e["identity"]["protocol"] == "g0xv-verdict"
                     and e["identity"]["horizon"] == "10s"]
     assert len(verdicts_10s) == 2                     # stale + current pinned verdicts
-    scope = {"days": list(g0_world["holdout_days"]), "venues": ["coinbase"],
+    scope = {"days": list(g0_world["holdout_days"]),
+             "venues": res_b["arms"][res_b["winner"]["arm"]]["venue_keys"],
              "dataset_id": "synthetic-xv-pilot",
              "build_id": f"holdout-seeded-{res_b['winner']['arm']}",
              "excluded_days": {}}

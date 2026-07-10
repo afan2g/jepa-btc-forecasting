@@ -82,6 +82,7 @@ def _arm_echo(prep: dict) -> dict:
     echo = _echo_manifest(prep["manifest"])
     echo["matrix_content_sha256"] = matrix_content_hash(
         prep["matrix"], list(RESERVED) + prep["feature_cols"])
+    echo["venue_keys"] = required_scope_venues(prep["manifest"])
     return echo
 
 
@@ -274,6 +275,24 @@ TARGET_SYMBOL = "BTC-USD"
 # The preregistered signal markets (docs/data.md §5b / trade-validation plan §2): a
 # cross-venue arm carrying any other signal venue is a different acquisition experiment.
 ALLOWED_SIGNAL_VENUES = (("BINANCE_FUTURES", "BTC-USDT-PERP"), ("BINANCE", "BTC-USDT"))
+# Repo-canonical venue keys (ingest/trade_checks.VENUES): the holdout trade-validation
+# scope is expressed in these keys and must cover every venue a scored build consumes.
+VENUE_KEYS = {(TARGET_EXCHANGE, TARGET_SYMBOL): "coinbase",
+              ("BINANCE_FUTURES", "BTC-USDT-PERP"): "binance_perp",
+              ("BINANCE", "BTC-USDT"): "binance_spot"}
+
+
+def required_scope_venues(manifest: dict) -> list[str]:
+    """The trade-validation venue keys a build's declared venues require. Callers run
+    the venue-contract checks first, so every venue maps."""
+    keys = set()
+    for v in manifest["venues"]:
+        pair = (v.get("exchange"), v.get("symbol"))
+        if pair not in VENUE_KEYS:
+            raise ValueError(f"venue {pair} has no trade-validation scope key; only the "
+                             f"preregistered venues {sorted(VENUE_KEYS)} are supported")
+        keys.add(VENUE_KEYS[pair])
+    return sorted(keys)
 
 
 def _require_expected_target(manifest: dict, context: str) -> None:

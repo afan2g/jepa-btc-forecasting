@@ -21,7 +21,7 @@ from eval.consumption import (STATE_SCORED, STATE_VALIDATED, STATE_VALIDATION_FA
 from eval.cost import net_pnl, weighted_sharpe
 from eval.freeze import verify_freeze
 from eval.hashing import canonical_row_order, hash_obj, matrix_content_hash
-from eval.g0 import require_cross_venue_manifest
+from eval.g0 import require_cross_venue_manifest, required_scope_venues
 from eval.manifest import feature_list, target_list, validate_frame
 from eval.runner import BASELINE_TARGETS
 from eval.matrix import RESERVED, validate_matrix
@@ -109,6 +109,13 @@ def preflight_holdout_inputs(freeze_artifact: dict, *, contract: dict,
             or holdout_manifest["build_id"] != scope["build_id"]):
         raise ValueError("holdout manifest dataset/build does not match the frozen "
                          "holdout scope")
+    # The exact-scope trade validation must have covered EVERY venue this build
+    # consumes — a Coinbase-only PASS cannot unlock scoring of Binance-derived features.
+    needed = required_scope_venues(holdout_manifest)
+    if sorted(scope["venues"]) != needed:
+        raise ValueError(f"frozen scope venues {sorted(scope['venues'])} do not cover "
+                         f"the holdout build's venues {needed}; the trade validation "
+                         "must cover every consumed feed")
     missing = [c for c in winner["feature_cols"]
                if c not in feature_list(holdout_manifest)]
     if missing:
