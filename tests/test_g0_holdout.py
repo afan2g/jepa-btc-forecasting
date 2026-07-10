@@ -27,11 +27,13 @@ def _load(records_dir, pipe):
     return load_record(record_path_for(records_dir, pipe["freeze"]))
 
 
-def _validate(records_dir, pipe, *, passed=True, days=None, venues=None):
+def _validate(records_dir, pipe, *, passed=True, days=None, venues=None,
+              thresholds=None):
     return record_trade_validation(
         records_dir, freeze_artifact=pipe["freeze"],
         scope_days=days if days is not None else pipe["scope"]["days"],
         scope_venues=venues if venues is not None else pipe["scope"]["venues"],
+        thresholds=thresholds if thresholds is not None else pipe["thresholds"],
         passed=passed, report_sha256="a" * 64)
 
 
@@ -87,6 +89,7 @@ def test_validation_rejects_stale_or_regenerated_artifact(tmp_path, g0_pipeline)
         record_trade_validation(tmp_path, freeze_artifact=other,
                                 scope_days=g0_pipeline["scope"]["days"],
                                 scope_venues=g0_pipeline["scope"]["venues"],
+                                thresholds=g0_pipeline["thresholds"],
                                 passed=True, report_sha256="a" * 64)
 
 
@@ -101,6 +104,10 @@ def test_validation_scope_deviations_rejected(tmp_path, g0_pipeline):
         _validate(tmp_path, g0_pipeline, days=["2026-04-01..2026-04-30"])  # selector
     with pytest.raises(ValueError, match="venues"):
         _validate(tmp_path, g0_pipeline, venues=["coinbase", "binance_spot"])
+    # a verdict produced under stale/looser thresholds cannot unlock scoring
+    loose = {**g0_pipeline["thresholds"], "price_spike_warn": 99.0}
+    with pytest.raises(ValueError, match="frozen\\s+trade-validation thresholds"):
+        _validate(tmp_path, g0_pipeline, thresholds=loose)
     assert _load(tmp_path, g0_pipeline)["state"] == "frozen"  # nothing changed
 
 
@@ -349,6 +356,7 @@ def test_score_rejects_partial_winner_horizon_coverage(tmp_path, g0_multi_pipeli
     record_trade_validation(tmp_path, freeze_artifact=pipe["freeze"],
                             scope_days=pipe["scope"]["days"],
                             scope_venues=pipe["scope"]["venues"],
+                            thresholds={"min_rows": 10},
                             passed=True, report_sha256="a" * 64)
     w = pipe["world"]
     winner = pipe["res_xv"]["winner"]

@@ -128,6 +128,34 @@ def test_required_arms_and_unique_names(g0_world):
                              ledger=TrialLedger())
 
 
+def test_combined_arm_must_union_component_features(g0_world):
+    """Deep-review P2: an arm merely NAMED 'combined' but carrying only the Binance
+    features cannot serve as the combined-vs-control authorization arm — its feature set
+    must be exactly the union of the control and binance_only feature sets."""
+    def cripple(arms):
+        bn = g0_world["dev"]["arms"]["binance_only"]
+        man = copy.deepcopy(arms["combined"]["manifest"])
+        man["feature_cols"] = list(bn["manifest"]["feature_cols"])   # Binance side only
+        arms["combined"]["manifest"] = man
+        arms["combined"]["matrix"] = bn["matrix"].copy()
+    with pytest.raises(ValueError, match="union"):
+        run_g0xv_development(_arms(g0_world, cripple), g0_world["contract"],
+                             gate=XV_GATE, ledger=TrialLedger())
+
+
+def test_candidate_rows_carry_per_regime_evidence(g0_pipeline):
+    """Deep-review P3: development evidence is regime-stratified (experiment-plan
+    cross-cutting discipline) — a pass driven by one spread/volatility slice is
+    visible."""
+    h = g0_pipeline["res_xv"]["horizons"]["10s"]
+    n_rows = g0_pipeline["res_xv"]["matched"]["n_rows"]
+    for row in h["candidates"].values():
+        assert set(row["per_regime"]) == {"tight", "wide"}
+        assert sum(r["n"] for r in row["per_regime"].values()) == n_rows
+        for r in row["per_regime"].values():
+            assert {"net_pnl", "sample_sharpe", "n"} <= set(r)
+
+
 def test_arm_venue_roles_fail_closed(g0_world):
     """A cross-venue build labeled 'coinbase_only' cannot serve as the matched control,
     and a 'cross-venue' arm without a declared signal venue is rejected."""

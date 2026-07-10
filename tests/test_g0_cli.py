@@ -185,7 +185,8 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
     assert rg.main(score_args, read_matrix=store) == 2
     assert store.calls == pre_calls
 
-    report = {"scope_days": scope["days"], "scope_venues": ["coinbase"], "passed": True}
+    report = {"scope_days": scope["days"], "scope_venues": ["coinbase"],
+              "thresholds": {"min_rows": 10}, "passed": True}
     assert rg.main(["holdout-validate", "--freeze", freeze_path,
                     "--records-dir", str(records),
                     "--report-json", _dump(tmp_path, "report.json", report)],
@@ -248,7 +249,7 @@ def test_cli_validate_rejects_non_boolean_passed(tmp_path, g0_pipeline):
     assert rg.main(["holdout-open", "--freeze", freeze_path,
                     "--records-dir", str(records)], read_matrix=store) == 0
     report = {"scope_days": g0_pipeline["scope"]["days"], "scope_venues": ["coinbase"],
-              "passed": "false"}
+              "thresholds": g0_pipeline["thresholds"], "passed": "false"}
     rc = rg.main(["holdout-validate", "--freeze", freeze_path,
                   "--records-dir", str(records),
                   "--report-json", _dump(tmp_path, "report.json", report)],
@@ -269,7 +270,7 @@ def test_cli_validation_failure_blocks_scoring_without_loading(tmp_path, g0_pipe
     assert rg.main(["holdout-open", "--freeze", freeze_path,
                     "--records-dir", str(records)], read_matrix=store) == 0
     report = {"scope_days": g0_pipeline["scope"]["days"], "scope_venues": ["coinbase"],
-              "passed": False}
+              "thresholds": g0_pipeline["thresholds"], "passed": False}
     assert rg.main(["holdout-validate", "--freeze", freeze_path,
                     "--records-dir", str(records),
                     "--report-json", _dump(tmp_path, "report.json", report)],

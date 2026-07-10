@@ -137,12 +137,15 @@ def _exact_scope(record: dict, scope_days, scope_venues) -> None:
 
 
 def record_trade_validation(records_dir, *, freeze_artifact: dict, scope_days,
-                            scope_venues, passed: bool, report_sha256: str) -> dict:
+                            scope_venues, thresholds: dict, passed: bool,
+                            report_sha256: str) -> dict:
     """Record the ONE #48 exact-scope trade-validation outcome. Allowed only while the
     transaction is `frozen`; every retry — after a pass, after a fail, with a different
-    artifact, or with any scope deviation — is rejected. A FAIL makes G0-XV
-    blocking/inconclusive; nothing here (or anywhere) can then change thresholds,
-    exclusions, candidates, or holdout dates to try again."""
+    artifact, or with any scope deviation — is rejected. The report must echo the EXACT
+    frozen trade-validation thresholds: a verdict produced under stale or looser rules
+    cannot unlock scoring. A FAIL makes G0-XV blocking/inconclusive; nothing here (or
+    anywhere) can then change thresholds, exclusions, candidates, or holdout dates to
+    try again."""
     path = record_path_for(records_dir, freeze_artifact)
     record = load_record(path)
     _require_artifact(record, freeze_artifact)
@@ -150,6 +153,11 @@ def record_trade_validation(records_dir, *, freeze_artifact: dict, scope_days,
         raise ValueError(f"trade validation already recorded (state={record['state']!r}); "
                          "the holdout transaction accepts exactly one validation attempt")
     _exact_scope(record, scope_days, scope_venues)
+    if thresholds != record["trade_validation_thresholds"]:
+        raise ValueError(
+            f"validation report thresholds {thresholds} do not exactly match the frozen "
+            f"trade-validation thresholds {record['trade_validation_thresholds']}; a "
+            "verdict produced under different rules cannot consume the holdout")
     if not isinstance(passed, bool):
         raise ValueError("passed must be a bool")
     if not isinstance(report_sha256, str) or not report_sha256:

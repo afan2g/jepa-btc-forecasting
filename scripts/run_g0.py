@@ -190,10 +190,10 @@ def cmd_holdout_open(args, read_matrix) -> int:
 def cmd_holdout_validate(args, read_matrix) -> int:
     freeze = load_freeze(args.freeze)
     report = _read_json(args.report_json)
-    for key in ("scope_days", "scope_venues", "passed"):
+    for key in ("scope_days", "scope_venues", "thresholds", "passed"):
         if key not in report:
             raise ValueError(f"validation report missing {key!r} (need scope_days, "
-                             "scope_venues, passed)")
+                             "scope_venues, thresholds, passed)")
     if not isinstance(report["passed"], bool):
         # NEVER coerce: bool("false") is True, so a truthy string from external tooling
         # would permanently record a PASS on the single gate protecting the holdout.
@@ -201,8 +201,8 @@ def cmd_holdout_validate(args, read_matrix) -> int:
                          f"{report['passed']!r}")
     record = record_trade_validation(
         args.records_dir, freeze_artifact=freeze, scope_days=report["scope_days"],
-        scope_venues=report["scope_venues"], passed=report["passed"],
-        report_sha256=hash_obj(_json_safe(report)))
+        scope_venues=report["scope_venues"], thresholds=report["thresholds"],
+        passed=report["passed"], report_sha256=hash_obj(_json_safe(report)))
     print(f"trade validation recorded: state={record['state']}")
     return 0 if record["state"] == "validated" else 3
 

@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from eval.baseline import CONFIGS, evaluate_config
+from eval.cost import weighted_sharpe
 from eval.hashing import canonical_row_order, hash_obj, matrix_content_hash, split_hash
 from eval.ledger import TRIAL_PROTOCOLS, TrialLedger, identity_hash, trial_identity
 from eval.manifest import feature_list, target_list, validate_frame
@@ -191,7 +192,8 @@ def _evaluate_arm_candidates(prep: dict, *, protocol: str, gate: dict, ledger: T
                 out.append({"arm": prep["arm"], "horizon": str(tag), "variant": var["name"],
                             "config": config, "identity": ident,
                             "identity_sha256": entry["identity_sha256"], "result": r,
-                            "uniqueness": sub["uniqueness"].to_numpy(float)})
+                            "uniqueness": sub["uniqueness"].to_numpy(float),
+                            "regime": sub["regime"].astype(str).to_numpy(object)})
     return out
 
 
@@ -243,11 +245,24 @@ def _pool_pbo(pool: list[dict]) -> dict:
 
 def _candidate_row(cand: dict, dsr: float, solo: bool) -> dict:
     r = cand["result"]
+    # Per-regime stratification (experiment-plan cross-cutting discipline): a pass
+    # driven entirely by one spread/volatility slice must be visible in the evidence.
+    # Slices the candidate's OOS per-sample PnL by the matched regime tag (no refit).
+    p, w, reg = r.per_sample_pnl, cand["uniqueness"], cand["regime"]
+    per_regime = {}
+    for tag in sorted(set(reg)):
+        ii = np.where(reg == tag)[0]
+        pi = p[ii]
+        per_regime[str(tag)] = {
+            "net_pnl": float(np.nansum(pi)),
+            "sample_sharpe": weighted_sharpe(np.nan_to_num(pi), w[ii], trade_only=False),
+            "n": int(np.isfinite(pi).sum())}
     return {"arm": cand["arm"], "config": cand["config"], "variant": cand["variant"],
             "net_pnl": r.net_pnl, "gross_pnl": r.gross_pnl,
             "cost_wall": r.gross_pnl - r.net_pnl, "trade_sharpe": r.trade_sharpe,
             "sample_sharpe": r.sample_sharpe, "dsr": dsr, "n_trades": r.n_trades,
-            "t_eff": r.t_eff, "turnover": r.turnover, "mcc": r.mcc, "passes_solo": solo}
+            "t_eff": r.t_eff, "turnover": r.turnover, "mcc": r.mcc,
+            "per_regime": per_regime, "passes_solo": solo}
 
 
 # ------------------------------------------------------------------------------- G0-CB
@@ -460,6 +475,19 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
     preps = [_prepare_development_input(a["matrix"], a["manifest"], contract,
                                         arm=a["name"]) for a in arms]
     matched = _validate_matched_arms(preps, gate)
+
+    # The combined arm must genuinely combine BOTH component feature groups (producer
+    # contract: its feature list is the union of the control and Binance-only lists) —
+    # an arm merely NAMED 'combined' but carrying only one side would make the
+    # combined-vs-control authorization test meaningless.
+    by_arm = {p["arm"]: p for p in preps}
+    union = set(by_arm[control_arm]["feature_cols"]) | set(by_arm[BINANCE_ARM]["feature_cols"])
+    combined_feats = set(by_arm[combined_arm]["feature_cols"])
+    if combined_feats != union:
+        raise ValueError(
+            f"the {combined_arm!r} arm's feature set must be exactly the union of the "
+            f"{control_arm!r} and {BINANCE_ARM!r} feature sets; missing: "
+            f"{sorted(union - combined_feats)}, extra: {sorted(combined_feats - union)}")
 
     candidates = []
     for prep in preps:
