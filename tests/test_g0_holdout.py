@@ -356,7 +356,7 @@ def g0_multi_pipeline():
                                    trade_validation_thresholds={"min_rows": 10},
                                    holdout_scope=scope,
                                    generated_at="2026-07-10T12:00:00+00:00")
-    return {"world": w, "res_xv": res, "freeze": freeze, "scope": scope}
+    return {"world": w, "res_xv": res, "freeze": freeze, "scope": scope, "ledger": led}
 
 
 def test_score_rejects_partial_winner_horizon_coverage(tmp_path, g0_multi_pipeline):
@@ -386,3 +386,36 @@ def test_score_rejects_partial_winner_horizon_coverage(tmp_path, g0_multi_pipeli
                             dev_manifest=w["dev"]["arms"][winner["arm"]]["manifest"],
                             holdout_matrix=partial,
                             holdout_manifest=w["holdout"]["arms"][winner["arm"]]["manifest"])
+
+
+def test_freeze_rejects_truncated_horizon_set(g0_multi_pipeline):
+    """Codex PR#60 round-17 P1: removing a horizon from the saved dev result (its
+    verdict is still ledger-pinned) cannot slip past the deterministic-selection guard —
+    the freeze enumerates the horizon set from the ledger."""
+    from eval.freeze import build_freeze_artifact
+    pipe = g0_multi_pipeline
+    truncated = copy.deepcopy(pipe["res_xv"])
+    victim = next(t for t in truncated["horizons"]
+                  if t != truncated["winner"]["horizon"])
+    del truncated["horizons"][victim]
+    with pytest.raises(ValueError, match="ledger-pinned verdict horizons"):
+        build_freeze_artifact(truncated, contract=pipe["world"]["contract"],
+                              ledger=pipe["ledger"],
+                              trade_validation_thresholds={"min_rows": 10},
+                              holdout_scope=pipe["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+
+def test_score_requires_declared_targets(tmp_path, g0_pipeline):
+    """Codex PR#60 round-17 P2: the holdout manifest must declare exactly the consumed
+    targets (y_fwd_bps, label) — scoring under a manifest that hides its labels is
+    refused before any matrix read."""
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
+    w = g0_pipeline["world"]
+    arm = g0_pipeline["res_xv"]["winner"]["arm"]
+    hidden = copy.deepcopy(w["holdout"]["arms"][arm]["manifest"])
+    hidden["target_cols"] = ["y_fwd_bps"]
+    with pytest.raises(ValueError, match="declare exactly"):
+        _score(tmp_path, g0_pipeline, holdout_manifest=hidden)
+    assert _load(tmp_path, g0_pipeline)["state"] == "validated"

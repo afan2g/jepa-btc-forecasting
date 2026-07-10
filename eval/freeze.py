@@ -293,6 +293,27 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
     # would otherwise keep every hash valid. Every horizon's pass flag and solo list is
     # reconciled against its own pinned verdict, so hiding a better horizon (or
     # candidate) is also caught.
+    # Enumerate the horizon set from the LEDGER's pinned verdicts for this study, not
+    # from the editable dev result: a truncated result could otherwise hide a passing
+    # horizon whose best candidate beats the claimed winner.
+    ref = trial_identity(
+        protocol="g0xv-verdict", arm="unified",
+        dataset_id=arms_echo[control]["dataset_id"],
+        build_id=hash_obj({a: e["build_id"] for a, e in arms_echo.items()}),
+        feature_cols=sorted(arms_echo), config="horizon_verdict", horizon="any",
+        variant_params={"gate_sha256": gate_sha})
+    pinned_horizons = {
+        e["identity"]["horizon"] for e in ledger.entries()
+        if e["identity"]["protocol"] == "g0xv-verdict"
+        and all(e["identity"][k] == ref[k]
+                for k in ("arm", "dataset_id", "build_id", "feature_cols",
+                          "config", "variant", "variant_params"))}
+    if set(dev_result["horizons"]) != pinned_horizons:
+        raise ValueError(f"dev result horizons {sorted(dev_result['horizons'])} do not "
+                         f"match this study's ledger-pinned verdict horizons "
+                         f"{sorted(pinned_horizons)}; a truncated result cannot hide a "
+                         "passing horizon")
+
     eligible_nets = []
     for tag, hh in dev_result["horizons"].items():
         vv = _verdict_entry(tag)

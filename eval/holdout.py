@@ -21,7 +21,8 @@ from eval.consumption import (STATE_SCORED, STATE_VALIDATED, STATE_VALIDATION_FA
 from eval.cost import net_pnl, weighted_sharpe
 from eval.freeze import verify_freeze
 from eval.hashing import canonical_row_order, hash_obj, matrix_content_hash
-from eval.manifest import feature_list, validate_frame
+from eval.manifest import feature_list, target_list, validate_frame
+from eval.runner import BASELINE_TARGETS
 from eval.matrix import RESERVED, validate_matrix
 from eval.partition import (contract_hash, require_binding, validate_development_span,
                             validate_holdout_span)
@@ -86,6 +87,12 @@ def preflight_holdout_inputs(freeze_artifact: dict, *, contract: dict,
     winner = freeze_artifact["winner"]
     require_binding(dev_manifest, contract, "development")
     require_binding(holdout_manifest, contract, "holdout")
+    for man, side in ((dev_manifest, "dev"), (holdout_manifest, "holdout")):
+        targets = set(target_list(man))
+        if targets != BASELINE_TARGETS:
+            raise ValueError(f"the {side} manifest must declare exactly "
+                             f"{sorted(BASELINE_TARGETS)} as target_cols (the outcomes "
+                             f"the scorer consumes); it declares {sorted(targets)}")
     frozen_dev_manifest = freeze_artifact["sources"]["arm_manifests"][winner["arm"]]
     if hash_obj(dev_manifest) != frozen_dev_manifest:
         raise ValueError(f"dev manifest is not the frozen {winner['arm']!r} arm build "
