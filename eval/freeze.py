@@ -207,27 +207,9 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
         raise ValueError("dev result imported trial count does not reconcile to the "
                          "pinned ledger verdict; the carried-history audit cannot be "
                          "edited")
-    nb, vnb = h["noise_band"], vr["noise_band"]
-    checks = {
-        "pbo_available": bool(h.get("pbo_available")) == bool(vr["pbo_available"]),
-        # VALUES too, not just verdicts: the freeze pins dev_result_sha256, so an edited
-        # PBO/noise number would misstate the frozen development evidence even when the
-        # pass verdict agrees.
-        "pbo": _same_num(h.get("pbo"), vr["pbo"]),
-        "pbo_n_rows": h.get("pbo_n_rows") == vr["pbo_n_rows"],
-        "pbo_candidates": hash_obj(list(h.get("pbo_candidates", [])))
-            == vr["pbo_candidates_sha256"],
-        "solo_pass_cross_venue": hash_obj(sorted(h.get("solo_pass_cross_venue", [])))
-            == vr["solo_pass_cross_venue_sha256"],
-        "candidate_pool": sorted(h.get("candidates", {})) == vr["pool"],
+    # Study-level pins, checked once (identical on every verdict entry).
+    study_checks = {
         "gate": hash_obj(_json_safe(dict(dev_result["gate"]))) == vr["gate_sha256"],
-        "noise_band_beats_control": bool(nb["beats_control"])
-            == bool(vnb["beats_control"]),
-        "noise_band_values": (
-            all(_same_num(nb.get(k), vnb.get(k))
-                for k in ("band_low", "band_high", "delta_net_pnl"))
-            and nb.get("combined_candidate") == vnb.get("combined_candidate")
-            and nb.get("control_candidate") == vnb.get("control_candidate")),
         "matched_rows": dev_result["matched"]["row_content_sha256"]
             == vr["matched_row_sha256"],
         # The per-arm FULL content hashes the freeze copies into sources (and the
@@ -238,10 +220,38 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
                               for a, e in arms_echo.items()}
             == vr["arm_matrix_hashes"],
     }
-    bad = sorted(k for k, ok in checks.items() if not ok)
+    bad = sorted(k for k, ok in study_checks.items() if not ok)
     if bad:
         raise ValueError(f"dev result does not reconcile to the pinned ledger horizon "
                          f"verdict: {bad}")
+
+    def _reconcile_horizon(tag: str, hh: dict, vres: dict) -> None:
+        """VALUES too, not just verdicts, and for EVERY pinned horizon: the freeze pins
+        dev_result_sha256, so an edited PBO/noise number on ANY horizon (winner or not)
+        would misstate the frozen development evidence."""
+        nb2, vnb2 = hh["noise_band"], vres["noise_band"]
+        checks = {
+            "pass": bool(hh.get("pass")) == bool(vres["pass"]),
+            "pbo_available": bool(hh.get("pbo_available")) == bool(vres["pbo_available"]),
+            "pbo": _same_num(hh.get("pbo"), vres["pbo"]),
+            "pbo_n_rows": hh.get("pbo_n_rows") == vres["pbo_n_rows"],
+            "pbo_candidates": hash_obj(list(hh.get("pbo_candidates", [])))
+                == vres["pbo_candidates_sha256"],
+            "solo_pass_cross_venue": hash_obj(sorted(hh.get("solo_pass_cross_venue", [])))
+                == vres["solo_pass_cross_venue_sha256"],
+            "candidate_pool": sorted(hh.get("candidates", {})) == vres["pool"],
+            "noise_band_beats_control": bool(nb2["beats_control"])
+                == bool(vnb2["beats_control"]),
+            "noise_band_values": (
+                all(_same_num(nb2.get(k), vnb2.get(k))
+                    for k in ("band_low", "band_high", "delta_net_pnl"))
+                and nb2.get("combined_candidate") == vnb2.get("combined_candidate")
+                and nb2.get("control_candidate") == vnb2.get("control_candidate")),
+        }
+        bad2 = sorted(k for k, ok in checks.items() if not ok)
+        if bad2:
+            raise ValueError(f"dev result horizon {tag!r} does not reconcile to its "
+                             f"pinned ledger verdict: {bad2}")
 
     # Re-derive the solo gate from the PINNED ledger, over the verdict's pinned study
     # pool (NOT every historical same-horizon entry — an append-only ledger reused
@@ -320,16 +330,10 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
         if vv is None:
             raise ValueError(f"no pinned g0xv-verdict entry for horizon {tag!r}; "
                              "re-run the development study")
-        if bool(hh.get("pass")) != bool(vv["result"]["pass"]):
-            raise ValueError(f"dev result pass flag for horizon {tag!r} does not "
-                             "reconcile to its pinned ledger verdict")
+        _reconcile_horizon(tag, hh, vv["result"])
         if not vv["result"]["pass"]:
             continue
-        solo_list = hh.get("solo_pass_cross_venue", [])
-        if hash_obj(sorted(solo_list)) != vv["result"]["solo_pass_cross_venue_sha256"]:
-            raise ValueError(f"solo-pass list for passing horizon {tag!r} does not "
-                             "reconcile to its pinned ledger verdict")
-        for cid2 in solo_list:
+        for cid2 in hh.get("solo_pass_cross_venue", []):
             e2 = by_id.get(cid2)
             if e2 is None:
                 raise ValueError("solo-passing candidate missing from the pinned ledger")

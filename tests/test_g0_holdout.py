@@ -426,3 +426,21 @@ def test_score_requires_declared_targets(tmp_path, g0_pipeline):
     with pytest.raises(ValueError, match="exactly one target venue COINBASE/BTC-USD"):
         _score(tmp_path, g0_pipeline, holdout_manifest=wrong_venue)
     assert _load(tmp_path, g0_pipeline)["state"] == "validated"
+
+
+def test_freeze_reconciles_every_horizon_verdict(g0_multi_pipeline):
+    """Codex PR#60 round-19: evidence VALUES on a NON-winner horizon reconcile against
+    that horizon's pinned verdict too — a falsified PBO number anywhere in the dev
+    result cannot be frozen into dev_result_sha256."""
+    from eval.freeze import build_freeze_artifact
+    pipe = g0_multi_pipeline
+    other = next(t for t in pipe["res_xv"]["horizons"]
+                 if t != pipe["res_xv"]["winner"]["horizon"])
+    forged = copy.deepcopy(pipe["res_xv"])
+    forged["horizons"][other]["pbo"] = 0.001          # falsified non-winner evidence
+    with pytest.raises(ValueError, match=f"horizon '{other}' does not reconcile"):
+        build_freeze_artifact(forged, contract=pipe["world"]["contract"],
+                              ledger=pipe["ledger"],
+                              trade_validation_thresholds={"min_rows": 10},
+                              holdout_scope=pipe["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
