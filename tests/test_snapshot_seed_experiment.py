@@ -990,12 +990,19 @@ class TestRunnerScript:
         runner = importlib.import_module("scripts.run_snapshot_seed_experiment")
         mf = tmp_path / "_manifest.jsonl"
         rows = [{"dt": "2025-06-01", "status": "sample", "src_bytes": 1},
-                {"dt": "2025-06-01", "status": "ok", "src_bytes": 799_598_234},
+                # a TRADES row for the same date must never be taken as the BOOK size
+                {"dt": "2025-06-01", "status": "ok", "src_bytes": 68_000_000,
+                 "key": "T-TRADES/D-20250601/E-COINBASE/x+SC-COINBASE_SPOT_BTC_USD+.csv.gz"},
+                {"dt": "2025-06-01", "status": "ok", "src_bytes": 799_598_234,
+                 "key": "T-LIMITBOOK_FULL/D-20250601/E-COINBASE/x+SC-COINBASE_SPOT_BTC_USD+.csv.gz"},
+                # legacy row without key/product fields still accepted
                 {"dt": "2026-04-01", "status": "ok", "src_bytes": 2_371_844_307}]
         mf.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
         gb, basis = runner.full_day_gb_from_manifest(mf, "2025-06-01")
         assert gb == pytest.approx(0.799598234)
         assert basis == "measured_src_bytes"
+        gb_leg, _ = runner.full_day_gb_from_manifest(mf, "2026-04-01")
+        assert gb_leg == pytest.approx(2.371844307)
         gb2, basis2 = runner.full_day_gb_from_manifest(mf, "1999-01-01")
         assert gb2 is None and basis2 == "missing"
 

@@ -79,8 +79,10 @@ def k_ref_for(arm_specs: list[dict], *, k: int) -> int:
 
 
 def full_day_gb_from_manifest(manifest_path, day: str):
-    """Billable GB for the day's vendor csv.gz from the decode manifest (`status=ok`
-    rows carry `src_bytes` = the size CoinAPI actually billed at $1/GB)."""
+    """Billable GB for the day's LIMITBOOK_FULL csv.gz from the decode manifest
+    (`status=ok` rows carry `src_bytes` = the size CoinAPI actually billed at $1/GB).
+    Rows for other products (e.g. a TRADES download of the same date) are skipped;
+    legacy rows without a `key`/`product` field are accepted (book-only era)."""
     p = pathlib.Path(manifest_path)
     if not p.exists():
         return None, "missing"
@@ -89,7 +91,15 @@ def full_day_gb_from_manifest(manifest_path, day: str):
         if not line:
             continue
         row = json.loads(line)
-        if row.get("dt") == day and row.get("status") == "ok" and row.get("src_bytes"):
+        if not (row.get("dt") == day and row.get("status") == "ok"
+                and row.get("src_bytes")):
+            continue
+        product = row.get("product")
+        key = row.get("key")
+        is_book = ((product is None and key is None)          # legacy row
+                   or product == "limitbook_full"
+                   or (key is not None and "T-LIMITBOOK_FULL/" in key))
+        if is_book:
             return float(row["src_bytes"]) / 1e9, "measured_src_bytes"
     return None, "missing"
 
