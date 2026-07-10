@@ -104,6 +104,10 @@ lakeapi joblib cache (read-only). Reports land in `data/reports/snapshot_seed/`
 (git-ignored): `snapshot_seed_<day>[_<variant>].json` + `_arms.csv`; the expensive
 CoinAPI reference frame is cached under `cache/` keyed by source sha256.
 
+The TRACKED audit bundle `evidence_54/` (arm CSVs, #33 reconciliation, sha256-pinned
+index over the ignored reports and their inputs) carries every decision-bearing number
+quoted in docs/data.md, issue #54, and PR #63 for reviewers without the local caches.
+
 ## Limitations (bind any GO)
 
 1. **Shared-source circularity.** Emulated snapshots and the parity reference come

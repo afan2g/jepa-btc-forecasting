@@ -710,8 +710,10 @@ production seeded replay `recon/reseed.py`/native is reused UNMODIFIED with only
 swapped; snapshots emulated offline from the three locally-owned full-day `limitbook_full` days —
 fixture set + thresholds preregistered in `experiments/preregistration_54.json` BEFORE any real-data
 run; guarded-verdict/economics machine-gating amendment added before any crossed-seed-day result was
-inspected). Findings (k=10, 1 s grid, `--engine native`, tick scale 100; reports under
-`data/reports/snapshot_seed/`, git-ignored):
+inspected). Findings (k=10, 1 s grid, `--engine native`, tick scale 100; full reports under
+`data/reports/snapshot_seed/` are git-ignored, but every decision-bearing number below is
+carried by the TRACKED audit bundle `experiments/evidence_54/` — per-arm metric CSVs, the #33
+reconciliation, and a sha256-pinned index over the ignored reports and their inputs):
 
 1. **Snapshot seeding repairs crossing, not labels — missing Lake deltas are the binding defect.**
    On both crossed-seed fixture days the 1 s stream arm collapses the crossed rate
@@ -740,7 +742,12 @@ inspected). Findings (k=10, 1 s grid, `--engine native`, tick scale 100; reports
    need it. The harness also reproduces the documented cold-start (67.04% crossed) and clean
    reference numbers exactly, validating it against the production gate.
 5. **Offline product/billing feasibility (documented 2026-07-10, no API calls):** REST historical
-   order book is L2 hard-capped at 20 levels (confirmed live via docs + llms-full.txt: 100 data
+   order book is L2 capped at 20 levels per the live docs index ("maximum number of 20 levels",
+   "top 20 bids and top 20 asks (2×20)"); a deep-review claim of a 50-level `limit_levels` max on
+   the (bot-gated) endpoint page is recorded as DISPUTED in `BILLING_SOURCES`, and the
+   preregistered `coinapi_on_demand_L50` sensitivity arm settles it empirically — metric-identical
+   to L20 on all three days (e.g. 2024-12-04: crossed 23.98%, p99 $29.11, 2 s 0.808 at both
+   depths), so the cap cannot affect the verdict. REST billing confirmed live (100 data
    items = 1 credit, $5.26/1k first-day credits; the "data item" unit for an order-book response is
    UNDOCUMENTED → costed as a 1–10-credit band/request); no historical L3 REST and no WS replay
    exist; Flat Files `limitbook_snapshot_X` (top-X, 1 s interval, $1/GB tier) exists but COINBASE
