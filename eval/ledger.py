@@ -17,7 +17,11 @@ import tempfile
 from eval.hashing import hash_obj
 
 LEDGER_VERSION = 1
-PROTOCOLS = ("g0cb", "g0xv")
+# Trial protocols count toward the effective DSR trial count; the g0xv-verdict protocol
+# pins the study's matrix-level horizon verdicts (PBO / noise band / pass) into the same
+# tamper-evident store WITHOUT inflating the trial multiplicity.
+TRIAL_PROTOCOLS = ("g0cb", "g0xv")
+PROTOCOLS = TRIAL_PROTOCOLS + ("g0xv-verdict",)
 
 IDENTITY_FIELDS = ("protocol", "arm", "dataset_id", "build_id", "feature_cols",
                    "config", "horizon", "variant", "variant_params")
@@ -114,7 +118,8 @@ class TrialLedger:
         return list(self._entries)
 
     def n_effective_trials(self) -> int:
-        return len(self._entries)
+        return sum(1 for e in self._entries
+                   if e["identity"]["protocol"] in TRIAL_PROTOCOLS)
 
     def ledger_hash(self) -> str:
         pairs = sorted((e["identity_sha256"], e["result_sha256"]) for e in self._entries)

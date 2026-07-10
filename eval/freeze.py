@@ -172,6 +172,39 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
                          "trade floors, and the naive benchmark); an edited pass verdict "
                          "cannot authorize the holdout")
 
+    # The matrix-level verdicts (PBO availability/value, noise band, pass) are NOT
+    # recomputable from per-trial results, so the study pins them into the ledger as
+    # g0xv-verdict entries at run time. The freeze requires the pinned verdict for the
+    # winner's horizon to be a PASS and the dev result to reconcile with it — flipping
+    # verdict fields in a saved JSON (e.g. a study that failed only on unavailable PBO
+    # or the noise band) cannot authorize the holdout.
+    v = next((e for e in ledger.entries()
+              if e["identity"]["protocol"] == "g0xv-verdict"
+              and e["identity"]["horizon"] == ident["horizon"]), None)
+    if v is None:
+        raise ValueError("no pinned g0xv-verdict entry for the winner's horizon in the "
+                         "trial ledger; re-run the development study (horizon verdicts "
+                         "are ledger-pinned at study time)")
+    vr = v["result"]
+    if not vr["pass"]:
+        raise ValueError("the pinned ledger verdict for the winner's horizon is not a "
+                         "pass (its PBO/noise-band/solo gates failed closed at study "
+                         "time); an edited dev result cannot authorize the holdout")
+    checks = {
+        "pbo_available": bool(h.get("pbo_available")) == bool(vr["pbo_available"]),
+        "solo_pass_cross_venue": hash_obj(sorted(h.get("solo_pass_cross_venue", [])))
+            == vr["solo_pass_cross_venue_sha256"],
+        "gate": hash_obj(_json_safe(dict(dev_result["gate"]))) == vr["gate_sha256"],
+        "noise_band_beats_control": bool(h["noise_band"]["beats_control"])
+            == bool(vr["noise_band"]["beats_control"]),
+        "matched_rows": dev_result["matched"]["row_content_sha256"]
+            == vr["matched_row_sha256"],
+    }
+    bad = sorted(k for k, ok in checks.items() if not ok)
+    if bad:
+        raise ValueError(f"dev result does not reconcile to the pinned ledger horizon "
+                         f"verdict: {bad}")
+
 
 def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedger,
                           trade_validation_thresholds: dict, holdout_scope: dict,

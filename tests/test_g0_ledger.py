@@ -48,6 +48,19 @@ def test_register_dedups_identical_and_rejects_conflicts():
         led.register(_ident(), {**RESULT, "net_pnl": 9.9})
 
 
+def test_verdict_entries_do_not_count_as_trials():
+    """g0xv-verdict entries pin matrix-level horizon verdicts into the tamper-evident
+    store without inflating the effective DSR trial count."""
+    led = TrialLedger()
+    led.register(_ident(), RESULT)
+    led.register(trial_identity(protocol="g0xv-verdict", arm="unified", dataset_id="d",
+                                build_id="b", feature_cols=["a"],
+                                config="horizon_verdict", horizon="10s"),
+                 {"pass": True})
+    assert led.n_effective_trials() == 1
+    assert len(led.entries()) == 2                    # ... but they ARE hash-pinned
+
+
 def test_nonfinite_results_are_sanitized():
     led = TrialLedger()
     e = led.register(_ident(), {**RESULT, "pbo": float("nan")})

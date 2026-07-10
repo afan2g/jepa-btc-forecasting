@@ -161,6 +161,56 @@ def test_freeze_recomputes_solo_gate_from_pinned_ledger():
                               generated_at="2026-07-10T12:00:00+00:00")
 
 
+def test_freeze_rejects_verdict_flip_when_pbo_failed_closed(g0_world, monkeypatch):
+    """Codex PR#60 round-3 P1: a study that fails ONLY because PBO is unavailable leaves
+    genuinely solo-passing candidates, so the ledger solo-gate recompute alone cannot
+    catch a verdict flip in the saved JSON. The horizon verdict (PBO/noise-band/pass) is
+    ledger-pinned at study time and the freeze refuses when it is not a pass."""
+    import copy as _copy
+
+    import eval.g0 as g0
+    from eval.g0 import run_g0xv_development
+    from eval.ledger import TrialLedger
+
+    monkeypatch.setattr(g0, "_PBO_MIN_ROWS", 10**9)   # force PBO unavailable
+    arms = [{"name": n, "manifest": _copy.deepcopy(g0_world["dev"]["arms"][n]["manifest"]),
+             "matrix": g0_world["dev"]["arms"][n]["matrix"].copy()}
+            for n in ("coinbase_only", "binance_only", "combined")]
+    led = TrialLedger()
+    res = run_g0xv_development(arms, g0_world["contract"],
+                               gate={"n_groups": 4, "k": 2, "min_trades": 5,
+                                     "min_eff_trades": 3.0, "noise_band_n_boot": 500},
+                               ledger=led)
+    h = res["horizons"]["10s"]
+    assert res["g0xv_dev_pass"] is False and res["inconclusive_blocking"] is True
+    assert h["solo_pass_cross_venue"]                 # candidates genuinely pass solo
+
+    cid = max(h["solo_pass_cross_venue"], key=lambda c: h["candidates"][c]["net_pnl"])
+    row = h["candidates"][cid]
+    entry = next(e for e in led.entries() if e["identity_sha256"] == cid)
+    forged = copy.deepcopy(res)
+    fh = forged["horizons"]["10s"]
+    fh["pass"] = True                                 # flip the matrix-level verdicts
+    fh["pbo_available"] = True
+    fh["pbo"] = 0.0
+    forged["g0xv_dev_pass"] = True
+    forged["inconclusive_blocking"] = False
+    forged["winner"] = {"arm": row["arm"], "config": row["config"], "horizon": "10s",
+                        "variant": row["variant"], "identity_sha256": cid,
+                        "feature_cols": entry["identity"]["feature_cols"],
+                        "dataset_id": entry["identity"]["dataset_id"],
+                        "build_id": entry["identity"]["build_id"],
+                        "net_pnl": row["net_pnl"]}
+    scope = {"days": list(g0_world["holdout_days"]), "venues": ["coinbase"],
+             "dataset_id": "synthetic-xv-pilot",
+             "build_id": f"holdout-seeded-{row['arm']}"}
+    with pytest.raises(ValueError, match="pinned ledger verdict .* not a pass"):
+        build_freeze_artifact(forged, contract=g0_world["contract"], ledger=led,
+                              trade_validation_thresholds={"min_rows": 10},
+                              holdout_scope=scope,
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+
 def test_freeze_rejects_ledger_drift(g0_pipeline):
     drifted = TrialLedger()
     drifted.import_history(g0_pipeline["led_xv"])

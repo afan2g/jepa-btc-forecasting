@@ -471,6 +471,32 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
                                           and not pbo_block["pbo_available"]),
         }
 
+    # Pin the matrix-level horizon verdicts (PBO, noise band, solo list, gate, pass)
+    # into the SAME tamper-evident ledger as the trials, under the non-trial
+    # g0xv-verdict protocol. The freeze re-verifies against these pinned verdicts, so
+    # editing pass flags in a saved dev-result JSON cannot authorize the holdout for a
+    # study that failed closed (PBO-unavailable or noise-band failures are not
+    # recomputable from per-trial results alone).
+    verdict_build = hash_obj({p["arm"]: p["manifest"]["build_id"] for p in preps})
+    control_prep = next(p for p in preps if p["arm"] == control_arm)
+    for tag, h in horizons.items():
+        verdict_ident = trial_identity(
+            protocol="g0xv-verdict", arm="unified",
+            dataset_id=control_prep["manifest"]["dataset_id"], build_id=verdict_build,
+            feature_cols=sorted(p["arm"] for p in preps),
+            config="horizon_verdict", horizon=tag)
+        ledger.register(verdict_ident, {
+            "pass": h["pass"],
+            "inconclusive_blocking": h["inconclusive_blocking"],
+            "pbo": h["pbo"], "pbo_available": h["pbo_available"],
+            "pbo_n_rows": h["pbo_n_rows"],
+            "pbo_candidates_sha256": hash_obj(list(h["pbo_candidates"])),
+            "solo_pass_cross_venue_sha256": hash_obj(sorted(h["solo_pass_cross_venue"])),
+            "noise_band": dict(h["noise_band"]),
+            "gate_sha256": hash_obj(gate),
+            "matched_row_sha256": matched["row_content_sha256"],
+        })
+
     winner = None
     passing_h = [t for t, h in horizons.items() if h["pass"]]
     if passing_h:
