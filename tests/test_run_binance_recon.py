@@ -302,13 +302,14 @@ def test_missing_required_feed_exits_partial(tmp_path):
 
 
 def test_missing_liquidations_is_sparse_ok(tmp_path):
-    rc, out, rep = run_cli(tmp_path, write_store(tmp_path, {"liquidations": None}))
+    raw = write_store(tmp_path, {"liquidations": None})
+    rc, out, rep = run_cli(tmp_path, raw)
     assert rc == 0
     t = last_by_output(out)["liquidations"]
     assert t["status"] == "missing" and t["sparse_ok"] is True
     assert read_report(rep)["counts"]["missing_required"] == 0
-    # still-absent raw partition => resume treats the miss as done
-    rc2, _, _ = run_cli(tmp_path, write_store(tmp_path, {"liquidations": None}))
+    # still-absent raw partition (and an untouched store) => resume treats everything as done
+    rc2, _, _ = run_cli(tmp_path, raw)
     assert read_report(rep)["counts"]["skip"] == 5
 
 
@@ -468,6 +469,44 @@ def test_empty_seed_parquet_unblocks_when_refilled(tmp_path):
     rc2, _, _ = run_cli(tmp_path, raw)
     assert rc2 == 0
     assert last_by_output(out)["topk_l2"]["status"] == "ok"
+
+
+def test_raw_input_refresh_invalidates_processed_units(tmp_path):
+    # A Stage-1 in-place refresh (e.g. --overwrite after a schema/quality fix) must invalidate
+    # the derived processed units on a PLAIN resume — stale outputs derived from the old raw
+    # input must not survive behind an `ok` record (raw_inputs identity comparison).
+    raw = write_store(tmp_path)
+    rc1, out, rep = run_cli(tmp_path, raw)
+    assert rc1 == 0
+    # refresh trades (3 rows now) and the book seed in place, atomically like Stage-1 does
+    three = pd.concat([_trades_df(), _trades_df().iloc[:1]], ignore_index=True)
+    for feed, df in (("trades", three), ("book", _book_df(n=12))):
+        path = lb.raw_parquet_path(raw, feed, *PERP, DAY)
+        pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path + ".tmp")
+        os.replace(path + ".tmp", path)
+    rc2, _, _ = run_cli(tmp_path, raw)
+    assert rc2 == 0
+    report = read_report(rep)
+    assert report["counts"]["ok"] == 2                       # trades + topk rebuilt
+    assert report["counts"]["skip"] == 3                     # untouched units stay done
+    assert last_by_output(out)["trades"]["rows"] == 3        # output reflects the refreshed raw
+    # verdicts are also input-bound: an unchanged store then skips everything again
+    rc3, _, _ = run_cli(tmp_path, raw)
+    assert rc3 == 0 and read_report(rep)["counts"]["skip"] == 5
+
+
+def test_passthrough_only_request_ignores_native_engine_gate(tmp_path):
+    # --feeds trades never touches the replay engine, so an explicit --engine native must not
+    # abort on the (intentionally unverified) Binance tick scale; recon requests still do.
+    raw = write_store(tmp_path)
+    out = str(tmp_path / "out")
+    rep = str(tmp_path / "reports")
+    rc = rbr.main(["--instrument", "binance-perp", "--start", DAY, "--end", DAY,
+                   "--raw", raw, "--out", out, "--report-dir", rep,
+                   "--feeds", "trades", "--engine", "native"])
+    assert rc == 0
+    assert last_by_output(out)["trades"]["status"] == "ok"
+    assert read_report(rep)["engine_by_instrument"]["binance-perp"]["engine"] is None
 
 
 def test_book_stride_ms_recorded_and_validated(tmp_path):

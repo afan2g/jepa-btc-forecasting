@@ -405,33 +405,47 @@ def processed_state(manifest_root: str) -> dict[tuple[str, str, str, str], dict]
     return state
 
 
-def _parquet_has_rows(path: str) -> bool:
-    """True iff `path` is a parquet file with >=1 row (a cheap footer read). A file that cannot be
-    read counts as having rows so the unit RE-RUNS and surfaces the corruption as an error record
-    instead of being silently skipped."""
-    if not os.path.exists(path):
-        return False
+def _file_identity(path: str) -> list | None:
+    """Cheap content-change fingerprint for a raw input: `[size_bytes, mtime_ns]`, or None when
+    absent. Stage-1 publishes atomically (`.tmp` -> os.replace), so ANY in-place refresh lands a
+    new inode with a new mtime_ns — a stat is enough to detect it, without re-hashing a multi-GB
+    raw day on every resume. A false positive only costs a deterministic rebuild."""
     try:
-        import pyarrow.parquet as pq
-        with pq.ParquetFile(path) as pf:
-            return pf.metadata.num_rows > 0
-    except Exception:   # noqa: BLE001 — unreadable seed: re-run, let the worker record the error
-        return True
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return [int(st.st_size), int(st.st_mtime_ns)]
+
+
+def raw_input_identities(u: Unit, cfg: RunConfig) -> dict:
+    """Identities of every raw partition this unit's verdict is derived from: the delta AND the
+    `book` seed for a topk unit, the feed partition otherwise. Recorded in the unit's manifest
+    record and compared on resume — a Stage-1 in-place refresh (or an absent input appearing)
+    invalidates the old verdict so stale processed outputs can never survive a plain resume."""
+    if u.feed == "book_delta_v2":
+        return {
+            "book_delta_v2": _file_identity(
+                lb.raw_parquet_path(cfg.raw_root, u.feed, u.exchange, u.symbol, u.day)),
+            "book": _file_identity(
+                lb.raw_parquet_path(cfg.raw_root, lb.SEED_PRODUCT, u.exchange, u.symbol, u.day)),
+        }
+    return {u.feed: _file_identity(
+        lb.raw_parquet_path(cfg.raw_root, u.feed, u.exchange, u.symbol, u.day))}
 
 
 def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
     """Resume policy — the MANIFEST verdict is consulted first, the output file second, so a
     published parquet is trusted only when its `ok` record exists (a crash between the atomic
     publish and the manifest append, or an output paired with a superseding non-ok verdict, re-runs
-    instead of masquerading as done). A unit is done iff:
+    instead of masquerading as done). A unit is done iff its last verdict is terminal for its feed
+    class AND the raw inputs that produced the verdict are UNCHANGED (`raw_inputs` identities —
+    so a Stage-1 in-place refresh, a seed partition appearing/being refilled, or a raw partition
+    vanishing all re-run the unit):
 
-      * last verdict `ok` AND the final parquet still exists (a deleted output re-runs);
-      * `degraded` — deterministic from local data, done until --overwrite;
-      * `inconclusive` — done, UNLESS it lacked seed candidates (`book` product absent or empty)
-        and the seed parquet has since appeared/been refilled with rows (a later Stage-1 pull
-        unblocks it);
+      * `ok` — additionally requires the final parquet to still exist (a deleted output re-runs);
+      * `degraded` / `inconclusive` — recorded verdicts, done while their inputs are unchanged;
       * `missing` on a SPARSE feed (liquidations quiet day) — done while the raw partition is
-        STILL absent (new raw data re-runs it);
+        STILL absent (unchanged None identity); new raw data re-runs it;
       * `missing` on a REQUIRED feed — never done: every resume re-verifies the hole and keeps
         the run exiting 3 until Stage-1 supplies the partition, so a retry orchestration can
         never mark the day successful without the required output (mirrors Stage-1's
@@ -440,24 +454,19 @@ def unit_is_done(u: Unit, cfg: RunConfig, state: dict) -> bool:
     if cfg.overwrite:
         return False
     rec = state.get((u.output, u.exchange, u.symbol, u.day))
-    status = rec.get("status") if rec else None
+    if not rec:
+        return False
+    status = rec.get("status")
     if status == "ok":
-        return os.path.exists(lb.processed_parquet_path(cfg.out_root, u.output, u.exchange,
-                                                        u.symbol, u.day))
-    if status == "degraded":
-        return True
-    if status == "inconclusive":
-        had_no_seed = rec.get("book_present") is False or rec.get("book_rows") == 0
-        if had_no_seed and _parquet_has_rows(
-                lb.raw_parquet_path(cfg.raw_root, lb.SEED_PRODUCT, u.exchange, u.symbol, u.day)):
+        if not os.path.exists(lb.processed_parquet_path(cfg.out_root, u.output, u.exchange,
+                                                        u.symbol, u.day)):
             return False
-        return True
-    if status == "missing":
+    elif status == "missing":
         if feed_miss_is_fatal(u.feed):
             return False   # a required hole stays pending — resume must keep exiting 3
-        return not os.path.exists(
-            lb.raw_parquet_path(cfg.raw_root, u.feed, u.exchange, u.symbol, u.day))
-    return False
+    elif status not in ("degraded", "inconclusive"):
+        return False       # error or unknown status — always re-run
+    return rec.get("raw_inputs") == raw_input_identities(u, cfg)
 
 
 # ----------------------------------------------------------------------------- per-unit workers
@@ -483,7 +492,8 @@ def process_topk_unit(u: Unit, cfg: RunConfig, lock) -> UnitResult:
     t0 = time.monotonic()
     final = lb.processed_parquet_path(cfg.out_root, u.output, u.exchange, u.symbol, u.day)
     base = {"output": u.output, "feed": u.feed, "exchange": u.exchange, "symbol": u.symbol,
-            "dt": u.day, "schema_version": lb.PROCESSED_SCHEMA_VERSION[u.output]}
+            "dt": u.day, "schema_version": lb.PROCESSED_SCHEMA_VERSION[u.output],
+            "raw_inputs": raw_input_identities(u, cfg)}
     engine, price_scale = cfg.engine_by_key[u.instrument_key]
     try:
         delta_df = _read_raw(cfg.raw_root, u.feed, u.exchange, u.symbol, u.day)
@@ -521,7 +531,8 @@ def process_table_unit(u: Unit, cfg: RunConfig, lock) -> UnitResult:
     t0 = time.monotonic()
     final = lb.processed_parquet_path(cfg.out_root, u.output, u.exchange, u.symbol, u.day)
     base = {"output": u.output, "feed": u.feed, "exchange": u.exchange, "symbol": u.symbol,
-            "dt": u.day, "schema_version": lb.PROCESSED_SCHEMA_VERSION[u.output]}
+            "dt": u.day, "schema_version": lb.PROCESSED_SCHEMA_VERSION[u.output],
+            "raw_inputs": raw_input_identities(u, cfg)}
     try:
         raw = _read_raw(cfg.raw_root, u.feed, u.exchange, u.symbol, u.day)
         if raw is None or len(raw) == 0:
@@ -642,10 +653,18 @@ def main(argv=None) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
 
-    # ---- engine resolution per instrument, BEFORE any load (plan Requirement 5) -----------------
+    # ---- engine resolution per instrument, BEFORE any load (plan Requirement 5). Only
+    # instruments with book_delta_v2 units need the replay engine — a passthrough-only request
+    # (e.g. --feeds trades) must not abort on an explicit --engine native it will never use. ----
+    needs_engine = {u.instrument_key for u in units if u.feed == "book_delta_v2"}
     engine_by_key: dict[str, tuple[str, int | None]] = {}
-    engine_notes: dict[str, str | None] = {}
+    engine_report: dict[str, dict] = {}
     for key in instrument_keys:
+        if key not in needs_engine:
+            engine_by_key[key] = ("python", None)   # unused: no replay unit for this instrument
+            engine_report[key] = {"engine": None, "price_scale": None,
+                                  "note": "not resolved (no book_delta_v2 units in this request)"}
+            continue
         inst = lb.INSTRUMENTS[key]
         engine, scale, note = _native.resolve_engine(args.engine, exchange=inst.exchange,
                                                      symbol=inst.symbol)
@@ -656,7 +675,7 @@ def main(argv=None) -> int:
         if note:
             print(f"note[{key}]: {note}", file=sys.stderr)
         engine_by_key[key] = (engine, scale)
-        engine_notes[key] = note
+        engine_report[key] = {"engine": engine, "price_scale": scale, "note": note}
 
     policy = ReseedPolicy(enabled=not args.no_reseed, min_levels_per_side=args.seed_min_levels,
                           reseed_after_crossed_s=args.reseed_after_crossed_s,
@@ -703,9 +722,7 @@ def main(argv=None) -> int:
                        "days": [days[0], days[-1]], "n_days": len(days), "raw": args.raw,
                        "out": args.out, "k": args.k, "grid_ms": grid_ms,
                        "engine": args.engine, "jobs": args.jobs, "overwrite": args.overwrite},
-              "engine_by_instrument": {k: {"engine": e, "price_scale": s,
-                                           "note": engine_notes[k]}
-                                       for k, (e, s) in engine_by_key.items()},
+              "engine_by_instrument": engine_report,
               "policy": policy.as_dict(), "thresholds": cfg.thresholds.as_dict(),
               "n_units": len(units), "n_pending": len(pending), "counts": counts,
               "total_rows": total_rows, "per_unit": per_unit}
