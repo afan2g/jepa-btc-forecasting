@@ -853,6 +853,28 @@ class TestRunExperimentDay:
         assert rep["arms"]["coinapi_stream_L2"]["economics"] is not None
         assert rep["arms"]["cold_control"]["economics"] is None
 
+    def test_unpurchasable_snapshot_depths_are_unpriced_and_fail_closed(self):
+        # No documented product sells a FULL-DEPTH (or >20-level) historical snapshot
+        # below a full-day file — REST history is hard-capped at 20 levels. Pricing
+        # such an arm as a cheap REST request would let an impossible strategy pass
+        # the economics gate; it must stay unpriced -> economics None -> effective
+        # fail-closed.
+        from recon.coinapi import reconstruct_coinapi_l2_at_samples
+        deep_ref, _ = reconstruct_coinapi_l2_at_samples(
+            synthetic_l3_day(), k=30, day=DAY, sample_ts=GRID, size_policy="decrement")
+        rep = self._run(reference_frame=deep_ref, arm_specs=[
+            {"name": "coinapi_day_open_full", "kind": "day_open", "levels": None},
+            {"name": "coinapi_day_open_L2", "kind": "day_open", "levels": 2},
+            {"name": "coinapi_on_demand_L30", "kind": "on_demand", "levels": 30},
+        ])
+        full = rep["arms"]["coinapi_day_open_full"]
+        assert full["costs"] is None and full["economics"] is None
+        assert full["prereg_pass_effective"] is False
+        deep = rep["arms"]["coinapi_on_demand_L30"]
+        assert deep["costs"] is None and deep["economics"] is None
+        assert deep["prereg_pass_effective"] is False
+        assert rep["arms"]["coinapi_day_open_L2"]["costs"] is not None
+
     def test_report_is_deterministic_and_json_safe(self):
         import json
         r1 = self._run()

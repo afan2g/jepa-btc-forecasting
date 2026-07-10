@@ -741,6 +741,15 @@ def _slim_meta(meta: dict) -> dict:
     return m
 
 
+def _rest_purchasable(levels: int | None) -> bool:
+    """Whether a single-snapshot arm's depth is actually PURCHASABLE as a REST
+    request: the documented historical order-book product is hard-capped at 20
+    levels. A full-depth (`levels=None`) or deeper snapshot exists only inside a
+    full-day flat file, so pricing it as a cheap REST request would let an
+    impossible strategy pass the economics gate — leave it unpriced (fail-closed)."""
+    return levels is not None and levels <= BILLING_FACTS["rest_history_max_levels"]
+
+
 def effective_prereg_pass(kind: str, preregistered: dict,
                           preregistered_guarded: dict | None,
                           economics: dict | None) -> bool:
@@ -804,7 +813,7 @@ def run_experiment_day(*, day, lake_df: pd.DataFrame, coinapi_chunks_factory,
             frame, meta = seed_lake_replay(lake_df, [(snap, prov)], grid=grid, k=k,
                                            acceptance=acceptance, reseed=False,
                                            engine=engine, price_scale=price_scale)
-            if full_day_book_gb is not None:
+            if full_day_book_gb is not None and _rest_purchasable(levels):
                 costs = project_strategy_costs(full_day_book_gb=full_day_book_gb,
                                                on_demand_requests=1)
         elif kind == "stream":
@@ -827,7 +836,7 @@ def run_experiment_day(*, day, lake_df: pd.DataFrame, coinapi_chunks_factory,
                 lake_df, provider, grid=grid, k=k, acceptance=acceptance,
                 trigger_after_crossed_s=trigger_after_crossed_s,
                 max_requests=max_requests, engine=engine, price_scale=price_scale)
-            if full_day_book_gb is not None:
+            if full_day_book_gb is not None and _rest_purchasable(levels):
                 costs = project_strategy_costs(
                     full_day_book_gb=full_day_book_gb,
                     on_demand_requests=meta["on_demand"]["n_requests"])
