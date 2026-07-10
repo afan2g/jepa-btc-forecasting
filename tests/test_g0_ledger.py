@@ -87,9 +87,14 @@ def test_import_history_counts_and_conflicts():
     assert xv.n_effective_trials() == 3
     assert xv.import_history(cb) == 0                 # idempotent
     bad = TrialLedger()
+    bad.register(_ident(config="naive"), RESULT)      # fresh entry BEFORE the conflict
     bad.register(_ident(), {**RESULT, "net_pnl": -1.0})
+    before = xv.ledger_hash()
     with pytest.raises(ValueError, match="DIFFERENT result"):
         xv.import_history(bad)
+    # ATOMIC: the rejected history imported nothing, not just "stopped at the conflict"
+    assert xv.ledger_hash() == before
+    assert xv.n_effective_trials() == 3
 
 
 def test_save_load_roundtrip_and_tamper_detection(tmp_path):

@@ -212,6 +212,27 @@ def test_freeze_rejects_verdict_flip_when_pbo_failed_closed(g0_world, monkeypatc
                               generated_at="2026-07-10T12:00:00+00:00")
 
 
+def test_freeze_counts_come_from_the_ledger(g0_pipeline):
+    """Codex PR#60 round-9: the ledger hash covers identity/result pairs, not the
+    reported counts — an edited multiplicity in the dev result must not be frozen."""
+    edited = copy.deepcopy(g0_pipeline["res_xv"])
+    edited["ledger"]["n_effective_trials"] = 999
+    with pytest.raises(ValueError, match="misstated multiplicity"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope=g0_pipeline["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
+    edited = copy.deepcopy(g0_pipeline["res_xv"])
+    edited["ledger"]["n_imported_trials"] = 17        # > n_effective_trials
+    with pytest.raises(ValueError, match="n_imported_trials"):
+        build_freeze_artifact(edited, contract=g0_pipeline["world"]["contract"],
+                              ledger=g0_pipeline["led_xv"],
+                              trade_validation_thresholds=g0_pipeline["thresholds"],
+                              holdout_scope=g0_pipeline["scope"],
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+
 def test_freeze_rejects_edited_evidence_values(g0_pipeline):
     """Codex PR#60 round-7: evidence VALUES reconcile against the pinned verdict too —
     an edited PBO (or noise-band number) on an otherwise-passing result must not be

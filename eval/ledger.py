@@ -105,7 +105,17 @@ class TrialLedger:
 
     def import_history(self, other: "TrialLedger") -> int:
         """Merge another ledger's entries (e.g. the G0-CB history into the G0-XV ledger).
-        Returns how many entries were new; identity/result conflicts fail closed."""
+        Returns how many entries were new; identity/result conflicts fail closed
+        ATOMICALLY — the whole import is pre-validated before any entry is appended, so
+        a conflicting history can never leave a partially-imported ledger behind (the
+        CLI persists the ledger even on failed runs)."""
+        for e in other.entries():
+            existing = self._by_identity.get(e["identity_sha256"])
+            if existing is not None and existing["result_sha256"] != e["result_sha256"]:
+                raise ValueError(
+                    f"trial {e['identity_sha256'][:12]}... already registered with a "
+                    "DIFFERENT result; refusing to import a conflicting history "
+                    "(nothing was imported)")
         added = 0
         for e in other.entries():
             before = len(self._entries)

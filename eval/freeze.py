@@ -277,6 +277,17 @@ def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedg
         raise ValueError("ledger has changed since the development study ran (its hash "
                          "no longer matches the dev result); re-run development so every "
                          "trial is inside the frozen history")
+    # The frozen counts come from the LEDGER, not the editable dev result: the ledger
+    # hash covers identity/result pairs, not the reported counts.
+    n_eff = ledger.n_effective_trials()
+    if dev_result["ledger"]["n_effective_trials"] != n_eff:
+        raise ValueError(f"dev result reports {dev_result['ledger']['n_effective_trials']} "
+                         f"effective trials but the pinned ledger holds {n_eff}; "
+                         "refusing to freeze a misstated multiplicity")
+    n_imp = dev_result["ledger"]["n_imported_trials"]
+    if isinstance(n_imp, bool) or not isinstance(n_imp, int) or not 0 <= n_imp <= n_eff:
+        raise ValueError(f"dev result n_imported_trials {n_imp!r} is not a count within "
+                         "the pinned ledger's effective trials")
     _verify_winner(dev_result, ledger)
     validate_holdout_scope(holdout_scope, contract)
     _validate_thresholds(trade_validation_thresholds)
@@ -307,9 +318,9 @@ def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedg
         "splits": {k: dev_result["matched"][k]
                    for k in ("n_groups", "k", "embargo_ns", "n_rows")},
         "trial_history": {
-            "ledger_sha256": dev_result["ledger"]["ledger_sha256"],
-            "n_effective_trials": dev_result["ledger"]["n_effective_trials"],
-            "n_imported_trials": dev_result["ledger"]["n_imported_trials"],
+            "ledger_sha256": ledger.ledger_hash(),
+            "n_effective_trials": n_eff,            # ledger-derived, verified above
+            "n_imported_trials": n_imp,
         },
         "dev_result_sha256": hash_obj(dev_result),
         "generated_at": generated_at,
