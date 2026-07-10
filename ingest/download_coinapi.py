@@ -549,10 +549,11 @@ def _ledger_billed_usd(out_root, manifest_sha256) -> float:
             if (isinstance(rec, dict) and rec.get("kind") == "billed_get"
                     and rec.get("manifest_sha256") == manifest_sha256):
                 v = rec.get("projected_usd")
-                # finite only: json.loads accepts NaN/Infinity, and a NaN here would make every
-                # later budget comparison false — silently disabling the spend cap (fail-open)
+                # finite AND non-negative only: json.loads accepts NaN/Infinity (NaN would make
+                # every later budget comparison false — silently disabling the cap), and a
+                # corrupt negative amount would DEDUCT from spent, inflating remaining budget
                 if (isinstance(v, (int, float)) and not isinstance(v, bool)
-                        and math.isfinite(float(v))):
+                        and math.isfinite(float(v)) and float(v) >= 0):
                     total += float(v)
     return total
 

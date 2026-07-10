@@ -633,13 +633,15 @@ def test_nonfinite_ledger_rows_are_ignored(ready):
                 % ready["sha"])
         f.write('{"kind": "billed_get", "manifest_sha256": "%s", "projected_usd": Infinity}\n'
                 % ready["sha"])
+        f.write('{"kind": "billed_get", "manifest_sha256": "%s", "projected_usd": -100.0}\n'
+                % ready["sha"])                          # negative would DEDUCT from spent
         f.write('{"kind": "billed_get", "manifest_sha256": "%s", "projected_usd": 0.5}\n'
                 % ready["sha"])
     fake = FakeS3(default_objects())
     rc = run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi"))
     assert rc == 0
     rep = _report(ready)
-    assert rep["spend"]["prior_billed_usd"] == 0.5      # only the finite row counts
+    assert rep["spend"]["prior_billed_usd"] == 0.5      # only the finite NON-NEGATIVE row counts
     assert rep["reconciliation"]["ok"] == 5
 
 
