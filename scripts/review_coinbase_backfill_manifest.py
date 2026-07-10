@@ -1204,10 +1204,13 @@ def apply_resolutions(resolutions: dict, reports: list, day_index: dict, cal: di
                 # positive-unavailability evidence bar, deliberately STRICTER than
                 # check_report_fill_availability: only its measured not-ok calendar branch, no
                 # local-parquet escape — a policy fill is a fresh human spend decision, not
-                # data-in-hand evidence. A mere absence of evidence still must not block
-                # (pre-spend approval would be circular).
+                # data-in-hand evidence. A mere ABSENCE of evidence (no per-day record, or a
+                # record without a book probe) must not block (pre-spend approval would be
+                # circular) — but a MALFORMED non-dict record is corrupt evidence and fails
+                # closed via is_fillable, like every other availability path.
                 fs = _fill_status(cal, d)
-                if (isinstance(fs, dict) and fs.get("book") is not None
+                if (fs is not None
+                        and (not isinstance(fs, dict) or fs.get("book") is not None)
                         and not is_fillable(cal, d, "book")):
                     blockers["book_fill_unavailable"].append(f"{d}:calendar_book_not_ok")
         out[d] = block

@@ -1807,6 +1807,22 @@ def test_resolution_policy_fill_blocks_when_calendar_book_not_ok(tmp_path):
     assert _day_rec(m, "2025-01-01")["resolution"]["applied"] is True
 
 
+def test_resolution_policy_fill_blocks_on_malformed_fill_status(tmp_path):
+    # deep-review P2: a MALFORMED per-day fill_status record (non-dict) is CORRUPT availability
+    # evidence, not absent evidence — a policy fill must fail closed on it via is_fillable like
+    # every other fill-availability path, not clear the blocker and approve spend
+    cal = _calendar()
+    cal["fill_status"]["2025-01-01"] = "garbage"
+    plan_path, cal_path = _write_tree(tmp_path, cal=cal, reports=_reports_with_unresolved())
+    res = _resolutions_file(tmp_path, [_entry("2025-01-01", action="policy",
+                                              decision="coinapi_fill_full_day")])
+    m = _build(plan_path, cal_path, res)
+    assert m["meta"]["status"] == "blocking"
+    assert m["blockers"]["book_fill_unavailable"] == ["2025-01-01:calendar_book_not_ok"]
+    assert m["blockers"]["resolution_issues"] == []   # the decision itself is valid + applied
+    assert m["blockers"]["unresolved_days"] == []
+
+
 def test_resolution_rerun_fill_judged_by_availability_checks(tmp_path):
     # pins the apply-BEFORE-checks ordering: check_report_fill_availability must judge the
     # SUPERSEDING rerun record — a rerun-introduced fill on a day whose calendar book status is
