@@ -90,10 +90,12 @@ SCHEMA = pa.schema([
 ])
 
 # CoinAPI Flat Files `trades` (T-TRADES/D-YYYYMMDD daily csv.gz). Same faithful-lossless
-# discipline as the book: vendor columns preserved, times as int-ns since midnight UTC, seq =
-# in-file row order. The column set is the documented flat-files trades layout; it has NOT been
-# verified against a live file (no vendor calls in this change), so the executor validates the
-# header before parsing and FAILS CLOSED on drift rather than normalizing wrong columns.
+# discipline as the book: vendor columns preserved, times as int-ns since the partition day's
+# midnight UTC, seq = in-file row order. The column set and the FULL-DATETIME time fields
+# (e.g. 2025-02-14T13:30:03.5851480 — unlike the book's time-of-day offsets) follow the
+# flat-files trades docs; neither has been verified against a live file (no vendor calls in
+# this change), so the executor validates the header before parsing, normalizes either time
+# form, and FAILS CLOSED on anything else rather than writing wrong data.
 TRADES_DATA_TYPE = "TRADES"
 TRADES_READ_DTYPE = {
     "time_exchange": str, "time_coinapi": str, "guid": str,
@@ -161,12 +163,25 @@ def to_table(df: pd.DataFrame, seq_start: int) -> pa.Table:
     return pa.Table.from_pandas(out, schema=SCHEMA, preserve_index=False)
 
 
-def trades_to_table(df: pd.DataFrame, seq_start: int) -> pa.Table:
+def _vendor_time_to_ns(series: pd.Series, day: str) -> pd.Series:
+    """Vendor time columns arrive as time-of-day offsets (LIMITBOOK_FULL, HH:MM:SS.fffffff) or as
+    FULL datetimes (TRADES per the flat-files docs, YYYY-MM-DDTHH:MM:SS.fffffff): normalize both
+    to int-ns since the partition day's midnight UTC. A record stamped outside the partition day
+    keeps its true offset (may be < 0 or >= 1 day) — recon owns day-boundary semantics. Any other
+    shape raises, so the unit fails closed rather than writing wrong timestamps."""
+    s = series.astype(str)
+    if len(s) and "T" in s.iloc[0]:
+        ts = pd.to_datetime(s, utc=True, format="ISO8601")
+        return (ts - pd.Timestamp(day, tz="UTC")).astype("int64")
+    return pd.to_timedelta(s).astype("int64")
+
+
+def trades_to_table(df: pd.DataFrame, seq_start: int, day: str) -> pa.Table:
     n = len(df)
     out = pd.DataFrame({
         "seq": range(seq_start, seq_start + n),
-        "time_exchange_ns": pd.to_timedelta(df["time_exchange"]).astype("int64"),
-        "time_coinapi_ns": pd.to_timedelta(df["time_coinapi"]).astype("int64"),
+        "time_exchange_ns": _vendor_time_to_ns(df["time_exchange"], day),
+        "time_coinapi_ns": _vendor_time_to_ns(df["time_coinapi"], day),
         "guid": df["guid"].fillna("").astype(str),
         "price": df["price"].astype("float64"),
         "base_amount": df["base_amount"].astype("float64"),
@@ -177,13 +192,15 @@ def trades_to_table(df: pd.DataFrame, seq_start: int) -> pa.Table:
 
 # explicit product handlers for the reviewed-manifest executor (issue #53). Keys are the
 # manifest's unit products (coinapi_backfill.PRODUCTS); each pins the vendor flat-file data type,
-# the faithful read/write schemas, and the normalizer — vendor schema knowledge stays here at the
-# ingestion boundary.
+# the faithful read/write schemas, and a day-bound normalizer factory (`make_to_table(day)`) —
+# vendor schema knowledge stays here at the ingestion boundary.
 HANDLERS = {
     bf.PRODUCT_BOOK: {"data_type": DATA_TYPE, "read_dtype": READ_DTYPE, "schema": SCHEMA,
-                      "to_table": to_table, "dict_cols": ("update_type",)},
+                      "make_to_table": lambda day: to_table, "dict_cols": ("update_type",)},
     bf.PRODUCT_TRADES: {"data_type": TRADES_DATA_TYPE, "read_dtype": TRADES_READ_DTYPE,
-                        "schema": TRADES_SCHEMA, "to_table": trades_to_table,
+                        "schema": TRADES_SCHEMA,
+                        "make_to_table": lambda day: (
+                            lambda df, seq: trades_to_table(df, seq, day)),
                         "dict_cols": ("taker_side",)},
 }
 
@@ -384,7 +401,7 @@ def process_unit(s3, bucket, unit, args, manifest_sha256, budget=None) -> dict:
             chunks = pd.read_csv(gz_path, compression="gzip", sep=";", chunksize=CHUNK_ROWS,
                                  dtype=handler["read_dtype"])
             rows, _ = write_parquet(chunks, tmp_parq, schema=handler["schema"],
-                                    to_table_fn=handler["to_table"],
+                                    to_table_fn=handler["make_to_table"](day),
                                     dict_cols=handler["dict_cols"])
             out_bytes = os.path.getsize(tmp_parq)
             out_sha = bf.sha256_file(tmp_parq)

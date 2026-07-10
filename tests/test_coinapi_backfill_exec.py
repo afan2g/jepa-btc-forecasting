@@ -32,8 +32,11 @@ def book_gz(n=3):
     return gzip.compress(("\n".join([BOOK_HEADER] + rows) + "\n").encode())
 
 
-def trades_gz(n=2, header=TRADES_HEADER):
-    rows = [f"12:00:0{i}.0000000;12:00:0{i}.0100000;g-{i};100.5;0.2{i};BUY" for i in range(n)]
+def trades_gz(n=2, header=TRADES_HEADER, day="2025-01-10"):
+    # CoinAPI flat-file TRADES time columns are FULL datetimes (docs show
+    # 2025-02-14T13:30:03.5851480), unlike the book's time-of-day offsets
+    rows = [f"{day}T12:00:0{i}.0000000;{day}T12:00:0{i}.0100000;g-{i};100.5;0.2{i};BUY"
+            for i in range(n)]
     return gzip.compress(("\n".join([header] + rows) + "\n").encode())
 
 
@@ -66,8 +69,8 @@ def default_objects():
         _key("LIMITBOOK_FULL", "2025-01-02"): book_gz(3),
         _key("LIMITBOOK_FULL", "2025-01-03"): book_gz(4),
         _key("LIMITBOOK_FULL", "2025-01-10"): book_gz(5),
-        _key("TRADES", "2025-01-10"): trades_gz(2),
-        _key("TRADES", "2025-01-11"): trades_gz(3),
+        _key("TRADES", "2025-01-10"): trades_gz(2, day="2025-01-10"),
+        _key("TRADES", "2025-01-11"): trades_gz(3, day="2025-01-11"),
     }
 
 
@@ -182,8 +185,38 @@ def test_trades_parquet_is_normalized(ready):
     assert t.column("taker_side").to_pylist() == ["BUY", "BUY"]
     assert t.column("price").to_pylist() == [100.5, 100.5]
     assert t.column("base_amount").to_pylist() == [0.20, 0.21]
-    # "12:00:00.0000000" -> ns since midnight UTC
+    # "2025-01-10T12:00:00.0000000" -> ns since the partition day's midnight UTC
     assert t.column("time_exchange_ns").to_pylist()[0] == 12 * 3600 * 10**9
+
+
+def test_trades_time_of_day_offset_form_also_normalizes(ready):
+    # tolerate the book-style offset form too: either vendor format lands as the same
+    # ns-since-partition-midnight normalization
+    import pyarrow.parquet as pq
+    objs = default_objects()
+    rows = [f"12:00:0{i}.0000000;12:00:0{i}.0100000;g-{i};100.5;0.2{i};BUY" for i in range(3)]
+    objs[_key("TRADES", "2025-01-11")] = gzip.compress(
+        ("\n".join([TRADES_HEADER] + rows) + "\n").encode())
+    fake = FakeS3(objs)
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    t = pq.ParquetFile(_final(ready, "trades", "2025-01-11")).read()
+    assert t.column("time_exchange_ns").to_pylist() == [(12 * 3600 + i) * 10**9
+                                                        for i in range(3)]
+
+
+def test_trades_datetime_outside_partition_day_is_preserved(ready):
+    # faithful-lossless: a record stamped past the partition day's midnight keeps its true
+    # offset (>= DAY_NS) rather than being clamped or wrapped — recon owns day-boundary logic
+    import pyarrow.parquet as pq
+    objs = default_objects()
+    rows = ["2025-01-11T23:59:59.0000000;2025-01-11T23:59:59.0100000;g-0;100.5;0.20;BUY",
+            "2025-01-12T00:00:00.0000000;2025-01-12T00:00:00.0100000;g-1;100.5;0.21;SELL"]
+    objs[_key("TRADES", "2025-01-11")] = gzip.compress(
+        ("\n".join([TRADES_HEADER] + rows) + "\n").encode())
+    fake = FakeS3(objs)
+    assert run_cli(ready, execute_args(ready), s3_factory=lambda: (fake, "coinapi")) == 0
+    t = pq.ParquetFile(_final(ready, "trades", "2025-01-11")).read()
+    assert t.column("time_exchange_ns").to_pylist() == [86_399 * 10**9, 86_400 * 10**9]
 
 
 def test_execute_resume_skips_done_units_without_vendor_calls(ready):
