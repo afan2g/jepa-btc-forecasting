@@ -18,8 +18,16 @@ H10 = 10_000_000_000
 MAY = _iso_ns("2026-05-01T00:00:00+00:00")
 
 
+def _authz(pipe):
+    """The freeze-authorization inputs: the dev result and pinned ledger the artifact
+    must be reproducible from."""
+    return dict(dev_result=pipe["res_xv"],
+                ledger=pipe.get("led_xv") or pipe["ledger"],
+                contract=pipe["world"]["contract"])
+
+
 def _open(tmp_path, pipe):
-    open_transaction(tmp_path, pipe["freeze"])
+    open_transaction(tmp_path, pipe["freeze"], **_authz(pipe))
     return tmp_path
 
 
@@ -64,13 +72,13 @@ def test_open_transaction_is_one_time_per_holdout(tmp_path, g0_pipeline):
     _open(tmp_path, g0_pipeline)
     assert _load(tmp_path, g0_pipeline)["state"] == "frozen"
     with pytest.raises(ValueError, match="cannot be reused or replaced"):
-        open_transaction(tmp_path, g0_pipeline["freeze"])
+        open_transaction(tmp_path, g0_pipeline["freeze"], **_authz(g0_pipeline))
     # The record is keyed by HOLDOUT identity, not by the artifact: a regenerated freeze
     # over the same holdout maps to the same transaction and cannot open a fresh one.
     other = _other_freeze(g0_pipeline)
     assert other["sha256"] != g0_pipeline["freeze"]["sha256"]
     with pytest.raises(ValueError, match="cannot be reused or replaced"):
-        open_transaction(tmp_path, other)
+        open_transaction(tmp_path, other, **_authz(g0_pipeline))
 
 
 def test_validation_success_records_consumption(tmp_path, g0_pipeline):
@@ -119,7 +127,7 @@ def test_validation_is_single_shot(tmp_path, g0_pipeline):
 
     fail_dir = tmp_path / "fail"
     fail_dir.mkdir()
-    open_transaction(fail_dir, g0_pipeline["freeze"])
+    open_transaction(fail_dir, g0_pipeline["freeze"], **_authz(g0_pipeline))
     _validate(fail_dir, g0_pipeline, passed=False)
     with pytest.raises(ValueError, match="exactly one validation attempt"):
         _validate(fail_dir, g0_pipeline, passed=True)   # no retry after a FAIL either
@@ -133,9 +141,9 @@ def test_validation_failure_blocks_scoring_permanently(tmp_path, g0_pipeline):
         _score(tmp_path, g0_pipeline)
     # ... and the failed transaction cannot be replaced, even by a regenerated freeze
     with pytest.raises(ValueError, match="cannot be reused or replaced"):
-        open_transaction(tmp_path, g0_pipeline["freeze"])
+        open_transaction(tmp_path, g0_pipeline["freeze"], **_authz(g0_pipeline))
     with pytest.raises(ValueError, match="cannot be reused or replaced"):
-        open_transaction(tmp_path, _other_freeze(g0_pipeline))
+        open_transaction(tmp_path, _other_freeze(g0_pipeline), **_authz(g0_pipeline))
 
 
 def test_scoring_requires_validation_first(tmp_path, g0_pipeline):
@@ -363,7 +371,7 @@ def g0_multi_pipeline():
 
 def test_score_rejects_partial_winner_horizon_coverage(tmp_path, g0_multi_pipeline):
     pipe = g0_multi_pipeline
-    open_transaction(tmp_path, pipe["freeze"])
+    open_transaction(tmp_path, pipe["freeze"], **_authz(pipe))
     record_trade_validation(tmp_path, freeze_artifact=pipe["freeze"],
                             scope_days=pipe["scope"]["days"],
                             scope_venues=pipe["scope"]["venues"],
@@ -452,3 +460,16 @@ def test_freeze_reconciles_every_horizon_verdict(g0_multi_pipeline):
                               trade_validation_thresholds={"min_rows": 10},
                               holdout_scope=pipe["scope"],
                               generated_at="2026-07-10T12:00:00+00:00")
+
+
+def test_fabricated_freeze_cannot_open_the_transaction(tmp_path, g0_pipeline):
+    """Codex PR#60 round-21 P1: a self-consistent but FABRICATED freeze (edited fields,
+    recomputed sha256) passes verify_freeze — opening the transaction therefore requires
+    the artifact to be REBUILT from the saved dev result and pinned ledger."""
+    from eval.freeze import freeze_hash, verify_freeze
+    fake = copy.deepcopy(g0_pipeline["freeze"])
+    fake["winner"]["config"] = "ridge"
+    fake["sha256"] = freeze_hash(fake)                # internally consistent again
+    assert verify_freeze(fake)                        # ... so the self-hash passes
+    with pytest.raises(ValueError, match="cannot be reproduced"):
+        open_transaction(tmp_path, fake, **_authz(g0_pipeline))

@@ -441,6 +441,27 @@ def verify_freeze(artifact: dict) -> dict:
     return artifact
 
 
+def authorize_freeze(freeze_artifact: dict, *, dev_result: dict, ledger: TrialLedger,
+                     contract: dict) -> dict:
+    """An AUTHORITATIVE freeze is one that can be REBUILT from the saved dev result and
+    the pinned, self-validating ledger: the embedded self-hash only proves internal
+    consistency, so a fabricated artifact (arbitrary winner/source hashes with a
+    recomputed sha256) would otherwise authorize holdout consumption for a study that
+    never passed. The deterministic rebuild re-runs every reconciliation — winner
+    selection, per-horizon verdicts, counts, scope — and the hashes must agree."""
+    verify_freeze(freeze_artifact)
+    rebuilt = build_freeze_artifact(
+        dev_result, contract=contract, ledger=ledger,
+        trade_validation_thresholds=freeze_artifact["trade_validation_thresholds"],
+        holdout_scope=freeze_artifact["holdout_scope"],
+        generated_at=freeze_artifact["generated_at"])
+    if rebuilt["sha256"] != freeze_artifact["sha256"]:
+        raise ValueError("freeze artifact cannot be reproduced from the supplied dev "
+                         "result and pinned ledger; a fabricated or drifted selection "
+                         "artifact cannot authorize the holdout")
+    return freeze_artifact
+
+
 def write_freeze(artifact: dict, path) -> None:
     verify_freeze(artifact)
     d = os.path.dirname(os.path.abspath(path)) or "."

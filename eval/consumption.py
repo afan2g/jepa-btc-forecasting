@@ -20,7 +20,7 @@ import json
 import os
 import tempfile
 
-from eval.freeze import _canonical_day, verify_freeze
+from eval.freeze import _canonical_day, authorize_freeze, verify_freeze
 from eval.hashing import hash_obj
 
 RECORD_VERSION = 1
@@ -88,12 +88,16 @@ def load_record(path) -> dict:
     return record
 
 
-def open_transaction(records_dir, freeze_artifact: dict) -> dict:
-    """Open THE holdout transaction for a verified freeze artifact. The record path is
+def open_transaction(records_dir, freeze_artifact: dict, *, dev_result: dict,
+                     ledger, contract: dict) -> dict:
+    """Open THE holdout transaction for an AUTHORIZED freeze artifact: the artifact must
+    be reproducible from the saved dev result and the pinned ledger (a self-consistent
+    but fabricated artifact never authorizes April consumption). The record path is
     derived from the holdout identity inside `records_dir`, so any prior transaction for
     this holdout — consumed, failed, or merely opened, even under a regenerated freeze —
     already occupies the path and the open fails: never reused, never replaced."""
-    verify_freeze(freeze_artifact)
+    authorize_freeze(freeze_artifact, dev_result=dev_result, ledger=ledger,
+                     contract=contract)
     path = record_path_for(records_dir, freeze_artifact)
     if os.path.exists(path):
         raise ValueError(f"holdout consumption record already exists at {path}; the "

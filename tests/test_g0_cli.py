@@ -172,6 +172,8 @@ def test_full_cli_flow_one_time_holdout(tmp_path, g0_world):
     records = tmp_path / "records"
     records.mkdir()
     assert rg.main(["holdout-open", "--freeze", freeze_path,
+                    "--dev-result", dev_out, "--ledger", xv_ledger,
+                    "--contract", f["contract"],
                     "--records-dir", str(records)], read_matrix=store) == 0
     # scoring before validation must refuse BEFORE any holdout read
     pre_calls = list(store.calls)
@@ -244,12 +246,19 @@ def test_cli_validate_rejects_non_boolean_passed(tmp_path, g0_pipeline):
     string from external tooling would permanently record a PASS on the single gate
     protecting holdout consumption."""
     from eval.freeze import write_freeze
+    from eval.ledger import _json_safe
     store = Store()
     freeze_path = str(tmp_path / "freeze.json")
     write_freeze(g0_pipeline["freeze"], freeze_path)
+    dev_out = _dump(tmp_path, "xv_result.json", _json_safe(g0_pipeline["res_xv"]))
+    xv_ledger = str(tmp_path / "xv_ledger.json")
+    g0_pipeline["led_xv"].save(xv_ledger)
+    contract = _dump(tmp_path, "contract.json", g0_pipeline["world"]["contract"])
     records = tmp_path / "records"
     records.mkdir()
     assert rg.main(["holdout-open", "--freeze", freeze_path,
+                    "--dev-result", dev_out, "--ledger", xv_ledger,
+                    "--contract", contract,
                     "--records-dir", str(records)], read_matrix=store) == 0
     report = {"scope_days": g0_pipeline["scope"]["days"], "scope_venues": ["coinbase"],
               "thresholds": g0_pipeline["thresholds"], "passed": "false"}
@@ -264,13 +273,19 @@ def test_cli_validate_rejects_non_boolean_passed(tmp_path, g0_pipeline):
 
 def test_cli_validation_failure_blocks_scoring_without_loading(tmp_path, g0_pipeline):
     from eval.freeze import write_freeze
+    from eval.ledger import _json_safe
     world = g0_pipeline["world"]
     store, f = _setup(tmp_path, world)
     freeze_path = str(tmp_path / "freeze.json")
     write_freeze(g0_pipeline["freeze"], freeze_path)
+    dev_out = _dump(tmp_path, "xv_result.json", _json_safe(g0_pipeline["res_xv"]))
+    xv_ledger = str(tmp_path / "xv_ledger.json")
+    g0_pipeline["led_xv"].save(xv_ledger)
     records = tmp_path / "records"
     records.mkdir()
     assert rg.main(["holdout-open", "--freeze", freeze_path,
+                    "--dev-result", dev_out, "--ledger", xv_ledger,
+                    "--contract", f["contract"],
                     "--records-dir", str(records)], read_matrix=store) == 0
     report = {"scope_days": g0_pipeline["scope"]["days"], "scope_venues": ["coinbase"],
               "thresholds": g0_pipeline["thresholds"], "passed": False}

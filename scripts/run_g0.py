@@ -197,7 +197,14 @@ def cmd_freeze(args, read_matrix) -> int:
 
 def cmd_holdout_open(args, read_matrix) -> int:
     freeze = load_freeze(args.freeze)
-    record = open_transaction(args.records_dir, freeze)
+    # The freeze must be AUTHORIZED, not merely self-consistent: it is rebuilt from the
+    # saved dev result + pinned ledger, so a fabricated artifact cannot open the
+    # one-time transaction.
+    dev_result = _read_json(args.dev_result)
+    ledger = TrialLedger.load(args.ledger)
+    contract = load_partition_contract(args.contract)
+    record = open_transaction(args.records_dir, freeze, dev_result=dev_result,
+                              ledger=ledger, contract=contract)
     print(f"opened one-time holdout transaction "
           f"{record_path_for(args.records_dir, freeze)} "
           f"(holdout {record['holdout_id'][:16]}..., artifact {freeze['sha256'][:16]}...)")
@@ -320,6 +327,12 @@ def parse_args(argv=None):
 
     p = sub.add_parser("holdout-open", help="open the one-time consumption transaction")
     p.add_argument("--freeze", required=True)
+    p.add_argument("--dev-result", required=True,
+                   help="the g0xv-dev result JSON the freeze was built from (the freeze "
+                        "is re-derived from it + the ledger; a fabricated artifact "
+                        "cannot authorize the holdout)")
+    p.add_argument("--ledger", required=True, help="the pinned G0-XV trial ledger")
+    p.add_argument("--contract", required=True)
     p.add_argument("--records-dir", required=True,
                    help="directory of holdout consumption records; the file name is "
                         "derived from the holdout identity (one transaction per holdout)")
