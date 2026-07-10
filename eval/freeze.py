@@ -181,16 +181,19 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
     control = dev_result.get("control_arm")
     if control not in arms_echo:
         raise ValueError("dev result control_arm is not among its arms")
-    verdict_ident = trial_identity(
-        protocol="g0xv-verdict", arm="unified",
-        dataset_id=arms_echo[control]["dataset_id"],
-        build_id=hash_obj({a: e["build_id"] for a, e in arms_echo.items()}),
-        feature_cols=sorted(arms_echo), config="horizon_verdict",
-        horizon=ident["horizon"],
-        variant_params={"gate_sha256": hash_obj(_json_safe(dict(dev_result["gate"])))})
-    verdict_id = identity_hash(verdict_ident)
     by_id = {e["identity_sha256"]: e for e in ledger.entries()}
-    v = by_id.get(verdict_id)
+    gate_sha = hash_obj(_json_safe(dict(dev_result["gate"])))
+
+    def _verdict_entry(tag: str):
+        vi = trial_identity(
+            protocol="g0xv-verdict", arm="unified",
+            dataset_id=arms_echo[control]["dataset_id"],
+            build_id=hash_obj({a: e["build_id"] for a, e in arms_echo.items()}),
+            feature_cols=sorted(arms_echo), config="horizon_verdict", horizon=tag,
+            variant_params={"gate_sha256": gate_sha})
+        return by_id.get(identity_hash(vi))
+
+    v = _verdict_entry(ident["horizon"])
     if v is None:
         raise ValueError("no pinned g0xv-verdict entry matching this study's arms/builds "
                          "and the winner's horizon; re-run the development study "
@@ -279,6 +282,41 @@ def _verify_winner(dev_result: dict, ledger: TrialLedger) -> None:
                          "pinned trial ledger (DSR with the full effective trial count, "
                          "trade floors, and the naive benchmark); an edited pass verdict "
                          "cannot authorize the holdout")
+
+    # The winner is the study's DETERMINISTIC selection — max net PnL over every
+    # solo-passing cross-venue candidate of every passing horizon — not merely "a valid
+    # passing candidate": with two passing candidates, a post-hoc swap to the runner-up
+    # would otherwise keep every hash valid. Every horizon's pass flag and solo list is
+    # reconciled against its own pinned verdict, so hiding a better horizon (or
+    # candidate) is also caught.
+    eligible_nets = []
+    for tag, hh in dev_result["horizons"].items():
+        vv = _verdict_entry(tag)
+        if vv is None:
+            raise ValueError(f"no pinned g0xv-verdict entry for horizon {tag!r}; "
+                             "re-run the development study")
+        if bool(hh.get("pass")) != bool(vv["result"]["pass"]):
+            raise ValueError(f"dev result pass flag for horizon {tag!r} does not "
+                             "reconcile to its pinned ledger verdict")
+        if not vv["result"]["pass"]:
+            continue
+        solo_list = hh.get("solo_pass_cross_venue", [])
+        if hash_obj(sorted(solo_list)) != vv["result"]["solo_pass_cross_venue_sha256"]:
+            raise ValueError(f"solo-pass list for passing horizon {tag!r} does not "
+                             "reconcile to its pinned ledger verdict")
+        for cid2 in solo_list:
+            e2 = by_id.get(cid2)
+            if e2 is None:
+                raise ValueError("solo-passing candidate missing from the pinned ledger")
+            eligible_nets.append(e2["result"]["net_pnl"])
+    if not eligible_nets:
+        raise ValueError("no solo-passing cross-venue candidates in any passing horizon")
+    if not _close(res["net_pnl"], max(eligible_nets)):
+        raise ValueError("frozen winner is not the study's deterministic selection "
+                         "(max net PnL over solo-passing cross-venue candidates of "
+                         "passing horizons); a post-hoc winner swap cannot be frozen")
+    if not _close(winner["net_pnl"], res["net_pnl"]):
+        raise ValueError("frozen winner net_pnl does not match its pinned ledger result")
 
 
 def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedger,

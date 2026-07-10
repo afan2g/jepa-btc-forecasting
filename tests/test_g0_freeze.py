@@ -213,6 +213,47 @@ def test_freeze_rejects_verdict_flip_when_pbo_failed_closed(g0_world, monkeypatc
                               generated_at="2026-07-10T12:00:00+00:00")
 
 
+def test_freeze_enforces_the_deterministic_winner_selection():
+    """Codex PR#60 round-13: with two solo-passing candidates, swapping the winner to
+    the runner-up keeps every hash/verdict valid — the freeze recomputes the study's
+    max-net-PnL selection from ledger-pinned evidence and refuses the swap."""
+    from eval.g0 import run_g0xv_development
+    from eval.synthetic import make_g0_world
+
+    w = make_g0_world(n_dev_bars=300, n_holdout_bars=10, cb_signal=6.0, bn_signal=6.0,
+                      noise_bps=5.0, seed=3)
+    arms = [{"name": n, **w["dev"]["arms"][n]}
+            for n in ("coinbase_only", "binance_only", "combined")]
+    led = TrialLedger()
+    base = run_g0xv_development(arms, w["contract"],
+                                gate={"n_groups": 4, "k": 2, "min_trades": 5,
+                                      "min_eff_trades": 3.0, "noise_band_n_boot": 500},
+                                ledger=led)
+    assert base["g0xv_dev_pass"]
+    h = base["horizons"]["10s"]
+    solo = h["solo_pass_cross_venue"]
+    assert len(solo) >= 2, "fixture needs at least two solo-passing candidates"
+    ranked = sorted(solo, key=lambda c: h["candidates"][c]["net_pnl"], reverse=True)
+    runner_up = ranked[1]
+    row = h["candidates"][runner_up]
+    entry = next(e for e in led.entries() if e["identity_sha256"] == runner_up)
+    edited = copy.deepcopy(base)
+    edited["winner"] = {"arm": row["arm"], "config": row["config"], "horizon": "10s",
+                        "variant": row["variant"], "identity_sha256": runner_up,
+                        "feature_cols": entry["identity"]["feature_cols"],
+                        "dataset_id": entry["identity"]["dataset_id"],
+                        "build_id": entry["identity"]["build_id"],
+                        "net_pnl": row["net_pnl"]}
+    scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
+             "dataset_id": "synthetic-xv-pilot",
+             "build_id": f"holdout-seeded-{row['arm']}", "excluded_days": {}}
+    with pytest.raises(ValueError, match="deterministic selection"):
+        build_freeze_artifact(edited, contract=w["contract"], ledger=led,
+                              trade_validation_thresholds={"min_rows": 10},
+                              holdout_scope=scope,
+                              generated_at="2026-07-10T12:00:00+00:00")
+
+
 def test_freeze_counts_come_from_the_ledger(g0_pipeline):
     """Codex PR#60 round-9: the ledger hash covers identity/result pairs, not the
     reported counts — an edited multiplicity in the dev result must not be frozen."""
