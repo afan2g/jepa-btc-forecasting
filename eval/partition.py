@@ -163,13 +163,23 @@ def require_binding(manifest: dict, contract: dict, expected_partition: str) -> 
 
 
 # ------------------------------------------------------------------------ span validation
+_I64_MIN = -(2**63) + 1
+
+
 def _span_violations(matrix: pd.DataFrame, contract: dict, *, lo_ns: int,
                      boundary_ns: int) -> dict:
     """Per-horizon violation counts of the span rules against [lo_ns, boundary_ns):
     (a) t_event before the partition start; (b) the conservative prefilter
     t_event + horizon + guard >= boundary (checked INDEPENDENTLY of t_barrier, so an early
     barrier cannot bypass it); (c) the actual guarded label span t_barrier + guard >=
-    boundary. Returns {tag: {"before_start": n, "prefilter": n, "actual_span": n}}."""
+    boundary. Returns {tag: {"before_start": n, "prefilter": n, "actual_span": n}}.
+
+    The thresholds are computed in PYTHON ints and the comparisons rearranged so no array
+    arithmetic can overflow: numpy int64 addition wraps SILENTLY, so a schema-valid
+    contract with a huge guard/horizon (or a garbage t_event near the int64 max) under
+    `te + horizon + guard >= boundary` would wrap negative and ADMIT holdout rows. With
+    `te >= boundary - horizon - guard` nothing overflows; a threshold clamped up to the
+    int64 floor means nothing can be span-safe, which correctly counts every row."""
     guard = contract["guard_ns"]
     horizons = contract["horizons"]
     undeclared = sorted(set(matrix["horizon"].unique()) - set(horizons))
@@ -180,10 +190,12 @@ def _span_violations(matrix: pd.DataFrame, contract: dict, *, lo_ns: int,
     for tag, sub in matrix.groupby("horizon", observed=True):
         te = sub["t_event"].to_numpy()
         tb = sub["t_barrier"].to_numpy()
+        pre_thresh = max(int(boundary_ns) - int(horizons[tag]) - int(guard), _I64_MIN)
+        act_thresh = max(int(boundary_ns) - int(guard), _I64_MIN)
         v = {
             "before_start": int((te < lo_ns).sum()),
-            "prefilter": int((te + horizons[tag] + guard >= boundary_ns).sum()),
-            "actual_span": int((tb + guard >= boundary_ns).sum()),
+            "prefilter": int((te >= pre_thresh).sum()),
+            "actual_span": int((tb >= act_thresh).sum()),
         }
         if any(v.values()):
             out[str(tag)] = v

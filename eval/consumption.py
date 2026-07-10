@@ -10,8 +10,10 @@ Both #48's manifest-authorized trade validator and the holdout scorer update thi
 Every update re-verifies the pinned freeze-artifact hash, so a stale artifact, a
 regenerated freeze, a retry after failure, a partial-scope substitution, or a generic day
 selector is rejected. A consumed or failed transaction can never be reused or replaced:
-opening a second record at the same path fails, and no API mutates thresholds,
-exclusions, candidates, or holdout dates — those live only in the frozen artifact."""
+the record file name is DERIVED from the holdout identity (window bounds + dataset), so
+even a regenerated freeze artifact over the same holdout maps to the same record and hits
+the same one-time gate. No API mutates thresholds, exclusions, candidates, or holdout
+dates — those live only in the frozen artifact."""
 from __future__ import annotations
 
 import json
@@ -58,6 +60,20 @@ def _write(record: dict, path, *, must_create: bool) -> dict:
     return record
 
 
+def holdout_id(freeze_artifact: dict) -> str:
+    """The holdout's transaction identity: the contract's holdout WINDOW plus the holdout
+    dataset. Deliberately independent of the freeze hash — a regenerated selection
+    artifact over the same holdout must map to the SAME transaction, not a fresh one."""
+    win = freeze_artifact["holdout_window"]
+    return hash_obj({"holdout_start_ns": win["holdout_start_ns"],
+                     "holdout_end_ns": win["holdout_end_ns"],
+                     "dataset_id": freeze_artifact["holdout_scope"]["dataset_id"]})
+
+
+def record_path_for(records_dir, freeze_artifact: dict) -> str:
+    return os.path.join(records_dir, f"holdout-{holdout_id(freeze_artifact)[:16]}.json")
+
+
 def load_record(path) -> dict:
     with open(path) as f:
         record = json.load(f)
@@ -72,17 +88,20 @@ def load_record(path) -> dict:
     return record
 
 
-def open_transaction(path, freeze_artifact: dict) -> dict:
-    """Open THE holdout transaction for a verified freeze artifact. Fails if a record
-    already exists at `path` — a consumed, failed, or merely opened transaction is never
-    reused or replaced."""
+def open_transaction(records_dir, freeze_artifact: dict) -> dict:
+    """Open THE holdout transaction for a verified freeze artifact. The record path is
+    derived from the holdout identity inside `records_dir`, so any prior transaction for
+    this holdout — consumed, failed, or merely opened, even under a regenerated freeze —
+    already occupies the path and the open fails: never reused, never replaced."""
     verify_freeze(freeze_artifact)
+    path = record_path_for(records_dir, freeze_artifact)
     if os.path.exists(path):
         raise ValueError(f"holdout consumption record already exists at {path}; the "
                          "holdout transaction is one-time and cannot be reused or "
                          "replaced")
     record = {
         "record_version": RECORD_VERSION,
+        "holdout_id": holdout_id(freeze_artifact),
         "artifact_sha256": freeze_artifact["sha256"],
         "holdout_scope": freeze_artifact["holdout_scope"],
         "trade_validation_thresholds": freeze_artifact["trade_validation_thresholds"],
@@ -117,13 +136,14 @@ def _exact_scope(record: dict, scope_days, scope_venues) -> None:
                          f"{record['holdout_scope']['venues']}")
 
 
-def record_trade_validation(path, *, freeze_artifact: dict, scope_days, scope_venues,
-                            passed: bool, report_sha256: str) -> dict:
+def record_trade_validation(records_dir, *, freeze_artifact: dict, scope_days,
+                            scope_venues, passed: bool, report_sha256: str) -> dict:
     """Record the ONE #48 exact-scope trade-validation outcome. Allowed only while the
     transaction is `frozen`; every retry — after a pass, after a fail, with a different
     artifact, or with any scope deviation — is rejected. A FAIL makes G0-XV
     blocking/inconclusive; nothing here (or anywhere) can then change thresholds,
     exclusions, candidates, or holdout dates to try again."""
+    path = record_path_for(records_dir, freeze_artifact)
     record = load_record(path)
     _require_artifact(record, freeze_artifact)
     if record["state"] != STATE_FROZEN:
@@ -143,9 +163,11 @@ def record_trade_validation(path, *, freeze_artifact: dict, scope_days, scope_ve
     return _write(record, path, must_create=False)
 
 
-def record_holdout_score(path, *, freeze_artifact: dict, result_sha256: str) -> dict:
+def record_holdout_score(records_dir, *, freeze_artifact: dict,
+                         result_sha256: str) -> dict:
     """Record the ONE fixed model score. Requires a PASSed trade validation; a failed
     validation blocks scoring permanently, and a second score is rejected."""
+    path = record_path_for(records_dir, freeze_artifact)
     record = load_record(path)
     _require_artifact(record, freeze_artifact)
     if record["state"] == STATE_VALIDATION_FAILED:

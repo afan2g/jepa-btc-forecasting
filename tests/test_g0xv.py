@@ -61,14 +61,20 @@ def test_dsr_reconciles_to_unified_ledger_count(g0_pipeline):
 
 def test_pbo_candidates_reconcile_to_common_matrix(g0_pipeline):
     """PBO must span EVERY registered G0-XV candidate of the horizon across all arms —
-    the common development-OOS candidate-PnL matrix, not per-arm PBO."""
+    the common development-OOS candidate-PnL matrix, not per-arm PBO. Matched arms share
+    bit-identical naive PnL columns, so the matrix keeps exactly ONE naive benchmark
+    (the control arm's) instead of a pass-friendly duplicate per arm."""
     res, led = g0_pipeline["res_xv"], g0_pipeline["led_xv"]
     h = res["horizons"]["10s"]
-    xv_ids = {e["identity_sha256"] for e in led.entries()
-              if e["identity"]["protocol"] == "g0xv" and e["identity"]["horizon"] == "10s"}
-    assert set(h["pbo_candidates"]) == xv_ids and len(h["pbo_candidates"]) == 12
+    xv = [e for e in led.entries()
+          if e["identity"]["protocol"] == "g0xv" and e["identity"]["horizon"] == "10s"]
+    xv_ids = {e["identity_sha256"] for e in xv}
+    pbo_expected = {e["identity_sha256"] for e in xv
+                    if e["identity"]["config"] != "naive"
+                    or e["identity"]["arm"] == "coinbase_only"}
+    assert set(h["pbo_candidates"]) == pbo_expected and len(h["pbo_candidates"]) == 10
     assert h["pbo_available"] is True and np.isfinite(h["pbo"])
-    assert set(h["candidates"]) == xv_ids
+    assert set(h["candidates"]) == xv_ids and len(xv_ids) == 12
 
 
 # --------------------------------------------------------------- matched-arm fail-closed

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import pathlib
 import sys
 
@@ -35,7 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from eval.consumption import (load_record, open_transaction,           # noqa: E402
-                              record_trade_validation)
+                              record_path_for, record_trade_validation)
 from eval.freeze import build_freeze_artifact, load_freeze, write_freeze  # noqa: E402
 from eval.g0 import (g0cb_manifest_prechecks, run_g0cb_study,          # noqa: E402
                      run_g0xv_development)
@@ -52,10 +53,35 @@ def _read_json(path):
 
 
 def _write_json(obj, path) -> None:
-    with open(path, "w") as f:
-        json.dump(_json_safe(obj), f, indent=2, sort_keys=True, allow_nan=False)
-        f.write("\n")
+    # Atomic like every other writer in this layer (tmp + rename): a mid-dump failure
+    # must never leave a truncated result artifact behind.
+    import tempfile
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".result-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(_json_safe(obj), f, indent=2, sort_keys=True, allow_nan=False)
+            f.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
     print(f"wrote {path}")
+
+
+def _ensure_writable(path) -> None:
+    """Fail BEFORE an irreversible step if the output path cannot be written — the
+    holdout scorer consumes the one-time transaction before its result is persisted, so
+    a bad --out must be caught first."""
+    import tempfile
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    try:
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".preflight-")
+        os.close(fd)
+        os.unlink(tmp)
+    except OSError as e:
+        raise ValueError(f"output path {path} is not writable: {e}") from None
 
 
 def _default_read_matrix(path):
@@ -78,30 +104,31 @@ def cmd_g0cb(args, read_matrix) -> int:
     variants = _read_json(args.variants_json) if args.variants_json else None
     ledger = _load_ledger(args.ledger)
     matrix = read_matrix(args.matrix)
-    res = run_g0cb_study(matrix, manifest, contract, gate=gate, ledger=ledger,
-                         variants=variants)
-    ledger.save(args.ledger)
+    try:
+        res = run_g0cb_study(matrix, manifest, contract, gate=gate, ledger=ledger,
+                             variants=variants)
+    finally:
+        # Every attempted candidate is trial history, even when a later candidate or
+        # check aborts the run — the ledger must never lose attempts to an exception.
+        ledger.save(args.ledger)
     _write_json(res, args.out)
     print(f"G0-CB (development-only): pass={res['g0cb_pass']} "
           f"trials={res['ledger']['n_effective_trials']}")
     return 0
 
 
-def _parse_arm(spec: str) -> tuple[str, str, str]:
-    try:
-        name, rest = spec.split("=", 1)
-        manifest_path, matrix_path = rest.rsplit(":", 1)
-    except ValueError:
-        raise ValueError(f"--arm must be name=manifest.json:matrix.parquet, got {spec!r}") \
-            from None
-    if not name or not manifest_path or not matrix_path:
-        raise ValueError(f"--arm must be name=manifest.json:matrix.parquet, got {spec!r}")
-    return name, manifest_path, matrix_path
-
-
 def cmd_g0xv_dev(args, read_matrix) -> int:
     contract = load_partition_contract(args.contract)
-    parsed = [_parse_arm(s) for s in args.arm]
+    # --arm NAME MANIFEST MATRIX (nargs=3): no separator characters to collide with
+    # ':' or '=' in real paths (ISO-timestamped run dirs contain ':').
+    parsed = [(a[0], a[1], a[2]) for a in args.arm]
+    if any(not p for triple in parsed for p in triple):
+        raise ValueError("--arm requires three non-empty values: NAME MANIFEST MATRIX")
+    if not args.prior_ledger and not args.no_prior_history:
+        raise ValueError(
+            "g0xv-dev requires the persisted G0-CB trial history via --prior-ledger "
+            "(the unified DSR count must include every prior attempt); pass "
+            "--no-prior-history ONLY if no G0-CB screen was ever run for this pilot")
     manifests = {}
     for name, manifest_path, _ in parsed:
         man = load_manifest(manifest_path)
@@ -115,9 +142,11 @@ def cmd_g0xv_dev(args, read_matrix) -> int:
     variants = _read_json(args.variants_json) if args.variants_json else None
     ledger = _load_ledger(args.ledger)
     priors = [TrialLedger.load(p) for p in (args.prior_ledger or [])]
-    res = run_g0xv_development(arms, contract, gate=gate, ledger=ledger,
-                               prior_ledgers=priors, variants=variants)
-    ledger.save(args.ledger)
+    try:
+        res = run_g0xv_development(arms, contract, gate=gate, ledger=ledger,
+                                   prior_ledgers=priors, variants=variants)
+    finally:
+        ledger.save(args.ledger)   # attempted trials survive an aborted run
     _write_json(res, args.out)
     print(f"G0-XV development: pass={res['g0xv_dev_pass']} "
           f"winner={res['winner']['identity_sha256'][:12] if res['winner'] else None} "
@@ -146,9 +175,10 @@ def cmd_freeze(args, read_matrix) -> int:
 
 def cmd_holdout_open(args, read_matrix) -> int:
     freeze = load_freeze(args.freeze)
-    open_transaction(args.record, freeze)
-    print(f"opened one-time holdout transaction at {args.record} "
-          f"(artifact {freeze['sha256'][:16]}...)")
+    record = open_transaction(args.records_dir, freeze)
+    print(f"opened one-time holdout transaction "
+          f"{record_path_for(args.records_dir, freeze)} "
+          f"(holdout {record['holdout_id'][:16]}..., artifact {freeze['sha256'][:16]}...)")
     return 0
 
 
@@ -159,9 +189,14 @@ def cmd_holdout_validate(args, read_matrix) -> int:
         if key not in report:
             raise ValueError(f"validation report missing {key!r} (need scope_days, "
                              "scope_venues, passed)")
+    if not isinstance(report["passed"], bool):
+        # NEVER coerce: bool("false") is True, so a truthy string from external tooling
+        # would permanently record a PASS on the single gate protecting the holdout.
+        raise ValueError(f"validation report 'passed' must be a JSON boolean, got "
+                         f"{report['passed']!r}")
     record = record_trade_validation(
-        args.record, freeze_artifact=freeze, scope_days=report["scope_days"],
-        scope_venues=report["scope_venues"], passed=bool(report["passed"]),
+        args.records_dir, freeze_artifact=freeze, scope_days=report["scope_days"],
+        scope_venues=report["scope_venues"], passed=report["passed"],
         report_sha256=hash_obj(_json_safe(report)))
     print(f"trade validation recorded: state={record['state']}")
     return 0 if record["state"] == "validated" else 3
@@ -169,7 +204,7 @@ def cmd_holdout_validate(args, read_matrix) -> int:
 
 def cmd_holdout_score(args, read_matrix) -> int:
     freeze = load_freeze(args.freeze)
-    record = load_record(args.record)
+    record = load_record(record_path_for(args.records_dir, freeze))
     # Fail-before-load boundary: no holdout bytes are read unless the one-time
     # transaction is in the right state for this invocation and every manifest binds the
     # pinned contract partitions.
@@ -180,6 +215,7 @@ def cmd_holdout_score(args, read_matrix) -> int:
     if record["state"] != need:
         raise ValueError(f"holdout transaction is {record['state']!r}; this invocation "
                          f"requires {need!r} — refusing before any holdout data is read")
+    _ensure_writable(args.out)   # scoring consumes the transaction; --out must work
     contract = load_partition_contract(args.contract)
     dev_manifest = load_manifest(args.dev_manifest)
     holdout_manifest = load_manifest(args.holdout_manifest)
@@ -187,7 +223,7 @@ def cmd_holdout_score(args, read_matrix) -> int:
     require_binding(holdout_manifest, contract, "holdout")
     dev_matrix = read_matrix(args.dev_matrix)
     holdout_matrix = read_matrix(args.holdout_matrix)
-    res = score_fixed_holdout(freeze_artifact=freeze, record_path=args.record,
+    res = score_fixed_holdout(freeze_artifact=freeze, records_dir=args.records_dir,
                               contract=contract, dev_matrix=dev_matrix,
                               dev_manifest=dev_manifest, holdout_matrix=holdout_matrix,
                               holdout_manifest=holdout_manifest,
@@ -221,12 +257,17 @@ def parse_args(argv=None):
     p.set_defaults(fn=cmd_g0cb)
 
     p = sub.add_parser("g0xv-dev", help="unified matched multi-arm development study")
-    p.add_argument("--arm", action="append", required=True,
-                   help="name=manifest.json:matrix.parquet (repeat per arm)")
+    p.add_argument("--arm", action="append", required=True, nargs=3,
+                   metavar=("NAME", "MANIFEST", "MATRIX"),
+                   help="arm name, manifest JSON path, matrix path (repeat per arm)")
     p.add_argument("--contract", required=True)
     p.add_argument("--ledger", required=True)
     p.add_argument("--prior-ledger", action="append", default=None,
-                   help="prior trial ledgers (e.g. the G0-CB history); repeatable")
+                   help="prior trial ledgers (the G0-CB history); repeatable and "
+                        "REQUIRED unless --no-prior-history")
+    p.add_argument("--no-prior-history", action="store_true",
+                   help="explicitly assert no prior G0-CB trial history exists for "
+                        "this pilot (otherwise --prior-ledger is required)")
     p.add_argument("--gate-json", default=None)
     p.add_argument("--variants-json", default=None)
     p.add_argument("--out", required=True)
@@ -244,21 +285,24 @@ def parse_args(argv=None):
 
     p = sub.add_parser("holdout-open", help="open the one-time consumption transaction")
     p.add_argument("--freeze", required=True)
-    p.add_argument("--record", required=True)
+    p.add_argument("--records-dir", required=True,
+                   help="directory of holdout consumption records; the file name is "
+                        "derived from the holdout identity (one transaction per holdout)")
     p.set_defaults(fn=cmd_holdout_open)
 
     p = sub.add_parser("holdout-validate",
                        help="record the exact-scope trade-validation outcome (once)")
     p.add_argument("--freeze", required=True)
-    p.add_argument("--record", required=True)
+    p.add_argument("--records-dir", required=True)
     p.add_argument("--report-json", required=True,
-                   help="validation report with scope_days, scope_venues, passed")
+                   help="validation report with scope_days, scope_venues, passed (a "
+                        "strict JSON boolean)")
     p.set_defaults(fn=cmd_holdout_validate)
 
     p = sub.add_parser("holdout-score",
                        help="fit frozen winner pre-holdout, score the holdout once")
     p.add_argument("--freeze", required=True)
-    p.add_argument("--record", required=True)
+    p.add_argument("--records-dir", required=True)
     p.add_argument("--contract", required=True)
     p.add_argument("--dev-matrix", required=True)
     p.add_argument("--dev-manifest", required=True)

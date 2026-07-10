@@ -157,12 +157,31 @@ def test_world_drop_counts_reconcile_to_generator():
 # ---------------------------------------------------------------------- span validation
 def test_dev_prefilter_rejects_forward_support_reaching_holdout():
     """A March row whose forward support reaches April fails BEFORE fit, and an early
-    barrier (label changed to resolve early) cannot bypass the conservative prefilter."""
+    barrier (label changed to resolve early) cannot bypass the conservative prefilter.
+    The fixture is built so ONLY the prefilter clause is violated: t_barrier resolves so
+    early that the actual guarded span stays clear of April (tb + guard < April 1), so a
+    mutant that dropped the prefilter clause would pass this row."""
     c = _contract()
-    te = APR - H10                        # t_event + horizon + guard lands past April 1
-    early_barrier = te + 1                # "early-resolving" label
-    with pytest.raises(ValueError, match="prefilter.*regardless of t_barrier"):
+    te = APR - H10 - GUARD + 5            # te + h + guard = April 1 + 5ns  -> violates
+    early_barrier = te + 1                # tb + guard = April 1 - h + 6ns  -> clean
+    assert early_barrier + GUARD < APR
+    with pytest.raises(ValueError,
+                       match=r"'prefilter': 1, 'actual_span': 0.*regardless of t_barrier"):
         validate_development_span(_rows([te], [early_barrier]), c)
+
+
+def test_span_arithmetic_cannot_overflow_int64():
+    """numpy int64 addition wraps silently: a schema-valid contract with a huge guard
+    (or a garbage t_event near the int64 max) must still REJECT holdout rows, not wrap
+    negative and admit them. The thresholds are computed in Python ints, so these rows
+    are counted as violations rather than slipping through."""
+    huge_guard = _contract(guard_ns=8_000_000_000_000_000_000)
+    apr_row = _rows([APR + 14 * 86_400_000_000_000], [APR + 14 * 86_400_000_000_000 + H10])
+    with pytest.raises(ValueError, match="span-safe"):
+        validate_development_span(apr_row, huge_guard)
+    near_max = 2**63 - H10 - 1
+    with pytest.raises(ValueError, match="span-safe"):
+        validate_development_span(_rows([near_max], [near_max + H10]), _contract())
 
 
 def test_dev_boundary_is_strict():

@@ -17,7 +17,7 @@ import os
 import tempfile
 
 from eval.hashing import hash_obj
-from eval.ledger import TrialLedger
+from eval.ledger import TrialLedger, _json_safe
 from eval.partition import contract_hash, validate_partition_contract
 
 FREEZE_VERSION = 1
@@ -92,6 +92,10 @@ def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedg
     """Freeze the G0-XV selection BEFORE any outcome-bearing holdout access. Only a
     passing development study with a selected winner authorizes a holdout transaction —
     a FAIL or blocking/inconclusive study freezes nothing (stop-or-pivot instead)."""
+    # Strict-JSON copy first: a legitimately passing multi-horizon study may carry NaN
+    # in a secondary horizon (unavailable PBO / empty noise band); hashing must treat it
+    # exactly like the JSON round-trip the CLI performs (NaN -> null), not crash.
+    dev_result = _json_safe(dev_result)
     if dev_result.get("protocol") != "g0xv-development":
         raise ValueError("freeze requires a g0xv-development result (G0-CB is "
                          "development-only and never authorizes holdout access)")
@@ -117,10 +121,18 @@ def build_freeze_artifact(dev_result: dict, *, contract: dict, ledger: TrialLedg
         "trade_validation_thresholds": dict(trade_validation_thresholds),
         "holdout_scope": {**holdout_scope, "days": list(holdout_scope["days"]),
                           "venues": list(holdout_scope["venues"])},
+        "holdout_window": {"holdout_start_ns": contract["holdout_start_ns"],
+                           "holdout_end_ns": contract["holdout_end_ns"]},
         "sources": {
             "partition_contract_sha256": dev_result["partition_contract_sha256"],
             "arm_manifests": {arm: echo["manifest_sha256"]
                               for arm, echo in dev_result["arms"].items()},
+            # Full per-arm content pins (reserved + that arm's feature VALUES): the
+            # holdout refit must consume exactly the matrix the winner was selected on,
+            # features included — the reserved-only row hash cannot see feature
+            # substitution.
+            "arm_matrix_hashes": {arm: echo["matrix_content_sha256"]
+                                  for arm, echo in dev_result["arms"].items()},
             "row_content_sha256": dev_result["matched"]["row_content_sha256"],
             "split_sha256": dev_result["matched"]["split_sha256"],
         },

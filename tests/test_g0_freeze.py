@@ -29,6 +29,11 @@ def test_freeze_contents_and_hash_pin(g0_pipeline):
         == g0_pipeline["res_xv"]["partition_contract_sha256"]
     assert set(art["sources"]["arm_manifests"]) == {"coinbase_only", "binance_only",
                                                     "combined"}
+    # per-arm FULL content pins (reserved + feature values) back the holdout refit
+    assert set(art["sources"]["arm_matrix_hashes"]) == set(art["sources"]["arm_manifests"])
+    contract = g0_pipeline["world"]["contract"]
+    assert art["holdout_window"] == {"holdout_start_ns": contract["holdout_start_ns"],
+                                     "holdout_end_ns": contract["holdout_end_ns"]}
     assert verify_freeze(art)
 
 

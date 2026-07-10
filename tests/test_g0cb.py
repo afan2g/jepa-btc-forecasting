@@ -66,6 +66,17 @@ def test_g0cb_rejects_cross_venue_manifest_before_any_data(g0_world):
         run_g0cb_study(None, man, g0_world["contract"], gate=GATE)
 
 
+def test_g0cb_venue_role_gate_fails_closed(g0_world):
+    """`role` is optional in the manifest schema, so omitting it (or mislabeling the
+    signal venue as 'target'-less) must NOT slip a cross-venue build past the
+    target-venue-only screen: every venue must declare role 'target' explicitly."""
+    man = copy.deepcopy(g0_world["dev"]["arms"]["combined"]["manifest"])
+    for v in man["venues"]:
+        v.pop("role", None)               # omitted roles: fail closed, not fail open
+    with pytest.raises(ValueError, match="role 'target' explicitly"):
+        g0cb_manifest_prechecks(man, g0_world["contract"])
+
+
 def test_g0cb_rejects_april_rows_before_fit(g0_world):
     man = g0_world["dev"]["arms"]["coinbase_only"]["manifest"]
     apr = g0_world["holdout"]["arms"]["coinbase_only"]["matrix"]

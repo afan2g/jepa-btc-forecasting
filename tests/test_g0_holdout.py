@@ -1,12 +1,15 @@
 """One-time holdout transaction + fixed scorer: exact-scope validation first, scoring
-only after PASS, stale/retry/substitution rejected, one-time consumption, pre-April fit,
+only after PASS, stale/retry/substitution rejected (transactions are keyed by holdout
+identity, not file path), one-time consumption, pre-April fit on content-pinned features,
 May-support rejection, and reproducibility from the frozen artifact."""
 import copy
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from eval.consumption import (load_record, open_transaction, record_trade_validation)
+from eval.consumption import (load_record, open_transaction, record_path_for,
+                              record_trade_validation)
 from eval.freeze import build_freeze_artifact
 from eval.holdout import fit_frozen_config, score_fixed_holdout
 from eval.synthetic import _iso_ns
@@ -15,24 +18,27 @@ H10 = 10_000_000_000
 MAY = _iso_ns("2026-05-01T00:00:00+00:00")
 
 
-def _open(tmp_path, pipe, name="rec.json"):
-    path = tmp_path / name
-    open_transaction(path, pipe["freeze"])
-    return path
+def _open(tmp_path, pipe):
+    open_transaction(tmp_path, pipe["freeze"])
+    return tmp_path
 
 
-def _validate(path, pipe, *, passed=True, days=None, venues=None):
+def _load(records_dir, pipe):
+    return load_record(record_path_for(records_dir, pipe["freeze"]))
+
+
+def _validate(records_dir, pipe, *, passed=True, days=None, venues=None):
     return record_trade_validation(
-        path, freeze_artifact=pipe["freeze"],
+        records_dir, freeze_artifact=pipe["freeze"],
         scope_days=days if days is not None else pipe["scope"]["days"],
         scope_venues=venues if venues is not None else pipe["scope"]["venues"],
         passed=passed, report_sha256="a" * 64)
 
 
-def _score(path, pipe, **over):
+def _score(records_dir, pipe, **over):
     w = pipe["world"]
     arm = pipe["res_xv"]["winner"]["arm"]
-    kw = dict(freeze_artifact=pipe["freeze"], record_path=path,
+    kw = dict(freeze_artifact=pipe["freeze"], records_dir=records_dir,
               contract=w["contract"],
               dev_matrix=w["dev"]["arms"][arm]["matrix"],
               dev_manifest=w["dev"]["arms"][arm]["manifest"],
@@ -42,134 +48,169 @@ def _score(path, pipe, **over):
     return score_fixed_holdout(**kw)
 
 
+def _other_freeze(pipe):
+    """A regenerated selection artifact over the SAME holdout (different thresholds ->
+    different sha256, same holdout identity)."""
+    return build_freeze_artifact(
+        pipe["res_xv"], contract=pipe["world"]["contract"], ledger=pipe["led_xv"],
+        trade_validation_thresholds={**pipe["thresholds"], "extra_knob": 1},
+        holdout_scope=pipe["scope"], generated_at="2026-07-10T12:00:00+00:00")
+
+
 # ------------------------------------------------------------------------- transaction
-def test_open_transaction_is_one_time(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    assert load_record(path)["state"] == "frozen"
+def test_open_transaction_is_one_time_per_holdout(tmp_path, g0_pipeline):
+    _open(tmp_path, g0_pipeline)
+    assert _load(tmp_path, g0_pipeline)["state"] == "frozen"
     with pytest.raises(ValueError, match="cannot be reused or replaced"):
-        open_transaction(path, g0_pipeline["freeze"])
+        open_transaction(tmp_path, g0_pipeline["freeze"])
+    # The record is keyed by HOLDOUT identity, not by the artifact: a regenerated freeze
+    # over the same holdout maps to the same transaction and cannot open a fresh one.
+    other = _other_freeze(g0_pipeline)
+    assert other["sha256"] != g0_pipeline["freeze"]["sha256"]
+    with pytest.raises(ValueError, match="cannot be reused or replaced"):
+        open_transaction(tmp_path, other)
 
 
 def test_validation_success_records_consumption(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    rec = _validate(path, g0_pipeline, passed=True)
+    _open(tmp_path, g0_pipeline)
+    rec = _validate(tmp_path, g0_pipeline, passed=True)
     assert rec["state"] == "validated"
     events = [e["event"] for e in rec["history"]]
     assert events == ["opened", "trade_validation"]
-    assert load_record(path)["state"] == "validated"
+    assert _load(tmp_path, g0_pipeline)["state"] == "validated"
 
 
 def test_validation_rejects_stale_or_regenerated_artifact(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    other = build_freeze_artifact(
-        g0_pipeline["res_xv"], contract=g0_pipeline["world"]["contract"],
-        ledger=g0_pipeline["led_xv"],
-        trade_validation_thresholds={**g0_pipeline["thresholds"], "extra_knob": 1},
-        holdout_scope=g0_pipeline["scope"], generated_at="2026-07-10T12:00:00+00:00")
-    assert other["sha256"] != g0_pipeline["freeze"]["sha256"]
+    _open(tmp_path, g0_pipeline)
+    other = _other_freeze(g0_pipeline)
     with pytest.raises(ValueError, match="stale or regenerated"):
-        record_trade_validation(path, freeze_artifact=other,
+        record_trade_validation(tmp_path, freeze_artifact=other,
                                 scope_days=g0_pipeline["scope"]["days"],
                                 scope_venues=g0_pipeline["scope"]["venues"],
                                 passed=True, report_sha256="a" * 64)
 
 
 def test_validation_scope_deviations_rejected(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
+    _open(tmp_path, g0_pipeline)
     days = g0_pipeline["scope"]["days"]
     with pytest.raises(ValueError, match="do not exactly match"):
-        _validate(path, g0_pipeline, days=days[:-1])                 # partial scope
+        _validate(tmp_path, g0_pipeline, days=days[:-1])            # partial scope
     with pytest.raises(ValueError, match="sorted, unique"):
-        _validate(path, g0_pipeline, days=list(reversed(days)))     # reordered
+        _validate(tmp_path, g0_pipeline, days=list(reversed(days)))  # reordered
     with pytest.raises(ValueError, match="explicit YYYY-MM-DD"):
-        _validate(path, g0_pipeline, days=["2026-04-01..2026-04-30"])  # generic selector
+        _validate(tmp_path, g0_pipeline, days=["2026-04-01..2026-04-30"])  # selector
     with pytest.raises(ValueError, match="venues"):
-        _validate(path, g0_pipeline, venues=["coinbase", "binance_spot"])
-    assert load_record(path)["state"] == "frozen"     # rejected attempts changed nothing
+        _validate(tmp_path, g0_pipeline, venues=["coinbase", "binance_spot"])
+    assert _load(tmp_path, g0_pipeline)["state"] == "frozen"  # nothing changed
 
 
 def test_validation_is_single_shot(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    _validate(path, g0_pipeline, passed=True)
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
     with pytest.raises(ValueError, match="exactly one validation attempt"):
-        _validate(path, g0_pipeline, passed=True)
+        _validate(tmp_path, g0_pipeline, passed=True)
 
-    path2 = _open(tmp_path, g0_pipeline, "rec2.json")
-    _validate(path2, g0_pipeline, passed=False)
+    fail_dir = tmp_path / "fail"
+    fail_dir.mkdir()
+    open_transaction(fail_dir, g0_pipeline["freeze"])
+    _validate(fail_dir, g0_pipeline, passed=False)
     with pytest.raises(ValueError, match="exactly one validation attempt"):
-        _validate(path2, g0_pipeline, passed=True)    # no retry after a FAIL either
+        _validate(fail_dir, g0_pipeline, passed=True)   # no retry after a FAIL either
 
 
 def test_validation_failure_blocks_scoring_permanently(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    rec = _validate(path, g0_pipeline, passed=False)
+    _open(tmp_path, g0_pipeline)
+    rec = _validate(tmp_path, g0_pipeline, passed=False)
     assert rec["state"] == "validation_failed"
     with pytest.raises(ValueError, match="blocking/inconclusive"):
-        _score(path, g0_pipeline)
-    # ... and the failed transaction cannot be replaced
+        _score(tmp_path, g0_pipeline)
+    # ... and the failed transaction cannot be replaced, even by a regenerated freeze
     with pytest.raises(ValueError, match="cannot be reused or replaced"):
-        open_transaction(path, g0_pipeline["freeze"])
+        open_transaction(tmp_path, g0_pipeline["freeze"])
+    with pytest.raises(ValueError, match="cannot be reused or replaced"):
+        open_transaction(tmp_path, _other_freeze(g0_pipeline))
 
 
 def test_scoring_requires_validation_first(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
+    _open(tmp_path, g0_pipeline)
     with pytest.raises(ValueError, match="'validated'"):
-        _score(path, g0_pipeline)
+        _score(tmp_path, g0_pipeline)
 
 
 # ------------------------------------------------------------------------------ scorer
 def test_score_consumes_once_and_reproduces(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    _validate(path, g0_pipeline, passed=True)
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
     with pytest.raises(ValueError, match="already-consumed"):
-        _score(path, g0_pipeline, verify_only=True)   # nothing recorded yet
+        _score(tmp_path, g0_pipeline, verify_only=True)   # nothing recorded yet
 
-    res = _score(path, g0_pipeline)
+    res = _score(tmp_path, g0_pipeline)
     assert res["protocol"] == "g0xv-holdout" and res["consumed"] is True
     assert res["winner"] == g0_pipeline["freeze"]["winner"]
-    assert load_record(path)["state"] == "scored"
+    assert "holdout_matrix_sha256" in res            # audit pin of what was consumed
+    assert _load(tmp_path, g0_pipeline)["state"] == "scored"
     with pytest.raises(ValueError, match="consumed|already scored"):
-        _score(path, g0_pipeline)                     # one-time consumption
+        _score(tmp_path, g0_pipeline)                     # one-time consumption
 
-    again = _score(path, g0_pipeline, verify_only=True)
+    again = _score(tmp_path, g0_pipeline, verify_only=True)
     assert again["reproduces_recorded_score"] is True # reproducible from the artifact
     assert again["metrics"] == res["metrics"]
-    assert load_record(path)["state"] == "scored"     # verify mutated nothing
+    assert _load(tmp_path, g0_pipeline)["state"] == "scored"  # verify mutated nothing
 
 
-def test_verify_only_detects_substituted_holdout(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    _validate(path, g0_pipeline, passed=True)
-    _score(path, g0_pipeline)
+def test_verify_only_is_not_a_holdout_oracle(tmp_path, g0_pipeline):
+    """Non-reproducing inputs get NO metrics back: repeated verify calls with perturbed
+    inputs must not become an iterate-against-holdout channel."""
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
+    _score(tmp_path, g0_pipeline)
     w = g0_pipeline["world"]
     arm = g0_pipeline["res_xv"]["winner"]["arm"]
     mutated = w["holdout"]["arms"][arm]["matrix"].copy()
     mutated["y_fwd_bps"] = -mutated["y_fwd_bps"]
     mutated["label"] = -mutated["label"]
-    res = _score(path, g0_pipeline, holdout_matrix=mutated, verify_only=True)
+    res = _score(tmp_path, g0_pipeline, holdout_matrix=mutated, verify_only=True)
     assert res["reproduces_recorded_score"] is False
+    assert "metrics" not in res and "winner" not in res
 
 
 def test_score_rejects_wrong_dev_build_and_tampered_dev_rows(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    _validate(path, g0_pipeline, passed=True)
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
     w = g0_pipeline["world"]
     ctrl = w["dev"]["arms"]["coinbase_only"]
     if g0_pipeline["res_xv"]["winner"]["arm"] != "coinbase_only":
         with pytest.raises(ValueError, match="not the frozen"):
-            _score(path, g0_pipeline, dev_matrix=ctrl["matrix"],
+            _score(tmp_path, g0_pipeline, dev_matrix=ctrl["matrix"],
                    dev_manifest=ctrl["manifest"])
     arm = g0_pipeline["res_xv"]["winner"]["arm"]
     tampered = w["dev"]["arms"][arm]["matrix"].copy()
     tampered.loc[0, "y_fwd_bps"] += 1.0
     with pytest.raises(ValueError, match="exactly the rows it was selected on"):
-        _score(path, g0_pipeline, dev_matrix=tampered)
-    assert load_record(path)["state"] == "validated"  # rejected attempts consume nothing
+        _score(tmp_path, g0_pipeline, dev_matrix=tampered)
+    assert _load(tmp_path, g0_pipeline)["state"] == "validated"  # nothing consumed
+
+
+def test_score_rejects_substituted_dev_feature_values(tmp_path, g0_pipeline):
+    """The P1 red-team channel: reserved rows intact, winner FEATURE values replaced
+    post-freeze (e.g. recomputed with holdout knowledge). The per-arm full content pin
+    must reject the refit before any holdout access."""
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
+    w = g0_pipeline["world"]
+    winner = g0_pipeline["res_xv"]["winner"]
+    poisoned = w["dev"]["arms"][winner["arm"]]["matrix"].copy()
+    rng = np.random.default_rng(0)
+    for c in winner["feature_cols"]:
+        poisoned[c] = rng.standard_normal(len(poisoned))
+    with pytest.raises(ValueError, match="FEATURE content"):
+        _score(tmp_path, g0_pipeline, dev_matrix=poisoned)
+    assert _load(tmp_path, g0_pipeline)["state"] == "validated"
 
 
 def test_score_rejects_holdout_row_reaching_may(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    _validate(path, g0_pipeline, passed=True)
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
     w = g0_pipeline["world"]
     arm = g0_pipeline["res_xv"]["winner"]["arm"]
     bad = w["holdout"]["arms"][arm]["matrix"].copy()
@@ -180,52 +221,55 @@ def test_score_rejects_holdout_row_reaching_may(tmp_path, g0_pipeline):
     bad.loc[last, "t_available"] = te
     bad.loc[last, "t_feature_start"] = te - H10
     with pytest.raises(ValueError, match="span-safe"):
-        _score(path, g0_pipeline, holdout_matrix=bad)
+        _score(tmp_path, g0_pipeline, holdout_matrix=bad)
 
 
-def test_score_rejects_partial_scope_holdout(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    _validate(path, g0_pipeline, passed=True)
+def test_score_rejects_partial_scope_or_duplicated_holdout(tmp_path, g0_pipeline):
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
     w = g0_pipeline["world"]
     arm = g0_pipeline["res_xv"]["winner"]["arm"]
     full = w["holdout"]["arms"][arm]["matrix"]
-    import pandas as pd
     day = pd.to_datetime(full["t_event"], unit="ns", utc=True).dt.strftime("%Y-%m-%d")
     partial = full[day != g0_pipeline["scope"]["days"][0]].reset_index(drop=True)
     with pytest.raises(ValueError, match="do not exactly match the frozen scope"):
-        _score(path, g0_pipeline, holdout_matrix=partial)
+        _score(tmp_path, g0_pipeline, holdout_matrix=partial)
+    duplicated = pd.concat([full, full.head(1)], ignore_index=True)
+    with pytest.raises(ValueError, match="duplicate .* holdout rows"):
+        _score(tmp_path, g0_pipeline, holdout_matrix=duplicated)
 
 
 def test_score_rejects_wrong_holdout_build_or_missing_features(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    _validate(path, g0_pipeline, passed=True)
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
     w = g0_pipeline["world"]
     arm = g0_pipeline["res_xv"]["winner"]["arm"]
     other_arm = "binance_only" if arm != "binance_only" else "combined"
     other = w["holdout"]["arms"][other_arm]
     with pytest.raises(ValueError, match="dataset/build does not match"):
-        _score(path, g0_pipeline, holdout_matrix=other["matrix"],
+        _score(tmp_path, g0_pipeline, holdout_matrix=other["matrix"],
                holdout_manifest=other["manifest"])
     crippled_man = copy.deepcopy(w["holdout"]["arms"][arm]["manifest"])
     dropped = crippled_man["feature_cols"].pop()
     crippled_mat = w["holdout"]["arms"][arm]["matrix"].drop(columns=[dropped])
     with pytest.raises(ValueError, match="lacks frozen winner features"):
-        _score(path, g0_pipeline, holdout_matrix=crippled_mat,
+        _score(tmp_path, g0_pipeline, holdout_matrix=crippled_mat,
                holdout_manifest=crippled_man)
 
 
 def test_score_rejects_substituted_contract(tmp_path, g0_pipeline):
-    path = _open(tmp_path, g0_pipeline)
-    _validate(path, g0_pipeline, passed=True)
+    _open(tmp_path, g0_pipeline)
+    _validate(tmp_path, g0_pipeline, passed=True)
     with pytest.raises(ValueError, match="frozen source pin"):
-        _score(path, g0_pipeline,
+        _score(tmp_path, g0_pipeline,
                contract=dict(g0_pipeline["world"]["contract"], guard_ns=1))
 
 
 # ----------------------------------------------------------------- fit discipline
-def test_fit_uses_only_development_rows_and_ignores_holdout_labels(g0_pipeline):
-    """AC: no April-derived label enters the fit — forecasts on April features are
-    bit-identical whatever April's labels say, and the fit consumes dev rows only."""
+def test_fit_consumes_dev_labels_but_cannot_see_holdout_labels(g0_pipeline):
+    """Sensitivity anchor + independence: flipping DEVELOPMENT labels changes the fitted
+    forecasts (the fit genuinely consumes labels), while holdout labels cannot reach the
+    fit at all — forecasts on April features are bit-identical whatever April says."""
     w = g0_pipeline["world"]
     winner = g0_pipeline["res_xv"]["winner"]
     dev = w["dev"]["arms"][winner["arm"]]["matrix"]
@@ -237,11 +281,18 @@ def test_fit_uses_only_development_rows_and_ignores_holdout_labels(g0_pipeline):
     hold_slice = hold[hold["horizon"] == winner["horizon"]].reset_index(drop=True)
     X = hold_slice[winner["feature_cols"]].to_numpy(float)
     fc = fitted["predict"](X)
-    mutated = hold_slice.copy()
-    mutated["y_fwd_bps"] = -mutated["y_fwd_bps"]      # flip every April label
-    mutated["label"] = -mutated["label"]
-    fc2 = fitted["predict"](mutated[winner["feature_cols"]].to_numpy(float))
-    assert np.array_equal(fc, fc2)
+
+    flipped_dev = dev_slice.copy()
+    flipped_dev["y_fwd_bps"] = -flipped_dev["y_fwd_bps"]
+    flipped_dev["label"] = -flipped_dev["label"]
+    refit = fit_frozen_config(flipped_dev, winner["feature_cols"], winner["config"])
+    assert not np.array_equal(refit["predict"](X), fc)   # labels DO drive the fit
+
+    mutated_hold = hold_slice.copy()
+    mutated_hold["y_fwd_bps"] = -mutated_hold["y_fwd_bps"]
+    mutated_hold["label"] = -mutated_hold["label"]
+    fc2 = fitted["predict"](mutated_hold[winner["feature_cols"]].to_numpy(float))
+    assert np.array_equal(fc, fc2)                       # holdout labels cannot
 
 
 @pytest.mark.parametrize("config", ["naive", "ridge", "lgbm_reg", "lgbm_clf"])
@@ -261,3 +312,59 @@ def test_fit_frozen_config_rejects_unknown_config(g0_pipeline):
     with pytest.raises(ValueError, match="unknown frozen config"):
         fit_frozen_config(w["dev"]["arms"]["combined"]["matrix"],
                           w["arm_features"]["combined"], "dlinear")
+
+
+# ------------------------------------------------- winner-slice exact-scope (multi-horizon)
+@pytest.fixture(scope="module")
+def g0_multi_pipeline():
+    """A two-horizon pipeline: the union-of-horizons day check alone cannot see a
+    missing winner-horizon day, so the scorer must also pin the scored slice's days."""
+    from eval.freeze import build_freeze_artifact
+    from eval.g0 import run_g0xv_development
+    from eval.ledger import TrialLedger
+    from eval.synthetic import make_g0_world
+    w = make_g0_world(n_dev_bars=300, n_holdout_bars=40, cb_signal=4.0, bn_signal=4.0,
+                      seed=3, horizons={"10s": 10_000_000_000, "30s": 30_000_000_000})
+    arms = [{"name": n, **w["dev"]["arms"][n]}
+            for n in ("coinbase_only", "binance_only", "combined")]
+    gate = {"n_groups": 4, "k": 2, "min_trades": 5, "min_eff_trades": 3.0,
+            "noise_band_n_boot": 500}
+    led = TrialLedger()
+    res = run_g0xv_development(arms, w["contract"], gate=gate, ledger=led)
+    assert res["g0xv_dev_pass"] and res["winner"], "multi-horizon fixture must pass"
+    scope = {"days": list(w["holdout_days"]), "venues": ["coinbase"],
+             "dataset_id": "synthetic-xv-pilot",
+             "build_id": f"holdout-seeded-{res['winner']['arm']}"}
+    freeze = build_freeze_artifact(res, contract=w["contract"], ledger=led,
+                                   trade_validation_thresholds={"min_rows": 10},
+                                   holdout_scope=scope,
+                                   generated_at="2026-07-10T12:00:00+00:00")
+    return {"world": w, "res_xv": res, "freeze": freeze, "scope": scope}
+
+
+def test_score_rejects_partial_winner_horizon_coverage(tmp_path, g0_multi_pipeline):
+    pipe = g0_multi_pipeline
+    open_transaction(tmp_path, pipe["freeze"])
+    record_trade_validation(tmp_path, freeze_artifact=pipe["freeze"],
+                            scope_days=pipe["scope"]["days"],
+                            scope_venues=pipe["scope"]["venues"],
+                            passed=True, report_sha256="a" * 64)
+    w = pipe["world"]
+    winner = pipe["res_xv"]["winner"]
+    hold = w["holdout"]["arms"][winner["arm"]]["matrix"]
+    day = pd.to_datetime(hold["t_event"], unit="ns", utc=True).dt.strftime("%Y-%m-%d")
+    mid_day = pipe["scope"]["days"][len(pipe["scope"]["days"]) // 2]
+    # drop the WINNER horizon's rows on one frozen day; the other horizon still covers
+    # that day, so the union-of-horizons check alone would pass
+    partial = hold[~((day == mid_day)
+                     & (hold["horizon"] == winner["horizon"]))].reset_index(drop=True)
+    union_days = sorted(pd.to_datetime(partial["t_event"], unit="ns", utc=True)
+                        .dt.strftime("%Y-%m-%d").unique())
+    assert union_days == pipe["scope"]["days"]
+    with pytest.raises(ValueError, match="partial winner-horizon coverage"):
+        score_fixed_holdout(freeze_artifact=pipe["freeze"], records_dir=tmp_path,
+                            contract=w["contract"],
+                            dev_matrix=w["dev"]["arms"][winner["arm"]]["matrix"],
+                            dev_manifest=w["dev"]["arms"][winner["arm"]]["manifest"],
+                            holdout_matrix=partial,
+                            holdout_manifest=w["holdout"]["arms"][winner["arm"]]["manifest"])

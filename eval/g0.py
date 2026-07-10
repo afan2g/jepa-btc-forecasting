@@ -31,7 +31,7 @@ from eval.baseline import CONFIGS, evaluate_config
 from eval.hashing import canonical_row_order, hash_obj, matrix_content_hash, split_hash
 from eval.ledger import TrialLedger, identity_hash, trial_identity
 from eval.manifest import feature_list, target_list, validate_frame
-from eval.matrix import RESERVED
+from eval.matrix import RESERVED, validate_matrix
 from eval.partition import contract_hash, require_binding, validate_development_span
 from eval.runner import BASELINE_TARGETS, DEFAULT_GATE
 from eval.stats import deflated_sharpe, pbo
@@ -69,6 +69,17 @@ def _echo_manifest(manifest: dict) -> dict:
     return out
 
 
+def _arm_echo(prep: dict) -> dict:
+    """Manifest identity plus the FULL matrix content pin (reserved + this arm's feature
+    values). The reserved-only matched-row hash proves arms align; this hash is what lets
+    the holdout scorer prove the frozen winner is refit on exactly the selected data —
+    feature values included."""
+    echo = _echo_manifest(prep["manifest"])
+    echo["matrix_content_sha256"] = matrix_content_hash(
+        prep["matrix"], list(RESERVED) + prep["feature_cols"])
+    return echo
+
+
 def _prepare_development_input(matrix: pd.DataFrame, manifest: dict, contract: dict,
                                *, arm: str) -> dict:
     """Fail-closed development-input validation, shared by G0-CB and every G0-XV arm.
@@ -89,6 +100,11 @@ def _prepare_development_input(matrix: pd.DataFrame, manifest: dict, contract: d
         raise ValueError(f"manifest horizons missing from the matrix: {missing_h}; "
                          "the manifest must describe this exact build")
     validate_development_span(matrix, contract)
+    # validate_frame checks columns/timing; validate_matrix adds the VALUE-domain gate
+    # invariants (non-negative costs, label in {-1,0,1}, uniqueness in (0,1], finite
+    # study inputs) that run_study enforces on the G1 path — a negative cost row would
+    # invert the no-trade band and silently inflate a development pass.
+    validate_matrix(matrix, feature_list(manifest))
     m = canonical_row_order(matrix)
     dup = m.duplicated(subset=["t_event", "horizon"])
     if dup.any():
@@ -120,6 +136,10 @@ def _resolve_variants(feature_cols: list[str], variants) -> list[dict]:
         if not feats or bad:
             raise ValueError(f"variant {v['name']!r} feature_cols must be a non-empty "
                              f"subset of the manifest feature list; invalid: {bad}")
+        if len(set(feats)) != len(feats):
+            raise ValueError(f"variant {v['name']!r} feature_cols contain duplicates; "
+                             "they would double-weight columns (rejected before any "
+                             "candidate is evaluated)")
         out.append({"name": v["name"], "feature_cols": feats,
                     "params": {"feature_cols": feats}})
     return out
@@ -227,12 +247,15 @@ def _candidate_row(cand: dict, dsr: float, solo: bool) -> dict:
 def g0cb_manifest_prechecks(manifest: dict, contract: dict) -> None:
     """Everything G0-CB can reject WITHOUT touching matrix data — run by the CLI before
     the matrix file is opened, and again inside run_g0cb_study. A holdout-bound manifest
-    or a signal-venue (cross-venue) build fails here, before any data loading."""
+    or a cross-venue build fails here, before any data loading. Fail CLOSED on venue
+    roles: `role` is optional in the manifest schema, so an omitted or mislabeled role
+    must not slip a signal venue past the target-venue-only screen — every G0-CB venue
+    must declare role == 'target' explicitly."""
     require_binding(manifest, contract, "development")
-    signal_venues = [v for v in manifest["venues"] if v.get("role") == "signal"]
-    if signal_venues:
-        raise ValueError(f"G0-CB is the target-venue-only screen; manifest declares "
-                         f"signal venues: {signal_venues}")
+    non_target = [v for v in manifest["venues"] if v.get("role") != "target"]
+    if non_target:
+        raise ValueError(f"G0-CB is the target-venue-only screen; every venue must "
+                         f"declare role 'target' explicitly, got: {non_target}")
 
 
 def run_g0cb_study(matrix: pd.DataFrame, manifest: dict, contract: dict, *,
@@ -280,7 +303,7 @@ def run_g0cb_study(matrix: pd.DataFrame, manifest: dict, contract: dict, *,
         "development_only": True,
         "g1_claim": False,          # never the project-defining gate (staged protocol §2)
         "gate": gate,
-        "manifest": _echo_manifest(manifest),
+        "manifest": _arm_echo(prep),
         "partition_contract_sha256": contract_hash(contract),
         "horizons": horizons,
         "g0cb_pass": bool(any(h["pass"] for h in horizons.values())),
@@ -326,11 +349,19 @@ def bootstrap_delta_band(delta, *, n_boot: int, block: int, alpha: float, seed: 
     """Circular block-bootstrap (lo, hi) quantile band for the TOTAL paired net-PnL delta
     Σ(combined_i − control_i) over the common development-OOS rows (t_event-ordered).
     Preregistered params live in the gate block; deterministic via `seed`."""
+    if isinstance(n_boot, bool) or not isinstance(n_boot, int) or n_boot < 100:
+        raise ValueError("noise_band_n_boot must be an int >= 100")
+    if isinstance(block, bool) or not isinstance(block, int) or block < 1:
+        raise ValueError("noise_band_block must be an int >= 1")
+    if not isinstance(alpha, float) or not (0.0 < alpha < 1.0):
+        raise ValueError("noise_band_alpha must be a float in (0, 1)")
     d = np.asarray(delta, float)
     n = len(d)
-    if n == 0:
+    if n == 0 or block > n:
+        # Too few common paired rows to assess noise at the preregistered block size: a
+        # silently clamped block would degenerate to a zero-width band (a bare sign
+        # check). NaN band -> beats_control False -> fail closed.
         return float("nan"), float("nan")
-    block = max(1, min(int(block), n))
     rng = np.random.default_rng(seed)
     n_blocks = -(-n // block)                     # ceil
     starts = rng.integers(0, n, size=(n_boot, n_blocks))
@@ -409,7 +440,12 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
     for tag in sorted({c["horizon"] for c in candidates}):
         pool = _horizon_pool(candidates, tag)
         dsr_by = _pool_dsr(pool, n_eff)
-        pbo_block = _pool_pbo(pool)
+        # Matched arms share identical reserved rows and splits, so every arm's naive
+        # per-sample PnL column is bit-identical; stacking one copy per arm would tilt
+        # the CSCV rank denominator in a pass-friendly direction. PBO keeps exactly ONE
+        # naive benchmark column — the control arm's.
+        pbo_block = _pool_pbo([c for c in pool
+                               if c["config"] != "naive" or c["arm"] == control_arm])
         solo_by = {c["identity_sha256"]:
                    _solo_pass(c, dsr_by[c["identity_sha256"]], _naive_for(c, pool), gate)
                    for c in pool}
@@ -454,7 +490,7 @@ def run_g0xv_development(arms: list[dict], contract: dict, *, gate: dict | None 
         "development_only": True,
         "g1_claim": False,
         "gate": gate,
-        "arms": {p["arm"]: _echo_manifest(p["manifest"]) for p in preps},
+        "arms": {p["arm"]: _arm_echo(p) for p in preps},
         "control_arm": control_arm,
         "combined_arm": combined_arm,
         "matched": matched,
