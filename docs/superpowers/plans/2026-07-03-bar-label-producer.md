@@ -201,20 +201,20 @@ BTC ranges 2×+; dollar bars are homoscedastic).
   (`price × amount` over Binance trades). This is the target venue's own
   aggression, so G0-BN does not need a cross-venue lag model to define bar
   closes. The received-time decision watermark and origin-time membership rules
-  in §C.2 still apply. In the deferred Coinbase/cross-venue modes, the prior
-  default is Coinbase/target-venue-triggered notional
-  (`price × amount` over Coinbase `recon.events.Trade`). **Why not the spec's
-  Binance-perp clock yet:** a Binance-triggered close (a Binance **trade**) is observable only
-  at its own `received_time`; offline that is exact per-event, but the **live** watermark needs
-  a Binance trade-lag **tail (p99)** that E2.5 pins — until then it is unquantified for the live
-  loop. A Coinbase-triggered close is a **local** trade, so its **monotone-watermark `t_event`**
-  (`max(t_event(N−1), max(received_time) over members, cap_fire)`, §C.2/#13 — **not** the single
-  trigger-trade receipt) is fully quantified today (data.md §5b). **Post-E2.5
-  target (spec §5.1, the information-optimal clock):** Binance-perp notional (deepest venue's
-  aggression), **enabled once the Binance trade/book lags are pinned** — then §C.2 uses them.
-  *Ablation knob:* combined Binance+Coinbase notional (§5.1 open; E2.2 resolves on
-  downstream PnL). The trigger venue is a manifest parameter, so the E2.5 switch is a
-  config change, not a rebuild-forcing rewrite.
+  in §C.2 still apply. The offline G0-BN gate uses each event's certified
+  `received_time` directly and **does not wait for E2.5 or live lag-tail
+  calibration**. #64 must reject a source that cannot satisfy the normalized
+  causal timestamp contract.
+- **Deferred Coinbase/cross-venue clock:** Coinbase/target-venue-triggered
+  notional (`price × amount` over Coinbase `recon.events.Trade`) remains the
+  default when Coinbase is the target. Its monotone watermark is
+  `max(t_event(N−1), max(received_time) over members, cap_fire)` (§C.2/#13),
+  not the receipt time of only the trigger trade. A later cross-venue experiment
+  may use Binance-perpetual or combined Binance+Coinbase notional, but live
+  deployment of that remote-trigger clock requires E2.5 to pin the Binance
+  trade-lag p99/tail. That deferred live requirement does not constrain G0-BN.
+  The trigger venue remains a manifest parameter, so the later ablation is a
+  configuration change rather than an architecture fork.
 - **Adaptive threshold** (E0.3) — **trailing / as-of only.** `threshold_d =
   rolling_7–30d_avg_dollar_volume(days < d) / target_bars_per_day`, computed from
   **prior days only** (strictly `< d`), tuned for **~1 bar / 0.5–2 s** in active regimes.

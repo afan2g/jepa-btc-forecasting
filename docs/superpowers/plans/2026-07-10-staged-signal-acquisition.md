@@ -184,9 +184,13 @@ artifact, candidate ledger where applicable, and build ID.
 - seals January outcome-bearing products until G0-BN freeze.
 
 The completed nine-unit `2026-04-01` smoke measured ~0.687 decimal GB. Scaling
-that superset over 92 days gives ~63.2 GB as a conservative planning ceiling,
-not an estimate to spend against. #68 must replace it with the selected source's
-exact minimal-feed manifest before approval.
+that observation over 92 days gives ~63.2 GB, but a single day is **not** an
+upper bound, quota guarantee, or approval estimate. The current Crypto Lake
+planner instead budgets the required futures delta/trade/seed units at
+`0.7788 GB/day`, or **~71.65 GB for 92 days**; that value is also provisional
+because some per-feed constants are derived and #64 may select another source.
+#68 must replace both projections with the selected source's exact minimal-feed
+manifest before approval and retain explicit quota headroom.
 
 Broad Coinbase L3, the former 181-day nine-unit Binance pilot, multi-asset data,
 and 12–24-month history remain blocked. A GO decision selects a source or next

@@ -1125,10 +1125,15 @@ run can stop before the quota is tight.
 **Bounded G0-BN budget:** `2025-11-01` through `2026-01-31` is 92 days and
 requires only the futures L2 snapshot/delta and trade units. The completed
 `2026-04-01` *nine-unit* smoke measured **687,215,789 bytes** (~0.687 decimal
-GB), so **~63.2 GB is a deliberately conservative upper bound** obtained by
-scaling a superset of the required feeds. #68 must replace that bound with the
-#64-selected source's exact manifest estimate and reconcile actual bytes after
-each batch. It may not add spot or auxiliary futures feeds opportunistically.
+GB). Scaling that observation gives **~63.2 GB**, but this is a one-day smoke
+projection only — **not an estimate, quota guarantee, or approval ceiling**. The
+current Crypto Lake planner budgets the required futures `book_delta_v2`,
+`trades`, and `book` seed at `0.5738 + 0.025 + 0.18 = 0.7788 GB/day`, or
+**~71.65 GB for 92 days**. That planner value is itself provisional because the
+trade/seed constants are partly derived and #64 may select a different source.
+#68 must replace both figures with the selected source's exact unit manifest and
+use that reconciled estimate, plus quota headroom, for approval and batch caps.
+It may not add spot or auxiliary futures feeds opportunistically.
 
 **Deferred six-month cross-venue budget:** the former `2025-11-01` through
 `2026-04-30` nine-unit plan remains approximately **222.63 GB** under the
