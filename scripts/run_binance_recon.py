@@ -29,8 +29,10 @@ Reads ONLY the local Stage-1 normalized raw store (`data/raw/lake/...`, written 
 Engine selection (`--engine {auto,python,native}`) resolves per instrument BEFORE any file is read
 (`recon.native.resolve_engine`): explicit `native` aborts (exit 2) when the extension or a verified
 tick scale is missing — never a silent fallback; `auto` falls back to Python with a printed note.
-No Binance tick scale is registered in `recon/native.py::_TICK_SCALE` yet (plan Risk Q1 — no
-recorded verification evidence), so Binance days currently run the Python oracle.
+Both Binance tick scales are registered in `recon/native.py::_TICK_SCALE` (perp $0.10 tick -> 10,
+spot $0.01 tick -> 100; measured by the #64 tick-scale step with zero off-tick prices on every
+price-bearing feed — issue #71), so `auto` selects native for these instruments whenever the
+extension is built; explicit `python` remains the correctness oracle.
 
 `--jobs N` fans out by `(instrument, feed, day)` — a single book stream is stateful/sequential and
 is never split. Threads bound memory, not CPU: the Python replay holds the GIL, so real wall-clock

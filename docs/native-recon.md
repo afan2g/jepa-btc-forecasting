@@ -69,9 +69,18 @@ Native mode needs a verified `(exchange, symbol) → price_scale` where every pr
 of the tick (so tick ordering == float ordering and same-ts crossing decisions cannot drift). The
 registry lives in `recon/native.py::_TICK_SCALE`:
 
-| exchange | symbol  | tick    | price_scale |
-|----------|---------|---------|-------------|
-| COINBASE | BTC-USD | \$0.01  | 100         |
+| exchange        | symbol       | tick    | price_scale | evidence                          |
+|-----------------|--------------|---------|-------------|-----------------------------------|
+| COINBASE        | BTC-USD      | \$0.01  | 100         | quote increment (native-recon PR) |
+| BINANCE_FUTURES | BTC-USDT-PERP| \$0.10  | 10          | #64 tick-scale step (issue #71)   |
+| BINANCE         | BTC-USDT     | \$0.01  | 100         | #64 tick-scale step (issue #71)   |
+
+The Binance scales were measured by the preregistered #64 tick-scale step on Lake day `2026-04-01`
+(prereg commit `60a2b745`): **zero off-tick prices** across every price-bearing feed — perp
+`book_delta_v2` 109,317,254 / `trades` 1,591,574 / `book` 30,724,880 prices, spot `book_delta_v2`
+33,892,363 / `trades` 1,024,789 / `book` 29,185,440 prices (report
+`data/reports/binance_source_quality/tick_scale.json`, `pass=true`, report_hash
+`d5025c58aa48fb6b23d26f8f26cf270c42b4be33e567644f359fafd171a1d7f0`; values reconciled on issue #71).
 
 Unknown symbols **fail** under `--engine native` (before any Lake load) and **fall back to Python**
 under `--engine auto`. Extend the registry only after a product's tick size is verified.

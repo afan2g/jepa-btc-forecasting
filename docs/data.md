@@ -1342,9 +1342,12 @@ Other open items:
       *Stage-2 recon runner landed 2026-07-10 (`scripts/run_binance_recon.py`, offline tests only):*
       local raw store → certified top-K L2 + normalized trades/funding/OI/liquidations,
       seed-source crossed-rate gate (>5% → `inconclusive`, no certified output), fail-closed
-      publishing, resumable processed manifest; Python oracle now, native pending tick-scale
-      verification (Q1). Still open in the amended order: #64 bounded source
-      certification; #68 minimal 92-day futures L2+trades acquisition; #67
+      publishing, resumable processed manifest; the Binance tick scales were measured by the
+      preregistered #64 tick-scale step (zero off-tick prices on every price-bearing feed,
+      2026-04-01) and registered in `_TICK_SCALE` (issue #71) — `--engine auto` selects native
+      when the extension is built, Python stays the correctness oracle, and real-data
+      native/Python conformance is still pending. Still open in the amended order: #64 bounded
+      source certification; #68 minimal 92-day futures L2+trades acquisition; #67
       Binance-only producer/evaluator mode; #69 G0-BN; only after PASS, the
       deferred spot/state/Coinbase/cross-venue and remaining-archive stages.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
