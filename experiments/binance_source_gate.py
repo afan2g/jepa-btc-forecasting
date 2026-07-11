@@ -194,8 +194,14 @@ _TS_NS_LO = int(pd.Timestamp("2020-01-01", tz="UTC").value)
 _TS_NS_HI = int(pd.Timestamp("2030-01-01", tz="UTC").value)
 _TS_MULTIPLIERS = (1, 10**3, 10**6, 10**9)   # ns, us, ms, s -> ns
 
-# Preregistered ordering-anomaly bound: raw event_time regressions (in update-ID order) above
-# this fraction of events refuse the window (monotone_watermark rule).
+# Preregistered ordering-anomaly bound, TIGHTENED by the 2026-07-11 amendment (added before
+# any CryptoHFTData object was downloaded or replayed): an event that is APPLIED to the book
+# (accepted update, or snapshot seed/reset) must never carry a raw event_time behind the
+# monotone watermark — an applied regression is a hard per-event refusal, because the
+# aggregate bound alone would let a single time-reordered stale update mutate a freshly
+# reseeded book silently (adversarial-review finding). The fractional bound below applies
+# only to NON-APPLIED events (pre-snapshot skips, deduped duplicates), where a regression is
+# recorded but harmless.
 MAX_EVENT_TIME_REGRESSION_FRAC = 0.001
 
 MIN_SNAPSHOT_LEVELS_PER_SIDE = 5      # production seed-validity floor (CLI --seed-min-levels)
@@ -529,9 +535,10 @@ def replay_chd_window(hour_frames: list[tuple[dict, pd.DataFrame]], *, market: s
             group_meta["duplicate_rows_dropped"]
         for ev in events:
             counters["events"] += 1
-            # ---- monotone watermark on exchange event time (preregistered ordering axis)
-            if ev.event_time_ns < st.watermark_ns:
-                counters["event_time_regressions"] += 1
+            # Monotone watermark on exchange event time (preregistered ordering axis). An
+            # event that will be APPLIED must not regress behind it — checked per kind
+            # below; only skipped/deduped events may regress (counted, bounded).
+            regresses = ev.event_time_ns < st.watermark_ns
             t = max(ev.event_time_ns, st.watermark_ns)
 
             if ev.kind == "snapshot":
@@ -541,9 +548,20 @@ def replay_chd_window(hour_frames: list[tuple[dict, pd.DataFrame]], *, market: s
                 if seed_reason_first is None:
                     seed_reason_first = reason
                 if reason != "ok":
+                    # NOTE (2026-07-11 amendment): every non-ok CHD snapshot is a HARD
+                    # refusal — stricter than the Lake seed gate, which counts crossed
+                    # candidates into seed_source_crossed_frac. Consequently, on any
+                    # replay that returns, seed_source_crossed_frac is structurally 0.0
+                    # and the chd_window_quality seed bar is vacuous-by-strictness.
                     raise ChdSnapshotError(f"snapshot_{reason}",
                                            f"snapshot@{ev.last_update_id} classified {reason}")
                 if st.seeded:
+                    if regresses:
+                        raise ChdSnapshotError(
+                            "backwards_snapshot",
+                            f"snapshot@{ev.last_update_id} event_time regresses "
+                            f"{st.watermark_ns - ev.event_time_ns} ns behind the watermark "
+                            "(a past/future-misplaced snapshot must never reseed)")
                     if st.last_final_update_id is not None and \
                             ev.last_update_id < st.last_final_update_id:
                         raise ChdSnapshotError(
@@ -567,6 +585,7 @@ def replay_chd_window(hour_frames: list[tuple[dict, pd.DataFrame]], *, market: s
             # ---- update event
             if not st.seeded:
                 counters["updates_skipped_pre_snapshot"] += 1
+                counters["event_time_regressions"] += int(regresses)
                 prev_event = ev
                 continue
             L = st.last_final_update_id
@@ -577,6 +596,7 @@ def replay_chd_window(hour_frames: list[tuple[dict, pd.DataFrame]], *, market: s
                     ev.final_update_id == prev_event.final_update_id:
                 if (ev.bids, ev.asks) == (prev_event.bids, prev_event.asks):
                     counters["duplicate_events_dropped"] += 1
+                    counters["event_time_regressions"] += int(regresses)
                     continue
                 raise ChdContinuityError(
                     "conflicting_duplicate_event",
@@ -586,6 +606,7 @@ def replay_chd_window(hour_frames: list[tuple[dict, pd.DataFrame]], *, market: s
                 if not st.anchored:
                     if ev.final_update_id < L:      # pre-snapshot event, superseded by the seed
                         counters["updates_skipped_pre_snapshot"] += 1
+                        counters["event_time_regressions"] += int(regresses)
                         prev_event = ev
                         continue
                     ok = (ev.first_update_id <= L <= ev.final_update_id) or \
@@ -610,6 +631,7 @@ def replay_chd_window(hour_frames: list[tuple[dict, pd.DataFrame]], *, market: s
                 if not st.anchored:
                     if ev.final_update_id <= L:     # pre-snapshot event, superseded by the seed
                         counters["updates_skipped_pre_snapshot"] += 1
+                        counters["event_time_regressions"] += int(regresses)
                         prev_event = ev
                         continue
                     if not (ev.first_update_id <= L + 1 <= ev.final_update_id):
@@ -633,6 +655,15 @@ def replay_chd_window(hour_frames: list[tuple[dict, pd.DataFrame]], *, market: s
                             "sequence_gap",
                             f"non-null prev_final_update_id {ev.prev_final_update_id} != {L}")
 
+            if regresses:
+                # 2026-07-11 amendment: an APPLIED update must never regress behind the
+                # watermark — the aggregate bound cannot be allowed to admit an
+                # out-of-order book mutation (e.g. a stale pre-reset update whose ids
+                # happen to straddle the reset snapshot's book version).
+                raise ChdContinuityError(
+                    "ordering_anomaly",
+                    f"applied update ({ev.first_update_id},{ev.final_update_id}) event_time "
+                    f"regresses {st.watermark_ns - ev.event_time_ns} ns behind the watermark")
             while si < n and grid[si] < t:
                 emit(grid[si]); si += 1
             for book, levels in ((st.bids, ev.bids), (st.asks, ev.asks)):

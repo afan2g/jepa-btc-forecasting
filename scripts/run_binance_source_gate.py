@@ -11,6 +11,7 @@ Subcommands (all offline, reading only local files, except `fetch`):
                       metrics, and the Python/native conformance arm at the measured scale.
   stage2-compare      cross-run determinism comparison of two Stage-2 processed manifests.
   verdict             aggregate the preregistered certified/degraded/inconclusive verdict.
+  decide              machine-enforced final_source_decision routing (fail-closed).
   chd-validate        validate one local CryptoHFTData hourly object (no network).
   chd-replay          fail-closed causal replay of local CryptoHFTData hourly objects.
   compare             fixed independent-source comparison of two top-K frames.
@@ -347,6 +348,21 @@ REQUIRED_UNITS = {
         "liquidations": "ok_or_missing_sparse"},
     ("BINANCE", "BTC-USDT"): {"topk_l2": "certified", "trades": "ok"},
 }
+REQUIRED_REPLAY_INSTRUMENTS = ("binance-perp", "binance-spot")
+
+# The reconstruction contract a topk_l2 manifest record must have been produced under for
+# its classification to count (preregistration replay_contract.lake) — a certified record
+# built under different settings is NOT the preregistered measurement.
+EXPECTED_TOPK_CONTRACT = {
+    "k": 10,
+    "grid_ms": 1000,
+    "book_stride_ms": 1000,
+    "schema_version": "topk_l2/1",
+    "policy": {"enabled": True, "min_levels_per_side": 5, "reseed_after_crossed_s": 2.0,
+               "max_spread_frac": None},
+    "thresholds": {"crossed_usable_max": 0.01, "missing_usable_max": 0.02,
+                   "thin_usable_max": 0.10, "seed_crossed_frac_max": 0.05},
+}
 
 
 def cmd_verdict(args) -> int:
@@ -359,6 +375,8 @@ def cmd_verdict(args) -> int:
             line = line.strip()
             if line:
                 r = json.loads(line)
+                if r.get("dt") != day:      # only fixture-day records may carry the verdict
+                    continue
                 recs[(r["exchange"], r["symbol"], r["output"])] = r
 
     unit_checks = []
@@ -371,8 +389,23 @@ def cmd_verdict(args) -> int:
             got_cls = r.get("classification") if r else None
             if r is None:
                 ok = False
-                inconclusive_reasons.append(f"{exchange}/{symbol}/{output}: no manifest record")
+                inconclusive_reasons.append(f"{exchange}/{symbol}/{output}: no manifest "
+                                            f"record for {day}")
             elif want == "certified":
+                contract_diffs = sorted(
+                    key for key, expect in EXPECTED_TOPK_CONTRACT.items()
+                    if r.get(key) != expect)
+                if got_cls is not None and contract_diffs:
+                    # produced under a non-preregistered reconstruction contract — its
+                    # classification is not the preregistered measurement
+                    inconclusive_reasons.append(
+                        f"{exchange}/{symbol}/{output}: manifest record contract differs "
+                        f"from the preregistered one on {contract_diffs}")
+                    unit_checks.append({"exchange": exchange, "symbol": symbol,
+                                        "output": output, "required": want,
+                                        "status": got_status, "classification": got_cls,
+                                        "ok": False})
+                    continue
                 ok = got_status == "ok" and got_cls == "certified"
                 if got_cls == "inconclusive" or got_status in ("missing", "error"):
                     inconclusive_reasons.append(
@@ -404,6 +437,15 @@ def cmd_verdict(args) -> int:
     silence = _load_step(args.silence_report, "silence")
     determinism = _load_step(args.determinism_report, "stage2-compare")
     replays = {p: _load_step(p, "replay-conformance") for p in args.replay_report}
+
+    # every required instrument must have a replay-conformance report — a missing one means
+    # harness determinism / native conformance / frozen caps were never checked for it
+    seen_instruments = {rep["instrument"] for rep in replays.values()}
+    for instrument in REQUIRED_REPLAY_INSTRUMENTS:
+        if instrument not in seen_instruments:
+            inconclusive_reasons.append(
+                f"hard invalidator: required replay-conformance report missing for "
+                f"{instrument}")
 
     if not verify["pass"]:
         inconclusive_reasons.append("hard invalidator: input identity/schema mismatch")
@@ -457,6 +499,76 @@ def cmd_verdict(args) -> int:
     print(f"LAKE VERDICT ({day}): {verdict.upper()}")
     for r in reasons:
         print(f"  - {r}")
+    return 0
+
+
+# ----------------------------------------------------------------------------- decide
+def cmd_decide(args) -> int:
+    """Machine-enforced final_source_decision routing (preregistration decision_logic).
+    Fail-closed: a missing/withheld input never improves the outcome."""
+    lake = _read_json(args.lake_verdict)
+    if lake.get("step") != "verdict":
+        raise ValueError(f"{args.lake_verdict} is not a verdict report")
+    lake_verdict = lake["lake_verdict"]
+
+    chd_reports = [_read_json(p) for p in (args.chd_replay or [])]
+    for path, rep in zip(args.chd_replay or [], chd_reports):
+        if rep.get("step") != "chd-replay":
+            raise ValueError(f"{path} is not a chd-replay report")
+    if not chd_reports:
+        chd_verdict = "inconclusive"    # never approved/downloaded — fail closed
+    elif any(r.get("chd_verdict") != "certified" for r in chd_reports):
+        verdicts = [r.get("chd_verdict") for r in chd_reports]
+        chd_verdict = "inconclusive" if "inconclusive" in verdicts else "degraded"
+    else:
+        chd_verdict = "certified"
+
+    comparison_pass = None
+    if args.comparison:
+        comp = _read_json(args.comparison)
+        if comp.get("step") != "compare":
+            raise ValueError(f"{args.comparison} is not a compare report")
+        comparison_pass = bool(comp.get("pass"))
+
+    if lake_verdict == "certified":
+        if comparison_pass is True:
+            decision, detail = "lake_go", (
+                "Crypto Lake approved for the pilot, independently validated; "
+                "CryptoHFTData recorded as agreeing fallback candidate")
+        elif comparison_pass is False and chd_verdict == "certified":
+            decision, detail = "disagreement", (
+                "both sources certify individually but the fixed comparison bars fail: "
+                "the April day cannot attribute fault — NO GO for either source from "
+                "April data alone; escalate per preregistration escalation.dev_days")
+        elif comparison_pass is None and chd_verdict == "inconclusive":
+            decision, detail = "lake_go", (
+                "Crypto Lake approved on internal certification only; independent "
+                "validation not executable (CryptoHFTData window unavailable or "
+                "refused fail-closed); fallback none")
+        else:
+            decision, detail = "escalate", (
+                "ambiguous evidence combination (lake certified, chd "
+                f"{chd_verdict}, comparison {comparison_pass}) — fail closed, human "
+                "adjudication against the preregistered decision_logic required")
+    elif chd_verdict == "certified":
+        decision, detail = "chd_go", (
+            "Crypto Lake did not certify; CryptoHFTData certified on the approved April "
+            "windows — #35's approved source and manifest contract must switch (subject "
+            "to the non-April escalation when April cannot carry the decision alone)")
+    else:
+        decision, detail = "neither", (
+            "neither source certified — #35 stays blocked; open a separately scoped "
+            "vendor/pivot decision")
+
+    report = {"step": "decide", "prereg_commit": _prereg_commit(),
+              "inputs": {"lake_verdict": lake_verdict, "chd_verdict": chd_verdict,
+                         "comparison_pass": comparison_pass,
+                         "n_chd_reports": len(chd_reports)},
+              "decision": decision, "detail": detail,
+              "decision_logic": bsg.PREREGISTERED["decision_logic"]["final_source_decision"]}
+    _write_report(args.out, "final_source_decision.json", report)
+    print(f"FINAL SOURCE DECISION: {decision.upper()}")
+    print(f"  {detail}")
     return 0
 
 
@@ -730,6 +842,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--determinism-report", required=True)
     p.add_argument("--replay-report", action="append", required=True)
 
+    p = sub.add_parser("decide"); common(p)
+    p.add_argument("--lake-verdict", required=True)
+    p.add_argument("--chd-replay", action="append", default=None,
+                   help="chd-replay report path(s); omit when never approved/downloaded")
+    p.add_argument("--comparison", default=None,
+                   help="compare report path; omit when the comparison was not executable")
+
     p = sub.add_parser("chd-validate"); common(p)
     p.add_argument("--file", required=True)
     p.add_argument("--exchange", required=True)
@@ -775,6 +894,7 @@ COMMANDS = {
     "replay-conformance": cmd_replay_conformance,
     "stage2-compare": cmd_stage2_compare,
     "verdict": cmd_verdict,
+    "decide": cmd_decide,
     "chd-validate": cmd_chd_validate,
     "chd-replay": cmd_chd_replay,
     "compare": cmd_compare,

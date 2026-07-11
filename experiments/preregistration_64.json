@@ -617,5 +617,14 @@
     "tracked_contents": "small aggregate JSON evidence only (verdict summaries, index with sha256 pins of ignored reports and commit SHAs); never raw market rows",
     "prereg_commit_rule": "this file is committed before the decision-bearing local replay; the commit SHA is recorded in every subsequent report"
   },
-  "amendments": []
+  "amendments": [
+    {
+      "utc": "2026-07-11",
+      "note": "Adversarial-review amendment, added BEFORE any CryptoHFTData object was downloaded, replayed, or compared (no CHD data exists locally) and independent of any Lake threshold: (1) STRICTLY TIGHTENING the replay_contract.cryptohftdata.monotone_watermark rule \u2014 an event that is APPLIED to the book (an accepted update, or a snapshot seed/reset) must never carry a raw event_time behind the monotone watermark; an applied regression is a HARD per-event refusal (ordering_anomaly / backwards_snapshot). The 0.1% aggregate regression bound now applies only to non-applied events (pre-snapshot skips, deduplicated duplicates). Rationale: the aggregate bound alone would let a single time-reordered stale update whose ids straddle a reset snapshot's book version mutate a freshly reseeded book silently. (2) Enforcement hardening of decision_logic.lake_verdict (no bar changed): the verdict aggregator only consults Stage-2 manifest records whose dt equals fixture.lake.day, requires each classification-bearing topk_l2 record to have been produced under the preregistered reconstruction contract (k/grid_ms/book_stride_ms/policy/thresholds/schema_version), and requires a replay-conformance report for BOTH instruments \u2014 any absence or mismatch is inconclusive."
+    },
+    {
+      "utc": "2026-07-11",
+      "note": "Clarifying amendment, added BEFORE any CryptoHFTData data was seen: the CHD adapter hard-refuses EVERY non-ok snapshot (crossed/one_sided/thin_depth/bad_values -> fail-closed inconclusive), which is STRICTER than the Lake seed gate (which counts crossed candidates into seed_source_crossed_frac). Consequently, on any CHD replay that completes, seed_source_crossed_frac is structurally 0.0 and the chd_window_quality.seed_crossed_frac_max bar is vacuous-by-strictness; it is retained for structural parity with the Lake bars and the reported value must be read as 'no non-ok snapshot was tolerated', not as a measured tolerance. Thresholds unchanged."
+    }
+  ]
 }

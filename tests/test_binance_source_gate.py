@@ -414,15 +414,47 @@ class TestChdReplayFailClosed:
             bsg.replay_chd_window([(_identity(df12), df12), (i13, df13)],
                                   market="futures", price_scale=10, grid=grid(4))
 
-    def test_backwards_snapshot_within_file_is_an_ordering_anomaly(self):
-        """Within one ID-ordered file, a late-timestamped low-ID snapshot surfaces as an
-        event_time ordering anomaly -> refused (fail closed, different reason code)."""
+    def test_backwards_snapshot_within_file_refuses_per_event(self):
+        """Within one ID-ordered file, a late-timestamped low-ID snapshot seeds first
+        (watermark = its time); the higher-ID but EARLIER-timestamped snapshot is then an
+        applied watermark regression -> hard per-event refusal (2026-07-11 amendment)."""
         bids, asks = five_levels()
         rows = snapshot_rows(1000, HOUR0 + SEC, bids, asks)
         rows += update_rows(1001, 1003, 1000, HOUR0 + 2 * SEC, [("bid", 100.2, 2.0)])
         rows += snapshot_rows(900, HOUR0 + 3 * SEC, bids, asks)      # sorts FIRST by id
+        with pytest.raises(bsg.ChdSnapshotError, match="backwards_snapshot"):
+            replay(chd_frame(rows))
+
+    def test_stale_update_straddling_a_reset_refuses(self):
+        """The critical adversarial-review scenario: an update whose ids straddle a reset
+        snapshot's book version but whose raw event_time PRECEDES the reset must never be
+        applied to the freshly reseeded book — hard per-event refusal, regardless of the
+        aggregate regression fraction."""
+        bids, asks = five_levels()
+        rows = snapshot_rows(1000, HOUR0 + SEC, bids, asks)
+        rows += update_rows(1001, 1003, 1000, HOUR0 + 2 * SEC, [("bid", 100.2, 2.0)])
+        nb, na = five_levels(base_bid=500.0, base_ask=500.1)
+        rows += snapshot_rows(2000, HOUR0 + 4 * SEC, nb, na)          # reset
+        rows += update_rows(1999, 2001, 1998, HOUR0 + 3 * SEC,        # stale: before reset
+                            [("bid", 105.0, 9.0)])
         with pytest.raises(bsg.ChdContinuityError, match="ordering_anomaly"):
             replay(chd_frame(rows))
+
+    def test_skipped_regression_aggregate_bound(self):
+        """Non-applied regressions (a deduplicated re-capture carrying an earlier
+        event_time) never mutate the book; they are counted and bounded by the
+        preregistered 0.1% aggregate rule across the window."""
+        bids, asks = five_levels()
+        h12 = snapshot_rows(1000, HOUR0 + SEC, bids, asks)
+        h12 += update_rows(1001, 1003, 1000, HOUR0 + 2 * SEC, [("bid", 100.2, 2.0)])
+        # hour 13 re-captures the SAME event with an earlier timestamp: content-identical
+        # -> deduped (never applied), regression counted; 1 of 3 events > 0.1%
+        h13 = update_rows(1001, 1003, 1000, HOUR0 + 1_500 * MS, [("bid", 100.2, 2.0)])
+        df12, df13 = chd_frame(h12), chd_frame(h13)
+        with pytest.raises(bsg.ChdContinuityError, match="ordering_anomaly"):
+            bsg.replay_chd_window(
+                [(_identity(df12), df12), ({"date": "2026-04-01", "hour": 13}, df13)],
+                market="futures", price_scale=10, grid=grid(4))
 
     def test_snapshot_never_applies_before_its_own_time(self):
         """Lookahead rejection: samples before the seed's event_time stay missing."""
@@ -641,22 +673,29 @@ class TestVerdictCli:
         ("BINANCE", "BTC-USDT"): ["topk_l2", "trades"],
     }
 
-    def _stage2_manifest(self, path, *, perp_topk_cls="certified"):
-        with open(path, "w") as f:
+    TOPK_CONTRACT = {
+        "k": 10, "grid_ms": 1000, "book_stride_ms": 1000, "schema_version": "topk_l2/1",
+        "policy": {"enabled": True, "min_levels_per_side": 5,
+                   "reseed_after_crossed_s": 2.0, "max_spread_frac": None},
+        "thresholds": {"crossed_usable_max": 0.01, "missing_usable_max": 0.02,
+                       "thin_usable_max": 0.10, "seed_crossed_frac_max": 0.05},
+    }
+
+    def _stage2_manifest(self, path, *, perp_topk_cls="certified", dt="2026-04-01",
+                         contract=None, mode="w"):
+        with open(path, mode) as f:
             for (exchange, symbol), outputs in self.UNITS.items():
                 for output in outputs:
                     rec = {"output": output, "exchange": exchange, "symbol": symbol,
-                           "dt": "2026-04-01", "status": "ok", "rows": 1,
-                           "sha256": "c" * 64}
+                           "dt": dt, "status": "ok", "rows": 1, "sha256": "c" * 64}
                     if output == "topk_l2":
+                        rec.update(contract or self.TOPK_CONTRACT)
                         cls = perp_topk_cls if exchange == "BINANCE_FUTURES" \
                             else "certified"
                         rec["classification"] = cls
-                        if cls != "certified":
-                            rec["status"] = cls if cls == "inconclusive" else "ok"
-                            if cls == "inconclusive":
-                                rec["status"] = "inconclusive"
-                                rec["rows"] = 0
+                        if cls == "inconclusive":
+                            rec["status"] = "inconclusive"
+                            rec["rows"] = 0
                     f.write(json.dumps(rec) + "\n")
 
     def _step_reports(self, tmp_path, *, determinism_pass=True, tick_pass=True):
@@ -719,6 +758,98 @@ class TestVerdictCli:
         self._stage2_manifest(m, perp_topk_cls="inconclusive")
         rep = self._run(tmp_path, m, self._step_reports(tmp_path))
         assert rep["lake_verdict"] == "inconclusive"
+
+    def test_missing_replay_report_is_inconclusive(self, tmp_path):
+        """A required instrument with no replay-conformance report must never certify."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m)
+        paths = self._step_reports(tmp_path)
+        cli = _cli()
+        rc = cli.main(["verdict", "--stage2-manifest", str(m),
+                       "--verify-report", paths["verify"], "--tick-report", paths["tick"],
+                       "--silence-report", paths["silence"],
+                       "--determinism-report", paths["det"],
+                       "--replay-report", paths["binance-perp"],   # spot missing
+                       "--out", str(tmp_path)])
+        assert rc == 0
+        rep = json.loads((tmp_path / "lake_verdict.json").read_text())
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("binance-spot" in r for r in rep["reasons"])
+
+    def test_wrong_reconstruction_contract_is_inconclusive(self, tmp_path):
+        """A certified record produced under a non-preregistered contract must not count."""
+        m = tmp_path / "m.jsonl"
+        bad = dict(self.TOPK_CONTRACT,
+                   policy=dict(self.TOPK_CONTRACT["policy"], min_levels_per_side=1))
+        self._stage2_manifest(m, contract=bad)
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path))
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("contract differs" in r for r in rep["reasons"])
+
+    def test_multi_day_manifest_uses_only_fixture_day(self, tmp_path):
+        """Records for other days must never carry the fixture day's verdict."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m, perp_topk_cls="degraded", dt="2026-04-01")
+        self._stage2_manifest(m, perp_topk_cls="certified", dt="2026-04-02", mode="a")
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path))
+        assert rep["lake_verdict"] == "degraded"     # 04-02's certified must not win
+
+
+class TestDecideCli:
+    def _lake(self, tmp_path, verdict):
+        p = tmp_path / "lake_verdict.json"
+        p.write_text(json.dumps({"step": "verdict", "lake_verdict": verdict}))
+        return str(p)
+
+    def _chd(self, tmp_path, verdicts):
+        paths = []
+        for i, v in enumerate(verdicts):
+            p = tmp_path / f"chd_{i}.json"
+            p.write_text(json.dumps({"step": "chd-replay", "chd_verdict": v}))
+            paths.append(str(p))
+        return paths
+
+    def _comp(self, tmp_path, ok):
+        p = tmp_path / "comparison.json"
+        p.write_text(json.dumps({"step": "compare", "pass": ok}))
+        return str(p)
+
+    def _decide(self, tmp_path, lake, chd=None, comparison=None):
+        cli = _cli()
+        argv = ["decide", "--lake-verdict", self._lake(tmp_path, lake),
+                "--out", str(tmp_path)]
+        for p in self._chd(tmp_path, chd or []):
+            argv += ["--chd-replay", p]
+        if comparison is not None:
+            argv += ["--comparison", self._comp(tmp_path, comparison)]
+        assert cli.main(argv) == 0
+        return json.loads((tmp_path / "final_source_decision.json").read_text())
+
+    def test_lake_go_validated(self, tmp_path):
+        rep = self._decide(tmp_path, "certified", chd=["certified", "certified"],
+                           comparison=True)
+        assert rep["decision"] == "lake_go" and "independently validated" in rep["detail"]
+
+    def test_lake_go_internal_only_when_chd_unusable(self, tmp_path):
+        rep = self._decide(tmp_path, "certified", chd=["inconclusive"])
+        assert rep["decision"] == "lake_go"
+        assert "internal certification only" in rep["detail"]
+
+    def test_disagreement_escalates(self, tmp_path):
+        rep = self._decide(tmp_path, "certified", chd=["certified"], comparison=False)
+        assert rep["decision"] == "disagreement"
+
+    def test_chd_go_and_neither(self, tmp_path):
+        rep = self._decide(tmp_path, "degraded", chd=["certified"])
+        assert rep["decision"] == "chd_go"
+        rep = self._decide(tmp_path, "inconclusive", chd=["degraded"])
+        assert rep["decision"] == "neither"
+        rep = self._decide(tmp_path, "degraded")     # never downloaded -> fail closed
+        assert rep["decision"] == "neither"
+
+    def test_ambiguous_combination_escalates_fail_closed(self, tmp_path):
+        rep = self._decide(tmp_path, "certified", chd=["degraded"])
+        assert rep["decision"] == "escalate"
 
 
 # ----------------------------------------------------------------------------- network isolation
