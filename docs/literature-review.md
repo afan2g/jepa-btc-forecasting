@@ -2,6 +2,13 @@
 
 **Purpose.** This document situates the design in [`jepa_btc_forecasting_spec.md`](../jepa_btc_forecasting_spec.md) against the published literature (incl. preprints through mid-2026). It records what the evidence supports, what it challenges, what is genuinely novel/unvalidated in our design, and concrete changes — each mapped to a spec section. It is the synthesis of an 8-thread parallel literature search.
 
+**2026-07-11 scope note.** The literature findings remain evidence, but #66
+changed the execution order: first test Binance BTC-USDT perpetual own-book and
+trade-flow signal (`G0-BN`), then treat Binance spot/state, Coinbase transfer,
+cross-venue context, and other assets as conditional increments. References
+below to the Binance→Coinbase premise or a Coinbase-own-book baseline now inform
+that later incremental gate; they are not prerequisites for G0-BN.
+
 **How to read.** §0 is the executive summary (read this first). §§1–8 are the thematic findings, each ending with **→ Implications for our spec**. §9 consolidates recommendations by spec section. §10 is open questions to resolve on our own data. §11 is the master reference list.
 
 **Verification status & honesty flags.**

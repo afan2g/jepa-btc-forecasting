@@ -1,6 +1,7 @@
 # Data — Sources, Coverage & Methodology
 
-**Status:** access live and verified 2026-06-22. Covers the `ingest/` layer (spec §3, §4, §12.1).
+**Status:** access live and verified 2026-06-22; acquisition order amended
+2026-07-11 by #66. Covers the `ingest/` layer (spec §3, §4, §12.1).
 Numbers here are **measured**, not vendor-quoted, unless marked *(vendor)*.
 
 Companion docs: [`jepa_btc_forecasting_spec.md`](../jepa_btc_forecasting_spec.md) §4–6,
@@ -10,49 +11,52 @@ Companion docs: [`jepa_btc_forecasting_spec.md`](../jepa_btc_forecasting_spec.md
 
 ## 1. Scope & instruments
 
-We forecast short-horizon **Coinbase BTC-USD** mid moves using **Binance** as the primary
-information source (spec §1). Data needed:
+The first signal gate forecasts **Binance BTC-USDT perpetual** future mid moves
+from that instrument's own L2 book and trades. Additional instruments, venues,
+assets, and model families are conditional increments (spec §1):
 
 | Role | Venue / instrument | Vendor | Feeds |
 |---|---|---|---|
-| Signal (primary) | Binance **BTC-USDT-PERP** (futures) | Crypto Lake | `book_delta_v2`, `trades`, `funding`, `open_interest`, `liquidations` |
-| Signal (secondary) | Binance **BTC-USDT** (spot) | Crypto Lake | `book_delta_v2`, `trades` |
-| Target / label venue | Coinbase **BTC-USD** (spot) | Crypto Lake + CoinAPI (hybrid) | `book_delta_v2`, `trades` |
+| `G0-BN` signal + target | Binance **BTC-USDT-PERP** | source selected by #64 | L2 snapshots/deltas, trades |
+| Conditional increment 1 | Binance **BTC-USDT** spot | source selected after G0-BN | L2 snapshots/deltas, trades |
+| Conditional increment 2 | Binance perpetual state | source selected after G0-BN | funding, open interest, liquidations |
+| Conditional transfer/cross-venue | Coinbase **BTC-USD** | source selected by #65 | minimum certified labels/costs; depth only if justified |
+| Conditional multi-asset | ETH/SOL/etc. | not selected | added only by incremental gate |
 
-History span: **12–24 months** for SSL pretrain; recent 3–6 mo for head finetune; clean held-out OOS
-~1 mo (spec §4). Acquisition is staged before that final span (§1.1). The pilot OOS is April 2026;
-G0-CB does not score it, and it becomes consumed acquisition evidence after G0-XV's sole modeling
-evaluation and cannot be reused for formal G1. **The
-formal G1 OOS month must be outside the pilot and chosen from the usable all-feed calendar (§5b)
-using coverage only, not model outcomes or simply "most recent".** Planning figures below use
-**18 months** (547 days) unless noted.
+`G0-BN` is bounded to **2025-11-01 through 2026-01-31**: November-December
+development/CPCV and January untouched OOS. Only after a tradeable PASS may the
+project acquire incremental sources or the 12–24-month SSL/full-data span.
+April 2026 remains untouched for the deferred Coinbase/cross-venue workflow and
+cannot be used by G0-BN. Planning figures later in this document that use 18
+months describe conditional future scale, not current authorization.
 
-### 1.1 Staged acquisition policy (adopted 2026-07-10)
+### 1.1 Staged acquisition policy (adopted 2026-07-10; amended 2026-07-11)
 
 Binding protocol:
 [`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](superpowers/plans/2026-07-10-staged-signal-acquisition.md).
-The data target is unchanged, but vendor spend is sequenced:
+Vendor spend is now sequenced:
 
-1. Coinbase pilot acquisition uses `2025-11-01` through `2026-04-30`, but the Coinbase-only G0-CB
-   modeling screen uses only span-contained `2025-11-01` through `2026-03-31` rows and never loads
-   April outcomes; unsafe March boundary rows are dropped before forward label reads.
-   Approve/download only the pilot-window subset of the reviewed CoinAPI manifest first. The
-   existing contiguous-range, book-only downloader cannot execute that sparse scope; #53 must add
-   the exact reviewed-manifest book/trade planner and executor before any pilot backfill.
-2. If the recorded G0-CB diagnosis authorizes the next spend, acquire the same six complete
-   calendar months for Binance futures and spot.
-3. Reconstruct the pilot and run matched Coinbase-only, Binance-only, and combined G0-XV arms.
-4. Pull the remaining approved Binance archive only after G0-XV passes. Remaining Coinbase fills
-   and full production reconstruction are separately resumable milestones.
+1. #64 selects and certifies a Binance source using bounded existing/sample data.
+2. #68 acquires only Binance BTC-USDT perpetual L2+trades for the 92-day G0-BN
+   scope. No Coinbase, spot, derivatives-state, other asset, or broad archive is
+   part of this pull.
+3. #67 emits source-neutral Binance-only manifests; #69 runs the frozen G0-BN
+   baseline ladder on November-December development and January OOS.
+4. G0-BN PASS authorizes the next *incremental* source gate, not every source at
+   once. `PREDICTIVE_NOT_TRADEABLE` authorizes only a separately reviewed
+   fair-value/maker pivot. FAIL stops broad acquisition.
+5. Only after PASS may #65 evaluate low-cost Coinbase labels and the project
+   resume #34/#47/#35/#36/#48. Multi-asset and full-archive work remain later.
 
-G0-CB is a target-data/economics and lower-bound screen; weak Coinbase-own-book predictivity alone
-does not disprove a Binance-leading signal. It produces development evidence only. G0-XV is the
-pilot's sole April-scored spend gate, not formal G1 or final E2.3.
-Pilot and full datasets have separate source manifests, build IDs, feature manifests, and holdouts.
+Every stage has separate source manifests, build IDs, feature manifests, trial
+ledgers, and holdouts. The completed Coinbase quality map, CoinAPI executor, and
+snapshot NO-GO remain valid evidence and fallback infrastructure; they no longer
+imply immediate L3 spend.
+
 April integrity-only transfer/schema/footer/hash/row-count/coverage/reconstruction checks are allowed
-and logged; they do not consume the holdout. Access to April feature/label/cost/forecast/PnL/model
-results or outcome-driven manual analysis does consume it and is forbidden during G0-CB and before
-the #52 G0-XV candidate ledger and selection artifact are frozen.
+and logged; they do not consume the deferred cross-venue holdout. Access to April
+feature/label/cost/forecast/PnL/model results or outcome-driven manual analysis
+remains forbidden before #48/#52 freeze. G0-BN does not open April at all.
 `ingest/validate_trade_feeds.py` is not integrity-only: its full price/size/notional/interarrival/lag/
 side report is outcome-bearing. Generic live April runs are rejected before vendor access; #48/#52
 must authorize the exact one-time post-freeze scope.
@@ -236,8 +240,9 @@ CoinAPI-fillable:
 - **Any OOS month must come from the usable calendar, not "most recent."** At this snapshot the
   most-recent contiguous usable run ≥21 d is **2026-02-06 → 2026-05-05**; the prior run is
   2024-06-22 → 2026-02-04 (split by 1-day Binance gaps). **Recent May–June 2026 is NOT usable**
-  (Binance `book_delta_v2` gaps). April 2026 is reserved for and consumed by the G0-XV pilot; it is
-  **not eligible for formal G1**. Select formal G1 OOS later from a refreshed certified calendar,
+  (Binance `book_delta_v2` gaps). April 2026 remains reserved for the deferred G0-XV pilot and, if
+  that one-time workflow is eventually authorized and consumed, is **not eligible for formal G1**.
+  Select formal G1 OOS later from a refreshed certified calendar,
   using coverage only, wholly outside `2025-11-01..2026-04-30`; this snapshot does not predeclare a
   formal month, so G1 remains blocked until one is frozen.
 
@@ -1117,13 +1122,20 @@ one-shot pull on this plan: stage by month/quota
 window, project only needed columns, process/recon day-by-day, and keep resumable manifests so a
 run can stop before the quota is tight.
 
-**Six-month Binance pilot budget:** `2025-11-01` through `2026-04-30` is 181 days. The Binance
-downloader plan's conservative `~1.23 GB/day` estimate gives **~222.63 GB**. The completed
-`2026-04-01` nine-unit Stage-1 smoke measured **687,215,789 bytes** (~0.687 decimal GB), which would
-extrapolate to ~124.4 GB, but one day is not a quota guarantee. Plan with 222.63 GB, reconcile each
-batch from the raw manifest, and keep the operating target ≤250 GB per quota window. At the recorded
-156.25 GB usage snapshot, the pilot is not a one-batch operation even though the vendor's 300 GB
-limit is soft; split it deterministically and resume in the next window.
+**Bounded G0-BN budget:** `2025-11-01` through `2026-01-31` is 92 days and
+requires only the futures L2 snapshot/delta and trade units. The completed
+`2026-04-01` *nine-unit* smoke measured **687,215,789 bytes** (~0.687 decimal
+GB), so **~63.2 GB is a deliberately conservative upper bound** obtained by
+scaling a superset of the required feeds. #68 must replace that bound with the
+#64-selected source's exact manifest estimate and reconcile actual bytes after
+each batch. It may not add spot or auxiliary futures feeds opportunistically.
+
+**Deferred six-month cross-venue budget:** the former `2025-11-01` through
+`2026-04-30` nine-unit plan remains approximately **222.63 GB** under the
+downloader's conservative `1.23 GB/day` estimate. It is no longer the next pull:
+G0-BN PASS, #65, and the downstream Coinbase/cross-venue approvals must precede
+it. If later authorized, keep the operating target ≤250 GB per quota window and
+reuse certified G0-BN partitions through manifest-aware resume.
 
 After `recon` + bar building, the **training set collapses to GB-scale** (§7).
 
@@ -1317,8 +1329,10 @@ Other open items:
       local raw store → certified top-K L2 + normalized trades/funding/OI/liquidations,
       seed-source crossed-rate gate (>5% → `inconclusive`, no certified output), fail-closed
       publishing, resumable processed manifest; Python oracle now, native pending tick-scale
-      verification (Q1). Still open: bounded smoke schema/tick-scale evidence, one-day Stage-2
-      validation, the six-month pilot, G0-XV, and (only after that gate) the remaining archive.
+      verification (Q1). Still open in the amended order: #64 bounded source
+      certification; #68 minimal 92-day futures L2+trades acquisition; #67
+      Binance-only producer/evaluator mode; #69 G0-BN; only after PASS, the
+      deferred spot/state/Coinbase/cross-venue and remaining-archive stages.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
 
 ---
