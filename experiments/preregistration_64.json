@@ -1,0 +1,621 @@
+{
+  "issue": 64,
+  "preregistered_utc": "2026-07-11",
+  "note": "Preregistration for the Binance source-quality gate (issue #64): bounded Stage-2 integrity certification of the already-local Crypto Lake 2026-04-01 smoke, plus an independent-source (CryptoHFTData) comparison harness. Committed BEFORE any decision-bearing real-data reconstruction, tick measurement, or comparison ran on this branch. The module constant experiments.binance_source_gate.PREREGISTERED is pinned equal to the thresholds/decision_logic/fixture-identity subtrees by tests/test_binance_source_gate.py. Thresholds cannot change after any decision-bearing real-data result has been inspected; amendments are append-only, dated, added before their results are seen, and may only tighten. April 2026 is the G0-XV holdout: only the permitted_april_metrics below may be computed or published for April data; every forbidden_april_metrics item is a hard guard enforced by the report allowlist and by test. This experiment does not authorize the six-month acquisition (#35), any bulk download, or any modeling-outcome inspection.",
+  "fixture": {
+    "lake": {
+      "day": "2026-04-01",
+      "stage1_manifest": "data/raw/lake/_manifest.jsonl (main checkout; read-only input)",
+      "raw_root": "/home/aaron/jepa-btc-forecasting/data/raw/lake",
+      "n_units": 9,
+      "rows_total": 147377429,
+      "out_bytes_total": 687215789,
+      "units": {
+        "BINANCE_FUTURES/BTC-USDT-PERP/book_delta_v2": {
+          "feed": "book_delta_v2",
+          "exchange": "BINANCE_FUTURES",
+          "symbol": "BTC-USDT-PERP",
+          "dt": "2026-04-01",
+          "rows": 109317254,
+          "out_bytes": 386239099,
+          "sha256": "d40e84528b9354404ee38767211651fabafeb6511b584536b1705e56653f8ade",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "47432842635f059c",
+          "schema_cols": [
+            "timestamp",
+            "receipt_timestamp",
+            "sequence_number",
+            "side_is_bid",
+            "price",
+            "size"
+          ]
+        },
+        "BINANCE_FUTURES/BTC-USDT-PERP/trades": {
+          "feed": "trades",
+          "exchange": "BINANCE_FUTURES",
+          "symbol": "BTC-USDT-PERP",
+          "dt": "2026-04-01",
+          "rows": 1591574,
+          "out_bytes": 13520205,
+          "sha256": "380e197497e98718e49c0edb5cdc47fbb06c7ed9c7f5db6499e047091b7d3cce",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "8fa9fa0d892aecfb",
+          "schema_cols": [
+            "side",
+            "amount",
+            "price",
+            "id",
+            "timestamp",
+            "receipt_timestamp"
+          ]
+        },
+        "BINANCE_FUTURES/BTC-USDT-PERP/funding": {
+          "feed": "funding",
+          "exchange": "BINANCE_FUTURES",
+          "symbol": "BTC-USDT-PERP",
+          "dt": "2026-04-01",
+          "rows": 28800,
+          "out_bytes": 912097,
+          "sha256": "ff928d28448736c39be63a61c8fc4c65f6d4e680316875649fd29e99cbb3fd9e",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "50862c4f32a832d0",
+          "schema_cols": [
+            "mark_price",
+            "rate",
+            "next_funding_time",
+            "timestamp",
+            "receipt_timestamp",
+            "index_price"
+          ]
+        },
+        "BINANCE_FUTURES/BTC-USDT-PERP/open_interest": {
+          "feed": "open_interest",
+          "exchange": "BINANCE_FUTURES",
+          "symbol": "BTC-USDT-PERP",
+          "dt": "2026-04-01",
+          "rows": 23799,
+          "out_bytes": 523245,
+          "sha256": "7aa2f305434341bb956bdcc3e1d68ecab75f230a6ed95d0a7607b471787ad20c",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "cc50255ead6e8372",
+          "schema_cols": [
+            "open_interest",
+            "timestamp",
+            "receipt_timestamp"
+          ]
+        },
+        "BINANCE_FUTURES/BTC-USDT-PERP/liquidations": {
+          "feed": "liquidations",
+          "exchange": "BINANCE_FUTURES",
+          "symbol": "BTC-USDT-PERP",
+          "dt": "2026-04-01",
+          "rows": 1092,
+          "out_bytes": 22530,
+          "sha256": "4bda04e1e4d93f543fcb0d4f4f3682d3a5a021a39deaf87c9e8ff9df0a7b221a",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "619f38c92bdb5c98",
+          "schema_cols": [
+            "side",
+            "quantity",
+            "price",
+            "id",
+            "status",
+            "timestamp",
+            "receipt_timestamp"
+          ]
+        },
+        "BINANCE_FUTURES/BTC-USDT-PERP/book": {
+          "feed": "book",
+          "exchange": "BINANCE_FUTURES",
+          "symbol": "BTC-USDT-PERP",
+          "dt": "2026-04-01",
+          "rows": 768122,
+          "out_bytes": 53967337,
+          "sha256": "1ba419b0f04c650c13b286da10e3e5d1ecab2efd96cc80ef4eed9efa6071c268",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "0dd0b2fa771c757d",
+          "schema_cols": [
+            "timestamp",
+            "receipt_timestamp",
+            "sequence_number",
+            "bid_0_price",
+            "bid_0_size",
+            "bid_1_price",
+            "bid_1_size",
+            "bid_2_price",
+            "bid_2_size",
+            "bid_3_price",
+            "bid_3_size",
+            "bid_4_price",
+            "bid_4_size",
+            "bid_5_price",
+            "bid_5_size",
+            "bid_6_price",
+            "bid_6_size",
+            "bid_7_price",
+            "bid_7_size",
+            "bid_8_price",
+            "bid_8_size",
+            "bid_9_price",
+            "bid_9_size",
+            "bid_10_price",
+            "bid_10_size",
+            "bid_11_price",
+            "bid_11_size",
+            "bid_12_price",
+            "bid_12_size",
+            "bid_13_price",
+            "bid_13_size",
+            "bid_14_price",
+            "bid_14_size",
+            "bid_15_price",
+            "bid_15_size",
+            "bid_16_price",
+            "bid_16_size",
+            "bid_17_price",
+            "bid_17_size",
+            "bid_18_price",
+            "bid_18_size",
+            "bid_19_price",
+            "bid_19_size",
+            "ask_0_price",
+            "ask_0_size",
+            "ask_1_price",
+            "ask_1_size",
+            "ask_2_price",
+            "ask_2_size",
+            "ask_3_price",
+            "ask_3_size",
+            "ask_4_price",
+            "ask_4_size",
+            "ask_5_price",
+            "ask_5_size",
+            "ask_6_price",
+            "ask_6_size",
+            "ask_7_price",
+            "ask_7_size",
+            "ask_8_price",
+            "ask_8_size",
+            "ask_9_price",
+            "ask_9_size",
+            "ask_10_price",
+            "ask_10_size",
+            "ask_11_price",
+            "ask_11_size",
+            "ask_12_price",
+            "ask_12_size",
+            "ask_13_price",
+            "ask_13_size",
+            "ask_14_price",
+            "ask_14_size",
+            "ask_15_price",
+            "ask_15_size",
+            "ask_16_price",
+            "ask_16_size",
+            "ask_17_price",
+            "ask_17_size",
+            "ask_18_price",
+            "ask_18_size",
+            "ask_19_price",
+            "ask_19_size"
+          ]
+        },
+        "BINANCE/BTC-USDT/book_delta_v2": {
+          "feed": "book_delta_v2",
+          "exchange": "BINANCE",
+          "symbol": "BTC-USDT",
+          "dt": "2026-04-01",
+          "rows": 33892363,
+          "out_bytes": 153214700,
+          "sha256": "4747c50067d3808788461f1218bf094b2b481191f78b75b313af900201ab650e",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "47432842635f059c",
+          "schema_cols": [
+            "timestamp",
+            "receipt_timestamp",
+            "sequence_number",
+            "side_is_bid",
+            "price",
+            "size"
+          ]
+        },
+        "BINANCE/BTC-USDT/trades": {
+          "feed": "trades",
+          "exchange": "BINANCE",
+          "symbol": "BTC-USDT",
+          "dt": "2026-04-01",
+          "rows": 1024789,
+          "out_bytes": 9543802,
+          "sha256": "068e9be9f32e2b861d319c2deb539d60ea2868fbf019896df23c02cb95ae05f3",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "8fa9fa0d892aecfb",
+          "schema_cols": [
+            "side",
+            "amount",
+            "price",
+            "id",
+            "timestamp",
+            "receipt_timestamp"
+          ]
+        },
+        "BINANCE/BTC-USDT/book": {
+          "feed": "book",
+          "exchange": "BINANCE",
+          "symbol": "BTC-USDT",
+          "dt": "2026-04-01",
+          "rows": 729636,
+          "out_bytes": 69272774,
+          "sha256": "3a815a28dc5e77616d8ae04e97698afd9a3ae34ea892f7a8b0142fba3d9d301e",
+          "schema_version": "lake_binance/1",
+          "schema_fingerprint": "0dd0b2fa771c757d",
+          "schema_cols": [
+            "timestamp",
+            "receipt_timestamp",
+            "sequence_number",
+            "bid_0_price",
+            "bid_0_size",
+            "bid_1_price",
+            "bid_1_size",
+            "bid_2_price",
+            "bid_2_size",
+            "bid_3_price",
+            "bid_3_size",
+            "bid_4_price",
+            "bid_4_size",
+            "bid_5_price",
+            "bid_5_size",
+            "bid_6_price",
+            "bid_6_size",
+            "bid_7_price",
+            "bid_7_size",
+            "bid_8_price",
+            "bid_8_size",
+            "bid_9_price",
+            "bid_9_size",
+            "bid_10_price",
+            "bid_10_size",
+            "bid_11_price",
+            "bid_11_size",
+            "bid_12_price",
+            "bid_12_size",
+            "bid_13_price",
+            "bid_13_size",
+            "bid_14_price",
+            "bid_14_size",
+            "bid_15_price",
+            "bid_15_size",
+            "bid_16_price",
+            "bid_16_size",
+            "bid_17_price",
+            "bid_17_size",
+            "bid_18_price",
+            "bid_18_size",
+            "bid_19_price",
+            "bid_19_size",
+            "ask_0_price",
+            "ask_0_size",
+            "ask_1_price",
+            "ask_1_size",
+            "ask_2_price",
+            "ask_2_size",
+            "ask_3_price",
+            "ask_3_size",
+            "ask_4_price",
+            "ask_4_size",
+            "ask_5_price",
+            "ask_5_size",
+            "ask_6_price",
+            "ask_6_size",
+            "ask_7_price",
+            "ask_7_size",
+            "ask_8_price",
+            "ask_8_size",
+            "ask_9_price",
+            "ask_9_size",
+            "ask_10_price",
+            "ask_10_size",
+            "ask_11_price",
+            "ask_11_size",
+            "ask_12_price",
+            "ask_12_size",
+            "ask_13_price",
+            "ask_13_size",
+            "ask_14_price",
+            "ask_14_size",
+            "ask_15_price",
+            "ask_15_size",
+            "ask_16_price",
+            "ask_16_size",
+            "ask_17_price",
+            "ask_17_size",
+            "ask_18_price",
+            "ask_18_size",
+            "ask_19_price",
+            "ask_19_size"
+          ]
+        }
+      }
+    },
+    "cryptohftdata": {
+      "source": "CryptoHFTData (https://www.cryptohftdata.com)",
+      "docs": [
+        "https://www.cryptohftdata.com/docs/python-orderbook",
+        "https://www.cryptohftdata.com/.well-known/openapi.json",
+        "https://www.cryptohftdata.com/llms.txt",
+        "https://www.cryptohftdata.com/datasets/binance-orderbook-data"
+      ],
+      "documented_coverage_start": "2025-06-28",
+      "access": {
+        "base_url": "https://api.cryptohftdata.com",
+        "download_endpoint": "GET /download?file={exchange}/{YYYY-MM-DD}/{HH}/{SYMBOL}_{data_type}.parquet.zst",
+        "auth": "anonymous free tier documented at 60 requests/minute per IP; optional free API key",
+        "format": "hourly Parquet + Zstd objects"
+      },
+      "probe": {
+        "exchange": "binance_futures",
+        "symbol": "BTCUSDT",
+        "data_type": "orderbook",
+        "date": "2026-04-01",
+        "hour_utc": 12,
+        "object": "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
+        "rationale": "mid-day hour chosen a priori (no day-boundary seam); futures first because perp is signal-primary"
+      },
+      "expansion_day_objects": {
+        "binance_futures": "hours 00..23 of 2026-04-01 (23 further objects after the probe)",
+        "binance_spot": "hours 00..23 of 2026-04-01 (24 objects, symbol BTCUSDT)"
+      },
+      "store_layout": "data/raw/chd/{exchange}/dt={YYYY-MM-DD}/hour={HH}/{SYMBOL}_orderbook.parquet.zst (gitignored; root fixed at approval)"
+    }
+  },
+  "permitted_april_metrics": [
+    "row counts (per unit / per hour / per event_type / dropped / deduplicated / skipped)",
+    "sha256 of files, frame_replay_hash of reconstructed frames, report_hash of reports",
+    "schema conformance: column names, dtypes, schema fingerprints, KV metadata",
+    "engine-time population fractions, chosen engine-time column, engine-time fallback flag, dropped-row counts",
+    "timestamp-unit normalization outcome (detected timescale) and monotone-watermark regression counts",
+    "sequence aggregates (Lake): non-monotone (ts,seq) pair counts, duplicate-seq fraction (descriptive; seq is not a row-gap detector per docs 5a-Recon)",
+    "update-ID continuity (CryptoHFTData): contiguity violation counts, gap counts, overlap counts, duplicate-event counts, reset counts, pre-snapshot skip counts",
+    "snapshot validity: candidate counts, classify_snapshot reason-code histograms, seed accepted/reseed counts and timestamps, seed_source_crossed_frac",
+    "fixed book-quality metrics on the preregistered grid: crossed_samples/crossed_rate, missing_book_samples/fraction, thin_depth_samples/fraction, crossed_duration_s, n_invalid_runs",
+    "stale/frozen-book metrics per the integrity_definitions: frozen run counts, max frozen run seconds, frozen_fraction",
+    "delta-stream silence metrics: max inter-event gap seconds, counts of gaps over 10s/60s/300s, total silent seconds",
+    "tick conformance: off-tick counts at the expected scale, measured decimal scale per instrument/feed, price-decimals histogram bounds",
+    "determinism evidence: cross-run equality booleans, hash equality",
+    "python/native conformance evidence: frame and meta equality booleans",
+    "cross-source deviation aggregates in tick units (and their fixed USD equivalents): |delta best_bid|, |delta best_ask|, |delta mid| quantiles (p50/p95/p99/max), touch agreement fractions, joint-valid fraction, per-side top-K price-set overlap counts (descriptive)",
+    "measured requests, bytes, runtimes, exit codes, failure reasons"
+  ],
+  "forbidden_april_metrics": [
+    "features, feature matrices, or any bars/features/labels producer output",
+    "labels and label agreement (including the issue-54 label_agreement_min family)",
+    "costs, cost curves, forecasts, PnL, positions, trade simulations, model outputs or scores",
+    "trade-feed distribution metrics: price/size/notional/interarrival/lag/side summaries (ingest/validate_trade_feeds.py-class reports; outcome-bearing per docs/experiment-plan.md Phase 0S)",
+    "price or mid or spread LEVEL statistics in currency (means/quantiles/min/max of price levels), returns, realized volatility, price-path series, price-path plots, or manually selected price-path excerpts",
+    "publishing or printing raw market rows (prices/sizes of real April rows) in any tracked report, issue comment, PR body, or log",
+    "any per-sample time series of April book state in tracked evidence (aggregates only)"
+  ],
+  "expected_schemas": {
+    "lake": {
+      "book_delta_v2": [
+        "timestamp",
+        "receipt_timestamp",
+        "sequence_number",
+        "side_is_bid",
+        "price",
+        "size"
+      ],
+      "trades": [
+        "side",
+        "amount",
+        "price",
+        "id",
+        "timestamp",
+        "receipt_timestamp"
+      ],
+      "funding": [
+        "mark_price",
+        "rate",
+        "next_funding_time",
+        "timestamp",
+        "receipt_timestamp",
+        "index_price"
+      ],
+      "open_interest": [
+        "open_interest",
+        "timestamp",
+        "receipt_timestamp"
+      ],
+      "liquidations": [
+        "side",
+        "quantity",
+        "price",
+        "id",
+        "status",
+        "timestamp",
+        "receipt_timestamp"
+      ],
+      "book": "timestamp, receipt_timestamp, sequence_number, bid_{0..19}_price/size, ask_{0..19}_price/size (20-level snapshot seed)",
+      "note": "engine-time aliases timestamp->origin_time, receipt_timestamp->received_time canonicalized by ingest.lake_binance.canonicalize_time_columns; per-unit fingerprints pinned in fixture.lake.units"
+    },
+    "cryptohftdata_common_orderbook_event": {
+      "received_time": "INT64, non-null, unix ns at vendor capture",
+      "event_time": "INT64, non-null, exchange event time (timescale exchange-dependent; normalized per replay_contract.timestamp_units)",
+      "transaction_time": "INT64, nullable",
+      "symbol": "STRING, non-null (BTCUSDT)",
+      "event_type": "STRING, non-null, 'snapshot' | 'update'",
+      "first_update_id": "INT64, nullable",
+      "final_update_id": "INT64, nullable",
+      "prev_final_update_id": "INT64, nullable (gap detection)",
+      "last_update_id": "INT64, nullable (snapshot book version)",
+      "side": "STRING, non-null, 'bid' | 'ask'",
+      "price": "STRING decimal, non-null",
+      "quantity": "STRING decimal, non-null; '0' removes the level",
+      "order_count": "INT64, nullable (optional; ignored by the adapter, presence recorded)",
+      "row_shape": "one row per (event, side, price level); snapshot events span many rows sharing last_update_id"
+    }
+  },
+  "replay_contract": {
+    "k": 10,
+    "grid_ms": 1000,
+    "sampling": "as-of apply-before-read: every event with engine-time ts <= sample_ts is applied before the sample is emitted (recon.reseed._replay_seeded convention)",
+    "lake": {
+      "engine_time": "joint resolution across delta and book-seed frames via ingest.lake_binance.resolve_engine_time (origin_time if 100% populated in every frame, else received_time if 100%, else drop-and-record); chosen column and dropped counts recorded",
+      "ordering": "np.lexsort((sequence_number, engine_time)) - primary engine_time, secondary sequence_number, stable",
+      "snapshot_merge": "recon.reseed._merge_time_ordered: at equal ts the delta applies first, the snapshot second (authoritative overwrite)",
+      "seed_policy": {
+        "book_stride_ms": 1000,
+        "seed_min_levels_per_side": 5,
+        "reseed_after_crossed_s": 2.0,
+        "max_spread_frac": null,
+        "book_max_levels": 20
+      },
+      "engine": "--engine auto (Python oracle expected: no Binance tick scale is registered in recon/native.py::_TICK_SCALE)",
+      "production_path": "scripts/run_binance_recon.py, all nine units, defaults k=10 --grid-s 1.0"
+    },
+    "cryptohftdata": {
+      "timestamp_units": "event_time/received_time/transaction_time normalized to ns by the unique k in {1, 1e3, 1e6, 1e9} multiplier that lands the column median inside [2020-01-01, 2030-01-01) UTC in ns; fail closed if none fits",
+      "event_order": "events ordered by final_update_id ascending (snapshot events keyed by last_update_id); rows grouped into events by (event_type, first_update_id, final_update_id, last_update_id)",
+      "same_time_tie_break": "(final_update_id, side, price-ticks) within the stream; duplicate (side, price) rows inside one event are malformed -> fail closed",
+      "monotone_watermark": "sampling time axis = running max of normalized event_time in update-ID order; raw regression count recorded; regressions > 0.1% of events -> fail closed (ordering anomaly)",
+      "futures_continuity": "after snapshot(last_update_id=L): skip updates with final_update_id < L; first applied update must satisfy (first_update_id <= L <= final_update_id) OR (prev_final_update_id == L); every subsequent update must satisfy prev_final_update_id == previous final_update_id; violation -> sequence gap, fail closed",
+      "spot_continuity": "after snapshot(last_update_id=L): skip updates with final_update_id <= L; first applied update must satisfy first_update_id <= L+1 <= final_update_id; every subsequent update must satisfy first_update_id == previous final_update_id + 1; if prev_final_update_id is non-null it must equal previous final_update_id; violation -> sequence gap, fail closed",
+      "duplicates_overlap_reset": "byte-identical duplicate event (same ids, same level rows) -> dropped and counted; partial overlap or backwards ids -> incompatible_overlap, fail closed; a mid-stream snapshot with last_update_id >= last applied final_update_id -> state reset (counted); a snapshot with last_update_id < last applied final_update_id or a watermark-regressing snapshot -> stale/backwards snapshot, fail closed (no future or past snapshot may seed)",
+      "missing_snapshot": "a replay window whose stream contains no valid snapshot before the first update (and no carried contiguous state) -> missing_initial_snapshot, fail closed",
+      "snapshot_validity": "two-sided, all prices/sizes finite and > 0, >= 5 levels per side, strictly sorted, uncrossed (recon.reseed.classify_snapshot bars); truncated/one-sided/crossed/malformed snapshot -> fail closed",
+      "zero_size_delete_absent_level": "no-op, counted (descriptive)",
+      "hour_partitioning": "hours processed in order, one file at a time (bounded memory); state carries across an hour seam only when update-ID continuity holds across the seam; a missing hourly partition inside the window, or two conflicting objects for one hour, -> fail closed",
+      "identity": "every row must have the expected symbol; >= 99.9% of rows must fall inside the nominal hour on received_time or on event_time (whichever axis matches; recorded); wrong exchange/symbol/date/hour -> fail closed",
+      "output_contract": "internal top-K frame: mid, microprice, bid_i_price, bid_i_size, ask_i_price, ask_i_size for i in 0..k-1, sample_ts last (float64 + int64 sample_ts) - identical to recon.orderbook.OrderBook.snapshot assembly"
+    }
+  },
+  "tick_rules": {
+    "expected_tick": {
+      "BINANCE_FUTURES/BTC-USDT-PERP": 0.1,
+      "BINANCE/BTC-USDT": 0.01
+    },
+    "lake_measurement": "for each instrument and price-bearing feed: measured d = smallest d in {0,1,2,3,4} with max(|p*10^d - round(p*10^d)|) <= 1e-6 over all prices; no such d -> malformed/off-tick prices -> anomaly cap; off-tick count at the EXPECTED scale recorded; conformance scale for native replay = 10^max(d_measured over delta+book+trades, d_expected)",
+    "cryptohftdata_measurement": "prices parsed as decimal.Decimal from the vendor string; tick exactness is exact integer arithmetic at the measured decimal count; comparison space = integer ticks at the shared conformance scale",
+    "precision": "vendor decimal strings are never round-tripped through float before tick conversion; internal frame floats are produced as ticks/scale once, deterministically"
+  },
+  "integrity_definitions": {
+    "crossed_sample": "best_bid >= best_ask at a grid sample (established book only, post-seed)",
+    "missing_sample": "no top-of-book on at least one side at a grid sample",
+    "thin_sample": "present and uncrossed but fewer than k=10 levels on at least one side",
+    "frozen_run": "maximal run of >= 60 consecutive 1-second grid samples whose full top-K state (all 4k price/size values, presence pattern) is identical; frozen_fraction = samples inside such runs / n_samples",
+    "silence": "inter-event gap on the resolved engine-time axis of the delta stream; recorded at > 10s, > 60s, > 300s",
+    "stale_but_uncrossed": "a frozen_run whose samples are present and uncrossed (subset of frozen accounting)"
+  },
+  "thresholds": {
+    "lake_day_quality": {
+      "crossed_usable_max": 0.01,
+      "missing_usable_max": 0.02,
+      "thin_usable_max": 0.1,
+      "seed_crossed_frac_max": 0.05,
+      "source": "frozen production bars: scripts/run_binance_recon.py::Thresholds == run_coinbase_quality_map thresholds (docs 5a-QualityMap); NOT chosen by this experiment"
+    },
+    "anomaly_caps": {
+      "off_tick": "no d <= 4 renders all prices integral -> verdict capped at degraded",
+      "silence_gap_s_cap": 300.0,
+      "silence_cap_effect": "any book_delta_v2 inter-event gap > 300s -> verdict capped at degraded",
+      "frozen_fraction_max": 0.02,
+      "frozen_cap_effect": "frozen_fraction > 0.02 -> verdict capped at degraded"
+    },
+    "hard_invalidators": {
+      "input_identity": "raw unit sha256 or schema fingerprint != fixture pin -> inconclusive (wrong input)",
+      "schema_drift": "observed columns incompatible with expected_schemas -> inconclusive",
+      "determinism": "any cross-run inequality (excluding secs/ts keys) -> inconclusive",
+      "native_conformance": "python/native frame or meta divergence when the conformance arm runs -> inconclusive"
+    },
+    "chd_window_quality": {
+      "crossed_usable_max": 0.01,
+      "missing_usable_max": 0.02,
+      "thin_usable_max": 0.1,
+      "seed_crossed_frac_max": 0.05,
+      "note": "same frozen bars applied to the CryptoHFTData reconstruction on its approved windows (seed_crossed_frac over its snapshot events)"
+    },
+    "comparison": {
+      "joint_valid_fraction_min": 0.97,
+      "touch_agreement_within_1_tick_min": 0.9,
+      "mid_abs_diff_ticks_p50_max": 1.0,
+      "mid_abs_diff_ticks_p99_max": 10.0,
+      "basis": "both sources sampled as-of the same exchange-time 1s grid, k=10, tick space at the shared conformance scale; agreement metrics computed over joint-valid samples; exact-tick agreement and depth overlap recorded descriptively"
+    }
+  },
+  "determinism": {
+    "stage2_cli": "two full runs of scripts/run_binance_recon.py with identical arguments into two separate output roots; per-unit manifest records must be equal excluding keys {secs, ts}; published parquet sha256 values must be equal",
+    "harness": "in-process replays hashed with experiments.snapshot_seed.frame_replay_hash; two replays of the same inputs must produce identical frame hashes; every report carries report_hash = eval.hashing.hash_obj(report, exclude_keys=('report_hash',))"
+  },
+  "conformance": {
+    "python_native": "if recon_native is importable AND the measured tick scale is exact (0 off-tick at the conformance scale): run recon.native.reconstruct_lake_l2_at_samples_seeded_native with the explicit measured price_scale on the same cleaned inputs and require frame equality (assert_frame_equal, check_dtype=True) and meta equality (excluding non-semantic keys); divergence -> inconclusive; unavailable/unverified tick -> recorded skip (Python oracle remains the authority, no cap)",
+    "scope": "experiment-scoped conformance evidence only; it does NOT register a Binance tick scale in recon/native.py (that is a separate reviewed change)"
+  },
+  "decision_logic": {
+    "lake_unit_requirements": {
+      "BINANCE_FUTURES/BTC-USDT-PERP": {
+        "topk_l2": "certified",
+        "trades": "ok",
+        "funding": "ok",
+        "open_interest": "ok",
+        "liquidations": "ok or missing-sparse"
+      },
+      "BINANCE/BTC-USDT": {
+        "topk_l2": "certified",
+        "trades": "ok"
+      }
+    },
+    "lake_verdict": {
+      "certified": "every unit meets lake_unit_requirements AND no anomaly cap fired AND no hard invalidator fired AND determinism passed AND schema/tick conformance passed",
+      "degraded": "units complete but any topk_l2 classifies degraded, or any anomaly cap fired (off-tick / silence / frozen), with no hard invalidator",
+      "inconclusive": "any hard invalidator fired, any required unit missing or errored, any topk_l2 classifies inconclusive (seed gate), or the run cannot complete"
+    },
+    "chd_verdict": {
+      "certified": "approved window(s) pass validation, the fail-closed replay completes with zero continuity violations, and chd_window_quality bars pass",
+      "degraded": "replay completes but a chd_window_quality bar fails",
+      "inconclusive": "validation or fail-closed replay refuses the data (missing/malformed snapshot, gap, overlap, identity failure), or the window was never approved/downloaded"
+    },
+    "final_source_decision": {
+      "lake_go": "lake_verdict == certified AND (comparison not executable OR comparison bars pass). If comparison bars pass: 'Crypto Lake approved for the pilot, independently validated; CryptoHFTData recorded as agreeing fallback candidate'. If CHD data was unusable (chd inconclusive on its own data): 'Crypto Lake approved on internal certification only; independent validation impossible; fallback none' - recorded explicitly",
+      "chd_go": "lake_verdict != certified AND chd_verdict == certified on the approved April windows: 'CryptoHFTData approved instead; #35 source and manifest contract must switch' (subject to the non-April escalation when April cannot carry the decision alone)",
+      "neither": "lake_verdict != certified AND chd_verdict != certified -> neither source approved; #35 stays blocked; open a separately scoped vendor/pivot decision",
+      "disagreement": "lake_verdict == certified AND chd_verdict == certified AND comparison bars FAIL -> the April day cannot attribute fault; NO GO is issued for either source from April data alone; escalate per escalation.dev_days"
+    }
+  },
+  "escalation": {
+    "one_day_insufficient": "triggered when final_source_decision routes to 'disagreement', or when both sources pass every April bar identically but an acceptance criterion remains untestable on April data",
+    "dev_days": [
+      "2026-03-15",
+      "2025-12-15"
+    ],
+    "dev_day_rules": "fixed a priori (mid-month, inside the six-month window, inside documented CryptoHFTData coverage, non-April); each dev day requires its own bounded, user-approved request plan for BOTH vendors before any download; on non-April dev days outcome-bearing parity (issue-54 parity family incl. label agreement) is permitted"
+  },
+  "request_bounds": {
+    "probe": {
+      "objects": 1,
+      "max_attempts_per_object": 3,
+      "retry_policy": "retry only transient HTTP (429/5xx/timeout) with exponential backoff (base 2s, cap 30s); 4xx other than 429 aborts",
+      "timeout_s": 120,
+      "byte_cap_per_object": 536870912,
+      "byte_cap_effect": "streamed download aborts beyond 512 MiB (fail closed; size not documented)",
+      "abort_conditions": [
+        "auth wall",
+        "persistent 429 after backoff",
+        "byte cap",
+        "non-zstd/non-parquet content",
+        "schema mismatch",
+        "identity (symbol/date/hour) mismatch"
+      ]
+    },
+    "expansion": {
+      "objects": 47,
+      "condition": "every probe check passed AND the approval explicitly permits expansion; same per-object bounds"
+    },
+    "no_other_vendor_io": "no additional Crypto Lake request of any kind; no CryptoHFTData request beyond the approved objects; nothing before the explicit user approval checkpoint"
+  },
+  "evidence": {
+    "ignored_reports_root": "data/reports/binance_source_quality/",
+    "tracked_evidence_root": "experiments/evidence_64/",
+    "tracked_contents": "small aggregate JSON evidence only (verdict summaries, index with sha256 pins of ignored reports and commit SHAs); never raw market rows",
+    "prereg_commit_rule": "this file is committed before the decision-bearing local replay; the commit SHA is recorded in every subsequent report"
+  },
+  "amendments": []
+}
