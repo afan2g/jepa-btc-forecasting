@@ -167,8 +167,11 @@ threshold choices use the immutable development partition
 `[2025-11-01, 2026-01-01)`. The untouched fixed holdout is
 `[2026-01-01, 2026-02-01)`. The existing `2026-04-01` Binance smoke day is an
 integrity fixture only and must not enter calibration, selection, or outcome
-reporting. Issue #52 owns the fixed-holdout fit/score transaction; issue #69
-owns the G0-BN verdict.
+reporting. Issue #67 owns implementation of a distinct, source/date-generic
+G0-BN ledger/freeze/consumption path; it may reuse primitives originally built
+under #52 only after adapting and testing them for Binance and January. It must
+not relabel or reuse the legacy G0-XV protocol/transaction identity. Issue #69
+owns the decision-bearing holdout execution and G0-BN verdict.
 
 **Deferred cross-venue evaluator boundary.** If G0-BN passes, the prior
 Coinbase/cross-venue protocol remains valid: regenerate every arm on a matched
@@ -893,8 +896,9 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
 the bounded G0-BN data present ⇒ E0.3 median-bar histogram, τ ladder, development-only
 candidate evaluation, and one fixed January 2026 holdout score. Coinbase and matched
 cross-venue arms run only after a G0-BN PASS. Formal G1 uses a later full-data build and
-separate holdout. The G0-BN report requires #52's trial-ledger/fixed-holdout evaluator and
-skips cleanly when the certified source is absent.
+separate holdout. The G0-BN report requires the source/date-generic evaluator path
+implemented by #67 (with separately identified G0-BN ledger/freeze/consumption artifacts)
+and skips cleanly when the certified source is absent. #69 owns the one-time score and verdict.
 
 ---
 
@@ -942,7 +946,7 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2× target-venue taker fee + slippage, fee-tier param; **slippage includes the `target_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable target-venue book at `target_read_ts` (one-sided book → drop, #4). Persist the Binance fee assumption for G0-BN; do not reuse Coinbase costs. | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; staged `dataset_id`/`build_id`/`venues`/`sources`; emit a one-venue `binance_single_venue` manifest first, then deferred Coinbase-only and matched Coinbase/Binance/combined views; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection + feature-subset identity tests | Pre |
 | **T9** `feat/producer-orchestrator` | End-to-end per-day → consolidate labeled window; explicit `binance_single_venue`, `coinbase_only`, and `cross_venue` source modes; wire source-specific certified calendars; **per-`vendor_source` replay dispatch (Lake→`ts_engine` merge; CoinAPI→`seq`-order book replay + trades normalizer — P2)**; apply source-specific seam/coverage masks; apply the **pre-label span-safe partition cutoff before adjacent-day reads** and emit its hash-pinned contract/drop counts; `generated_at` injectable + excluded from `build_id` (P3); **`validate_frame` + `validate_matrix` before any `data/processed/` write** (fail closed, P2); integration test through `run_from_manifest`. **Acceptance: Binance single-venue opens no Coinbase inputs and emits no absent-source columns; no surviving row crosses a source seam or G0-BN partition boundary; deferred cross-venue arms have identical row/split/label/cost hashes; ≥`n_groups` rows per horizon; NaN/inf row rejected pre-write; logical-row-identical rebuild** | T1–T8, `eval/runner.py:run_from_manifest`, source certification artifacts | `bars/produce.py` + integration + source-mode + partition-boundary + determinism tests | Pre (synthetic source fixtures) |
-| **T10** `feat/producer-calibration` (Post) | **G0-BN first:** calibrate the Binance-perpetual clock and τ ladder on November–December 2025, emit the span-contained development build, freeze the candidate ledger/thresholds, then materialize and score January 2026 once through #52. Report PASS, PREDICTIVE_NOT_TRADEABLE, FAIL, or INCONCLUSIVE under #69. **Deferred:** only after PASS, execute Coinbase transfer and matched cross-venue milestones with separately frozen holdouts. **Acceptance: source and partition hashes reconcile; no OOS source is opened during development selection; development/holdout hashes are disjoint and immutable** | T9, #64 source certification, #68 bounded data, #52 evaluator | E0.3/E0.5 artifacts + immutable G0-BN development/holdout builds; #69 emits the gate verdict | **Post** (bounded data + evaluator unlock) |
+| **T10** `feat/producer-calibration` (Post) | **G0-BN first:** calibrate the Binance-perpetual clock and τ ladder on November–December 2025, emit the span-contained development build, and freeze the candidate ledger/thresholds through #67's distinct G0-BN evaluator path; #69 then materializes and scores January 2026 exactly once. Generic #52 primitives may be reused only after #67 makes them source/date-generic—the legacy G0-XV protocol and holdout transaction are not reused. Report PASS, PREDICTIVE_NOT_TRADEABLE, FAIL, or INCONCLUSIVE under #69. **Deferred:** only after PASS, execute Coinbase transfer and matched cross-venue milestones with separately frozen holdouts. **Acceptance: source and partition hashes reconcile; no OOS source is opened during development selection; development/holdout hashes are disjoint and immutable** | T9, #64 source certification, #68 bounded data, #67 G0-BN evaluator mode | E0.3/E0.5 artifacts + immutable G0-BN development/holdout builds; #69 emits the one-time score and gate verdict | **Post** (bounded data + evaluator unlock) |
 
 ---
 

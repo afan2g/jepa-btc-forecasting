@@ -113,19 +113,25 @@ must authorize the exact one-time post-freeze scope.
 
 ---
 
-## 3. Vendor decision & rationale
+## 3. Candidate evidence & pending source decisions
 
-**Binance → Crypto Lake.** Structurally equivalent to Tardis, far cheaper, Tokyo-captured. Coverage
-and timestamps verified excellent (§5).
+**Binance — decision pending #64.** Crypto Lake is a measured candidate: its Binance products are
+structurally suitable, inexpensive under the existing plan, Tokyo-captured, and have the Stage-1
+coverage/schema/timestamp evidence recorded in §5. Those measurements do **not** select the source.
+#64 must complete Stage-2 reconstruction and independent comparison against CryptoHFTData (or record
+a reviewed fallback) before #68 may plan the 92-day acquisition. No text in this section authorizes
+a Crypto Lake pull while that gate is open.
 
-**Coinbase → hybrid (Crypto Lake + CoinAPI backfill).** Crypto Lake's Coinbase is 92.9% over 2 yr
-with one **33-day hole (2024-12-05 → 2025-01-06)** — the "large gaps" the spec warned about. Rather
-than buy the full Coinbase span from CoinAPI L3 (~$1,240/18 mo), we take Coinbase from Crypto Lake
-(flat-rate, ~93%) and backfill only the gaps from CoinAPI (~$82 for the 33-day hole). Trade-off: the
-label venue is stitched from two vendors — recon must align on `origin_time` (both populate it; §5).
+**Coinbase — decision pending #65; prior hybrid retained as fallback evidence.** The previously
+specified Crypto Lake + CoinAPI design remains implemented, measured fallback infrastructure, not
+the currently approved acquisition route. Crypto Lake's Coinbase has a 33-day coverage hole and
+widespread reconstruction-quality failures; the reviewed CoinAPI manifest can repair those days but
+at substantial L3 cost. #65 must decide whether a lower-cost label/cost source is sufficient, narrow
+the retained L3 scope, or explicitly retain the hybrid before #34 spends.
 
-> Single-vendor alternatives if contiguity is preferred: **all-CoinAPI L3** (~$1,240, contiguous,
-> full L3) or **all-Crypto-Lake** (free, but accept the 33-day hole via purge/embargo).
+> Previously evaluated alternatives remain evidence, not authorization: **all-CoinAPI L3** is
+> contiguous but expensive; **all-Crypto-Lake** avoids CoinAPI spend but cannot be treated as usable
+> merely by accepting the 33-day hole because measured present-day reconstruction failures remain.
 
 CoinAPI has **no mid-tier L2 product** — only L3 `limitbook_full` (2.27 GB/day) or L1 `quotes`
 (74 MB/day). Crypto Lake's `book_delta_v2` *is* incremental L2 with `sequence_number`, which is what
