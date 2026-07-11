@@ -18,10 +18,9 @@
 > `binance_single_venue`: Binance BTC-USDT perpetual L2 + trades supply the bar
 > clock, features, labels, and costs for G0-BN. Coinbase, Binance spot,
 > derivatives-state, and cross-venue modes remain in this architecture but are
-> deferred until G0-BN passes. Where older sections below describe Coinbase as
-> the pre-E2.5 default or April 2026 as the pilot holdout, read those contracts as
-> applying only to the deferred Coinbase/cross-venue modes; they do not override
-> this amendment.
+> deferred until G0-BN passes. Executable sections below state their mode binding
+> explicitly; older Coinbase-specific entries in the review-history changelog are
+> historical evidence, not implementation instructions for G0-BN.
 
 **Goal.** Build the offline **producer** that first turns reconstructed Binance
 BTC-USDT-perpetual event streams, and later optional Coinbase or cross-venue
@@ -66,7 +65,7 @@ empty**. This plan is exactly the missing producer.
 | Usable all-feed calendar (704/730 d, OOS≈Apr 2026) | ✅ built | `data/usable_calendar.json`, `ingest/verify_trades_and_calendar.py` |
 | Vendor-seam fill policy + label/feature seam masks (E0.4 partial-fill contract) | ✅ built (helpers) | `recon/stitch_policy.py` (`SeamPolicy`, `DayStitchPlan`, `label_valid_mask`, `feature_valid_mask`, `window_crosses_seam`, `window_vendor_sources`) |
 | **Notional-bar sampler (dollar clock + time cap)** | ❌ **build (E0.3)** | new `bars/` |
-| **Wire the stitch plan + seam masks into the producer** | ❌ **build (E0.4)** | new `bars/produce.py` (§C/§F/T9) |
+| **Wire certified coverage masks into the producer; add Coinbase stitch masks only in deferred modes** | ❌ **build (E0.4)** | new `bars/produce.py` (§C/§F/T9) |
 | **Per-bar features (OFI/CVD/depth/slope/microprice-dev/intra-bar path)** | ❌ **build (§6/E1.2)** | new `bars/` |
 | **Cross-venue alignment + Binance→Coinbase feature lag** | ❌ **build (§5.3/§13)** | new `bars/` |
 | **Triple-barrier labels + forward returns + uniqueness** | ❌ **build (E0.4)** | new `data/labels.py`, `data/uniqueness.py` |
@@ -99,9 +98,9 @@ empty**. This plan is exactly the missing producer.
 recon/ (built)                     bars/ (NEW)                         data/ (extend)         eval/ (built, consumes)
 ─────────────────┐    ┌──────────────────────────────────────┐   ┌───────────────────┐   ┌──────────────────────┐
 stream-merge ────┼───▶│ clock.py     dollar bars + time cap   │   │ labels.py         │   │ manifest.validate_   │
-Trade/Delta      │    │ snapshot.py  dual-book @ bar close     │──▶│  triple-barrier    │──▶│  frame  (contract)   │
+Trade/Delta      │    │ snapshot.py  observable + true target │──▶│  triple-barrier    │──▶│  frame  (contract)   │
 OrderBook.snap ──┼───▶│ features.py  OFI/CVD/microprice_dev…   │   │ uniqueness.py     │   │ runner.run_from_     │
-sample_topk_as_of│    │ align.py     cross-venue lag + basis   │   │ cv.py (BUILT)     │──▶│  manifest → G1       │
+sample_topk_as_of│    │ align.py     optional cross-venue lag  │   │ cv.py (BUILT)     │──▶│  manifest → gates    │
                  │    │ cost.py      cost_bps/half_spread_bps  │   └───────────────────┘   │ study/stats/cost     │
                  │    │ produce.py   assemble → parquet+manifest│                          └──────────────────────┘
                  │    └──────────────────────────────────────┘
@@ -129,14 +128,15 @@ a **streaming, day-partitioned k-way merge** of Binance+Coinbase deltas+trades o
 engine-time axis (§C.1; `recon.merge_sorted` is the bounded-fixture oracle **only**, never
 the full-day path) → `bars.clock` (trailing-threshold schedule) emits bar boundaries →
 `bars.align` sets the received-time **decision `t_event`** (§C.2) →
-`bars.snapshot` reconstructs **two Coinbase reads** (§C.2): the **observable book** at
-`coinbase_read_ts` (last origin among events with `received_time ≤ t_event` — features +
+`bars.snapshot` reconstructs **two target-book reads** (§C.2; Coinbase is the
+target in this deferred mode): the **observable book** at `target_read_ts` (last origin among events with
+`received_time ≤ t_event` — features +
 `half_spread_bps`) and the **true label book** at `t_event` (plain origin cut, offline ground
 truth — `P0`); feature reads pre-filter `received_time ≤ t_event` then fold in origin order →
 `bars.features` builds the per-bar stationarized vector (trade-flow features over the bar's
 **origin-order members**, §C.2) → `data.labels` + `data.uniqueness` attach
 `y_fwd_bps`/`label`/`t_barrier`/`uniqueness` (**per horizon**, **`P0` = true Coinbase mid at
-`t_event`**) → `bars.cost` attaches `cost_bps` (incl. `coinbase_read_ts→t_event` latency
+`t_event`**) → `bars.cost` attaches `cost_bps` (incl. `target_read_ts→t_event` latency
 slippage)/`half_spread_bps` → **guard-aware `stitch_policy` masks + `window_vendor_sources` drop
 cross-seam/guard/uncovered rows** (§C.3) → per-day parquet → consolidate the labeled window
 → **`validate_frame` + `validate_matrix`** (fail closed — the NaN/inf/finite screens live in
@@ -244,8 +244,9 @@ BTC ranges 2×+; dollar bars are homoscedastic).
   the sampler must not assume file order.
 
 **Gate (E0.3):** median active-regime bar ≤ 2 s (so the 2 s horizon ≈ a few bars) +
-the **log-scale time-per-bar histogram** artifact. Threshold calibration and this gate
-require the real backfilled trade volume → **post-backfill** (see split). The clock
+the **log-scale time-per-bar histogram** artifact. G0-BN threshold calibration and this gate
+require #68's certified Binance trade volume; deferred Coinbase modes require their
+approved target data. The clock
 *code* and its determinism are testable now on synthetic/fixture trades.
 
 **Builds on:** `recon/events.py:Trade` + `order_key`; the streaming k-way merge
@@ -253,69 +254,64 @@ require the real backfilled trade volume → **post-backfill** (see split). The 
 
 ---
 
-## §B. Coinbase target mid / microprice inputs
+## §B. Target-venue mid / microprice inputs
 
-The label is defined on the **Coinbase BTC-USD** book (the venue we trade), off
-**mid and microprice — never last-trade** (spec §5/§6, E0.4). Both come directly from
-the existing snapshot:
+The label is defined on the selected **target venue's book**, off mid or
+microprice — never last-trade (spec §5/§6, E0.4). G0-BN binds the target to
+`BINANCE_FUTURES/BTC-USDT-PERP`; deferred transfer/cross-venue modes bind it to
+Coinbase BTC-USD. Both values come from the existing snapshot:
 
 - `recon/orderbook.py:60-62` → **mid** = (best_bid + best_ask)/2.
 - `recon/orderbook.py:64-69` → **microprice** = (ask_size·best_bid + bid_size·best_ask)/
   (bid_size + ask_size) — size-weighted fair value, robust to bid-ask bounce.
 
-**Default:** label off **Coinbase mid** (primary anchor), carry **microprice** as an
-ablation arm. Rationale for defaulting to mid despite microprice being the better
-short-horizon fair-value proxy: **the vendor/seam parity gate that unlocks backfill
-validates labels on mid, not microprice** — `recon/parity.py:_signed_labels` computes the
-directional label from `mid` and `label_agreement` is fed `L["mid"]`/`C["mid"]`
-(`recon/parity.py:68,243`). Using microprice as the primary target would train on an anchor
-whose cross-vendor agreement at the stitch seams has never been validated. **Microprice as
-primary is therefore gated on first adding a microprice-parity check** to the seam gate
-(a prerequisite, tracked as a follow-up / T5 open question). The anchor is a
-manifest-recorded label parameter. **Promoting microprice is a label rebuild, not a manifest
-one-liner (Codex P2):** the triple-barrier `label`/`y_fwd_bps`/`t_barrier` are computed off the
-anchor's price path and the v1 runner consumes exactly one target pair, so a per-bar microprice
-*value* column carries no future barrier hits — the microprice arm needs T5 to re-run labels off
-the microprice path (or emit a separate precomputed microprice target set). Emitting both mid and
-microprice *base-price series* per bar is cheap; the *labels* are not free to re-anchor.
+**Default:** label off the selected target venue's **mid** and carry microprice as
+a feature/candidate ablation. #64 must certify Binance price/size semantics for
+G0-BN. In the deferred stitched-Coinbase mode, the existing seam parity validates
+mid but not microprice (`recon/parity.py:68,243`), so a Coinbase microprice label
+requires a new parity check. In every mode, promoting microprice is a **label
+rebuild**, not a manifest-only switch: `label`, `y_fwd_bps`, and `t_barrier` must
+be recomputed from the microprice path. The manifest records the anchor.
 
-**Three reads, three timestamps (§C.2, Codex #1).** The producer reconstructs the Coinbase
-book with two cutoffs per bar and keeps the reads apart:
+**Two book reads, three roles (§C.2, Codex #1).** The producer reconstructs the
+selected target book at two cutoffs per bar and keeps label, feature, and cost
+roles apart:
 
 - **Label base price `P0`** = the **true reconstructed mid** (or microprice) at **`t_event`** —
   a plain **origin-time** cut (`sample_topk_as_of` at the `t_event` origin cutoff). The label is
   offline **ground truth**, *not* observability-gated: reading the realized book at the decision
   time is correct, and the barrier path already runs forward over `[t_event, t_barrier]`. **`P0`
-  is never read at `coinbase_read_ts`** — that would fold the already-realized, *past-and-feature-
-  observable* `[coinbase_read_ts, t_event]` drift into `y_fwd_bps` (a common-mode target leak;
+  is never read at `target_read_ts`** — that would fold the already-realized, *past-and-feature-
+  observable* `[target_read_ts, t_event]` drift into `y_fwd_bps` (a common-mode target leak;
   see Changelog / #1).
-- **Feature / cost book** = the **observable** book at **`coinbase_read_ts`** (last origin among
+- **Feature / cost book** = the **observable** book at **`target_read_ts`** (last origin among
   events with `received_time ≤ t_event`) — feeds book-shape features and `half_spread_bps` (§G).
-  The entry-latency drift `coinbase_read_ts → t_event` is charged **forward as `cost_bps`
+  The entry-latency drift `target_read_ts → t_event` is charged **forward as `cost_bps`
   slippage** (§G), not backward into the label.
 - **Staleness cap (Codex #8):** because the clock triggers on **trades** while the book is a
-  separate channel, bars keep closing through a Coinbase **book-feed dropout** (the ~93%/gappy
-  regime, data.md §5b — an *intra-vendor* gap, **not** a stitch seam, so the §C.3 seam masks do
-  not catch it; "origin_time 100% populated" is timestamp presence, not gap absence). Drop any
-  row whose observable book is older than a pinned cap (`t_event − coinbase_read_ts >
-  staleness_cap_ns`) — else features/`half_spread_bps` are stale (`P0` is fine under the spine,
-  but the feature/cost read still is not).
+  separate channel, bars can keep closing through a target **book-feed dropout**.
+  Drop any row whose observable book is older than a source-certified cap
+  (`t_event − target_read_ts > staleness_cap_ns`) — timestamp presence is not
+  gap absence. Deferred Coinbase modes additionally apply the known stitch/seam
+  policy; the generic staleness cap still catches intra-vendor gaps.
 
 Both mid and microprice are emitted as base-price series; the forward label (§D) uses the
-`t_event` **mid** as `P0` (microprice arm gated on parity), with the triple barrier and emitted
-span over `[t_event, t_barrier]`.
+`t_event` **mid** as `P0`. A microprice target requires the source-specific evidence and
+label rebuild above. The triple barrier and emitted span remain `[t_event, t_barrier]`.
 
 ---
 
-## §C. Binance & Coinbase feature alignment (event-time, decision-time, seams)
+## §C. Source alignment (event time, decision time, coverage)
 
-Two async venues, two async channels each. Alignment reuses the built E0.1 machinery
-and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipline.
+G0-BN has one target venue with asynchronous book and trade channels. Deferred
+cross-venue modes add a second venue, cross-venue latency, and Coinbase vendor
+seams. Every mode reuses E0.1 and the same decision-time discipline; optional
+sources may not leak into or become prerequisites of `binance_single_venue`.
 
 1. **Single engine-time axis — streaming in production (Codex P2).** Reconstruct each
-   venue's book by merging its trades + L2 deltas on `ts_engine` (`origin_time` is **100%
-   populated** for `book_delta_v2` on both venues per data.md §5 — exchange time, no
-   `received_time` fallback needed). **Production uses a streaming, day-partitioned k-way
+   selected venue's book by merging its trades + L2 deltas on `ts_engine`; #64/#68
+   must certify the G0-BN source's origin/receipt timestamp contract. **Production
+   uses a streaming, day-partitioned k-way
    merge** over already-sorted/chunked inputs: `recon/merge.py:merge_sorted` **materializes
    both streams into one list and its docstring explicitly forbids full-day use** (Binance
    perp `book_delta_v2` ≈ 109 M rows/day, ~4 GB — AGENTS.md streaming rule), so it stays the
@@ -328,23 +324,25 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    `recon/reconstruct.py:67,138`) — it folds every event with `origin ≤ cutoff`, which is **not**
    the received-gated set when origin ≠ received order. So **feature/cost** reconstruction must
    **pre-filter events to `received_time ≤ t_event`, then fold in origin order** (a delayed
-   `origin ≤ coinbase_read_ts` but `received > t_event` straggler must be excluded); the **label**
+   `origin ≤ target_read_ts` but `received > t_event` straggler must be excluded); the **label**
    read uses the plain origin cut at `t_event` (offline ground truth — §C.2/§B). Both then reuse
    the same top-K folding.
-   **CoinAPI fill segments are the exception (Codex P2), for *both* book and trades:**
+   **Deferred Coinbase/CoinAPI fill segments are the exception (Codex P2), for
+   both book and trades; they are not opened by G0-BN:**
    - **Book:** Coinbase gap days filled from CoinAPI `limitbook_full` must replay in strict
      **`seq` (file) order via `recon.coinapi`**, *not* a `ts_engine` merge — the opening
      SNAPSHOT block carries a **prior-day** `time_exchange` (data.md:134-140;
      `recon/coinapi.py:13-29`) that a timestamp merge would sort to day-end, corrupting the
      target book.
-   - **Trades (new producer prerequisite):** the pre-E2.5 clock triggers on **Coinbase
-     trades**, but the **52 Coinbase fill days** (data.md §5b — 47 need book, all 52 need
+   - **Trades (deferred Coinbase-mode prerequisite):** that mode's clock triggers on
+     **Coinbase trades**, but the **52 Coinbase fill days** (data.md §5b — 47 need book, all 52 need
      trades, 2.6 GB, verified present in CoinAPI flat files) have **no Lake trades**, and a
      **CoinAPI trades normalizer/replay does not exist yet** (`recon/coinapi.py` is book-only;
-     `download_coinapi.py` emits `limitbook_full` only). It is a **T1/T9 prerequisite** —
+     `download_coinapi.py` emits `limitbook_full` only). It is a prerequisite
+     for the deferred Coinbase T1/T9 path, **not for #67/G0-BN** —
      without it the producer cannot emit bar closes or CVD on fill days and would silently
-     build the claimed 704/730 usable matrix from Lake-only trades, dropping/corrupting exactly
-     the backfilled calendar the plan depends on. **CoinAPI timestamps are ns-since-midnight,
+     build the deferred 704/730 matrix from Lake-only trades, dropping/corrupting exactly
+     the backfilled calendar that mode depends on. **CoinAPI timestamps are ns-since-midnight,
      not absolute (Codex P1):** convert first — `received_time = day_open_ns + time_coinapi_ns`,
      origin `= day_open_ns + time_exchange_ns` (snapshot block clamped to day open, per
      `recon.coinapi`) — **before** the `received_time ≤ t_event` gate, or a raw time-of-day
@@ -356,9 +354,10 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
 
 2. **Decision time and per-event observability — the sample-timing rule (§13 pitfall, load-bearing).**
    Reconstruction runs on **exchange (origin) time** (the canonical book order), but an event
-   is only *observable* at the trading box at its own **`received_time`** — present per event in
-   the **raw parquet** (`origin_time` + `received_time` on both Lake venues, data.md §5/§5b;
-   `time_coinapi_ns` for CoinAPI, §4.3). **Prerequisite (Codex P1):** the normalized
+   is only *observable* at the trading box at its own **`received_time`**. The
+   selected source must normalize and certify both timestamps (Lake exposes
+   `origin_time` + `received_time`; deferred CoinAPI uses `time_exchange_ns` +
+   `time_coinapi_ns`). **Prerequisite (Codex P1):** the normalized
    `recon.events.Trade`/`Delta` keep only one `ts_engine` (`trades_from_df`/`deltas_from_df` drop
    the other timestamp), so T1/T2 must build a **received-time-bearing event record/table** that
    carries *both* origin (for ordering) and received (for gating). Then the read rule is **exact
@@ -388,9 +387,9 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
      opportunities at one decision instant. Emit **at most one row per `(t_event, horizon)`** —
      coalesce a backlog into the **last-closing bar** (the most-informed features/label at that
      instant); T1/T9 dedupe on `(t_event, horizon)` before write, and §E lists it as an invariant.
-   - **Feature/cost book snapshot (observable):** include book events with `received_time ≤
-     t_event` (pre-filter, then fold in origin order — §C.1/#2); the **observable** Coinbase read
-     **`coinbase_read_ts`** is the origin time of the last such book event (`≤ t_event`), feeding
+   - **Feature/cost book snapshot (observable):** include target-book events with `received_time ≤
+     t_event` (pre-filter, then fold in origin order — §C.1/#2); the **observable** target read
+     **`target_read_ts`** is the origin time of the last such book event (`≤ t_event`), feeding
      book-shape **features** and `half_spread_bps` (§G). A staleness cap drops rows whose
      observable book is too old (§B/#8).
    - **Trade-flow features over the bar's origin-order MEMBERS (Codex #3):** `cvd`,
@@ -404,11 +403,11 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
      max(member received_time)`, §above), so no separate gate is needed on them — only the
      point-in-time **book snapshot** uses the received-gate.
    - **Label base price `P0` — the TRUE book at `t_event` (Codex #1):** `P0` = mid (or
-     microprice) of the **true reconstructed Coinbase book at `t_event`** — a plain **origin** cut,
+     microprice) of the **true reconstructed target book at `t_event`** — a plain **origin** cut,
      the offline **ground truth**, *not* observability-gated. The triple barrier + emitted span run
      over `[t_event, t_barrier]` (`t0 = t_event`), aligned with the CPCV purge/embargo (§F) and
-     seam masks (§C.3). `P0` is **never** read at `coinbase_read_ts`: doing so folds the
-     already-realized, past-and-feature-observable `[coinbase_read_ts, t_event]` drift into
+     coverage/seam masks (§C.3). `P0` is **never** read at `target_read_ts`: doing so folds the
+     already-realized, past-and-feature-observable `[target_read_ts, t_event]` drift into
      `y_fwd_bps` — a common-mode target leak the E0.4 control cannot catch (Changelog). Entry
      latency is charged **forward** as `cost_bps` slippage (§G).
    - `t_available == t_event` is **correct by construction** — every input has
@@ -417,14 +416,18 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
      the **live** loop's straggler watermark and the manifest's *declared* bound — use a **pinned
      p99/max** feed lag, not the median. data.md reports median/p95 pairs (e.g. Coinbase trades
      164/238 ms, Binance perp book 4.4/149 ms); the **median is not conservative** — ~50 % of
-     events exceed it, so reading at `t_event − median` would leak delayed events. Offline builds
-     use actual `received_time` (exact); E2.5 measures the Binance figures before the
-     Binance-triggered clock is enabled (§A, Q2).
+     events exceed it, so reading at `t_event − median` would leak delayed events. Offline builds,
+     including G0-BN, use actual `received_time` and enable the target-venue clock
+     without E2.5. E2.5 measures remote-feed tails only for deferred live
+     cross-venue watermarking (§A, Q2).
 
-3. **Vendor-seam exclusion — the partial-fill contract (E0.4, hard input).** Coinbase is
-   stitched from Crypto Lake + CoinAPI at vendor **seams** (the 33-day hole and smaller
-   gaps, data.md §5a/§5b). The producer **must consume the final reviewed per-day stitch
-   plan** (`recon/stitch_policy.py:DayStitchPlan` — `.seams`, fill `segments`, `SeamPolicy`
+3. **Coverage and vendor-seam exclusion (E0.4, hard input).** Every mode
+   consumes a source-specific certified coverage artifact and drops unsupported
+   feature/cost/label windows. G0-BN consumes #68's single-source Binance
+   coverage and provenance; it does **not** require or open a Coinbase/CoinAPI
+   stitch plan. In the deferred Coinbase mode, Crypto Lake + CoinAPI seams (the
+   33-day hole and smaller gaps, data.md §5a/§5b) require the final reviewed
+   `recon/stitch_policy.py:DayStitchPlan` (`.seams`, fill `segments`, `SeamPolicy`
    with `seam_guard_s = 60 s` = the longest label horizon) and **drop any bar row whose
    feature window `[t_feature_start, t_event]` or label window `[t_event, t_barrier]`
    crosses a seam or touches its guard band, or whose windows are not backed by a single
@@ -448,7 +451,7 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    is kept only when *both* its feature window
    `[t_feature_start, t_event]` and label window **`[t_event, t_barrier]`** return a singleton
    `{lake}` or `{coinapi}` (with `P0` at `t_event` under the spine, the label window needs **no**
-   back-extension — the observable feature/cost read at `coinbase_read_ts` already sits inside the
+   back-extension — the observable feature/cost read at `target_read_ts` already sits inside the
    feature window, so `feature_valid_mask` covers it; Changelog / #6, #11); any mixed-vendor,
    `excluded`, or `UNCOVERED` (day-edge overhang)
    window is masked. **Do not use `vendor_source_at(...)` for this** — it is per-*sample*
@@ -469,12 +472,13 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
    either **stitch adjacent-day segments for edge windows** (T9 loads the neighbor day's plan) or,
    if deferred, **quantify and explicitly accept** the row loss in the manifest.
 
-   The consumed stitch-plan id + `SeamPolicy.as_dict()` are recorded in the manifest `sources`
-   / `bar_clock` for reproducibility. This is a **T9 assembly step and a T9/T10 acceptance
-   criterion** (§Task breakdown). The masking *code* is testable now on synthetic seams;
-   the *final* seam list is a product of the backfill/parity gate (§before/after split).
+   Every manifest records the consumed coverage-policy artifact. Deferred
+   stitched-Coinbase manifests additionally record the stitch-plan id and
+   `SeamPolicy.as_dict()` in `sources`/`bar_clock`. This is a T9 assembly and
+   T9/T10 acceptance criterion for modes that contain seams; G0-BN tests source
+   coverage without fabricating a Coinbase seam dependency.
 
-4. **Cross-venue features:** Binance−Coinbase basis (mid spread), lagged Binance
+4. **Deferred cross-venue features:** Binance−Coinbase basis (mid spread), lagged Binance
    OFI→Coinbase (E1.2 #1 cross-venue signal). Perp state (funding/OI/liquidations) as
    **conditioners, not primary** (E2.4: OFI ≫ funding/OI at these horizons).
 
@@ -503,9 +507,9 @@ and adds **decision-time**, **cross-venue latency**, and **vendor-seam** discipl
   horizon** (or emit only horizons that survive), and the §J fixtures must be sized so masking
   cannot zero a horizon.
 - **`y_fwd_bps`** = normalized forward return (bps) over the span **`[t_event, t_barrier]`**
-  (decision time, §C — *not* the bar close), base price `P0` = the **true reconstructed Coinbase
-  target mid at `t_event`** (§B default; microprice arm gated on parity), **never** the lagged
-  `coinbase_read_ts` read (Changelog / #1); **never raw price** (§8).
+  (decision time, §C — *not* the bar close), base price `P0` = the **true reconstructed selected
+  target mid at `t_event`** (§B default), **never** the lagged
+  `target_read_ts` read (Changelog / #1); **never raw price** (§8).
 
 ---
 
@@ -523,20 +527,24 @@ contract, restated as production rules:
 | `t_available` | when features become usable = **`t_event`** (synchronous) | `t_available == t_event` (every input has `received_time ≤ t_event` per §C.2, `availability_lag_ns = 0`) |
 | `t_barrier` | first-barrier-hit time (TP/SL/time), forward from `t_event` | `t_event ≤ t_barrier ≤ t_event + horizons[tag]` |
 
-**Seam integrity (§C.3):** additionally, every emitted row's `[t_feature_start, t_event]`
-feature window and **`[t_event, t_barrier]`** label window must be seam-/guard-clean and
-single-vendor-backed (`recon/stitch_policy.py`). The observable feature/cost book read at
-`coinbase_read_ts ≤ t_event` sits **inside** the feature window, so `feature_valid_mask` already
+**Coverage integrity (§C.3):** every emitted row's `[t_feature_start, t_event]`
+feature window and **`[t_event, t_barrier]`** label window must be covered by the
+declared source artifact. Modes with vendor seams additionally require guard-clean,
+single-vendor-backed windows (`recon/stitch_policy.py`). The observable feature/cost book read at
+`target_read_ts ≤ t_event` sits **inside** the feature window, so the feature-window policy already
 covers it — no back-extension (Changelog / #6, #11). Rows failing the masks are dropped, never
 NaN-carried into the matrix (**`validate_matrix` rejects NaN/inf features** — §H; `validate_frame`
 covers only columns/timing/dtypes). This is the value-level complement to the timing invariants
 below.
 
-**Pilot-partition integrity:** G0 development rows satisfy the pre-label conservative cutoff and
-their actual guarded feature/cost/label support ends strictly before April. April holdout label
-support ends strictly before May. This check runs before write and is independent of seam/vendor
-validity; adjacent-day stitching may bridge ordinary day partitions but never a pilot holdout
-boundary. The partition-contract source artifact and drop counts are part of the logical build.
+**Pilot-partition integrity:** G0-BN development rows satisfy the pre-label
+conservative cutoff and their actual guarded feature/cost/label support ends
+strictly before `2026-01-01`; January holdout support ends before
+`2026-02-01`. Deferred modes pin their own boundaries (April→May for the prior
+G0-XV protocol). This check runs before write and is independent of source
+coverage validity; adjacent-day stitching may bridge ordinary day partitions
+but never a holdout boundary. The partition-contract source artifact and drop
+counts are part of the logical build.
 
 **Unique decision per `(t_event, horizon)` (Codex deep-review #2):** the monotone watermark can tie
 several backlog bars to one `t_event`; the producer emits **exactly one row per `(t_event, horizon)`**
@@ -554,7 +562,7 @@ for these:
   reach the matrix; pin one policy.
 - **Unresolved barrier:** `y_fwd_bps` when no TP/SL fires before the vertical barrier = the realized
   return to `t_barrier = t_event + horizon` (never NaN); `label` = 0 (time-barrier).
-- **One-sided book:** `half_spread_bps` when the observable book at `coinbase_read_ts` has an empty
+- **One-sided book:** `half_spread_bps` when the observable book at `target_read_ts` has an empty
   side — **drop the row** (no valid spread) rather than emit NaN.
 These are producer obligations, tested in §J.
 
@@ -641,24 +649,25 @@ cross-cutting discipline).
 - **No-trade band** (`eval/cost.py:net_pnl`): trade only when `|forecast| >
   cost_bps + 2·half_spread_bps + margin_bps`. Round-trip taker crosses the spread twice
   (`spread_crossings=2`). **Honest taker fills** — no passive-fill-at-mid assumption.
-- **`cost_bps`** (per row) = `2 × taker_fee_bps + slippage_bps`. Coinbase Advanced taker
-  ranges ~120 bps (base) → ~5 bps (top tier) (spec §10.2); the assumed fee tier is a
-  **pre-registered producer parameter**, recorded in the manifest `sources`/`bar_clock`
-  block, not hidden in code. At realistic solo volume the cost wall is large — this is
-  the G1 stakes (data.md/§10). **Entry-latency slippage (Codex #1):** `slippage_bps` **includes**
-  the `coinbase_read_ts → t_event` drift — the price move between the last *observable* book and
+- **`cost_bps`** (per row) = `2 × taker_fee_bps + slippage_bps` using the
+  selected target venue's versioned fee tier. G0-BN pre-registers a Binance
+  futures fee schedule; deferred Coinbase modes use a separately pinned Coinbase
+  Advanced tier. The assumption is recorded in the manifest `sources`/`bar_clock`
+  block, never hidden in code. **Entry-latency slippage (Codex #1):** `slippage_bps` **includes**
+  the `target_read_ts → t_event` drift — the price move between the last *observable* book and
   the decision — charged **forward as a cost** (the label `P0` is now the true `t_event` mid, so
   this drift is a real execution cost, not a label shift).
-- **`half_spread_bps`** (per row) = ½·(Coinbase best_ask − best_bid)/mid from the **observable**
-  target book at **`coinbase_read_ts`** (`received_time ≤ t_event`, §B/§C.2 — the observable book,
+- **`half_spread_bps`** (per row) = ½·(target best_ask − best_bid)/mid from the **observable**
+  target book at **`target_read_ts`** (`received_time ≤ t_event`, §B/§C.2 — the observable book,
   so cost is realistic and uses no future state; a **one-sided** book → drop the row, §E/#4).
   `validate_matrix` requires both cost columns ≥ 0.
 - **Gate (G1):** `run_study` reports gross **and** net side-by-side, MCC, DSR (vs the trial
   dispersion, effective-N), and **PBO via CSCV** (needs ≥32 finite OOS samples else
   `g1_inconclusive` **only when the gate would otherwise pass** — `g1_inconclusive = passing and
   not pbo_available`, `eval/study.py:70-72`; a weak <32-sample build is an ordinary **FAIL**, §J).
-  A real G1 pass needs enough traded samples (`min_trades=30`, `min_eff_trades=10`;
-  `eval/runner.py:DEFAULT_GATE`) → **post-backfill**.
+  A real gate pass needs enough traded samples (`min_trades=30`, `min_eff_trades=10`;
+  `eval/runner.py:DEFAULT_GATE`). G0-BN runs after #68 certification; formal G1
+  and deferred Coinbase/cross-venue gates retain their own data prerequisites.
 - **E0.5 sanity gate (already built, keep green):** the evaluator scores a known-zero-edge
   synthetic series as DSR≈0 / PnL≤0 (`tests/test_gate_synthetic.py`) — it does not
   manufacture edge.
@@ -683,35 +692,50 @@ sorted keys.
   row values* + all build params** (NOT file bytes — pandas/pyarrow embed version-stamped
   `created_by`/`pandas_version` metadata, so byte-identity is environment-coupled; §I/#10), with
   `generated_at` EXCLUDED, `time: {unit: "ns", timezone: "UTC"}`.
-- `bar_clock: {kind: "dollar", reference_stream, target_bars_per_day, time_cap_ns,
-  warmup_days, threshold_schedule (per-day values or named artifact path) + threshold_schedule_hash, feed_lag_tail_ns {binance_book, binance_trade, coinbase_book, coinbase_trade — p99/max live-watermark bound; offline reads use per-event received_time, §C.2}, seam_policy}` —
-  the **per-day trailing threshold schedule is pinned by hash** (§A, not a scalar), and
-  `seam_policy` is `recon/stitch_policy.py:SeamPolicy.as_dict()` (§C.3). `emitted_by_time_cap`
-  is an opted-in diagnostic `extra_cols`, never a feature.
+- `bar_clock: {kind: "dollar", reference_stream, target_bars_per_day,
+  time_cap_ns, warmup_days, threshold_schedule (per-day values or named
+  artifact path) + threshold_schedule_hash, feed_lag_tail_ns,
+  coverage_policy[, seam_policy]}`. `feed_lag_tail_ns` contains **only feeds
+  declared by that mode** and is a p99/max live-watermark bound; offline reads
+  use exact per-event `received_time` (§C.2). `seam_policy` is present only for
+  a build that consumes a vendor stitch plan. The per-day schedule and coverage
+  policy are hash-pinned. `emitted_by_time_cap` is an opted-in diagnostic
+  `extra_cols`, never a feature.
 - `feature_cols`: **explicit ordered** list (§below). `target_cols: ["y_fwd_bps",
   "label"]` (exactly what the baseline consumes — `eval/runner.py:BASELINE_TARGETS`).
   `reserved_cols`: full `eval.matrix.RESERVED`.
-- `venues`: `[{exchange:"BINANCE",symbol:"BTCUSDT",role:"signal"}, {…perp…},
-  {exchange:"COINBASE",symbol:"BTC-USD",role:"target"}]`.
-- `horizons`: `{tag: ns}` (§D). `sources`: `["crypto-lake/book_delta_v2",
-  "coinapi/limitbook_full", <reviewed-stitch/backfill-manifest-id>, …]` + fee-tier
-  assumption — the **consumed stitch plan is a recorded source** (§C.3). `generated_at`:
-  ISO-8601 UTC, **injectable** (a build param, fixed in tests) and **excluded from
-  `build_id`** so identical rebuilds share a `build_id`/logical rows (§I/#10).
+- `venues` and `sources` are **mode-specific, never a union template**:
+  - `binance_single_venue`: `venues` is exactly
+    `[{exchange:"BINANCE_FUTURES", symbol:"BTC-USDT-PERP"}]`; `sources`
+    contains only the #64-selected normalized Binance book/trade source, its
+    certification/raw/processed manifests, the #68 coverage artifact, the
+    partition contract, and the Binance cost assumption. Coinbase, CoinAPI,
+    stitch artifacts, spot, and auxiliary derivatives are forbidden.
+  - deferred `coinbase_only`/`cross_venue`: declare only venues actually opened
+    by that build. A stitched Coinbase build records the CoinAPI/Lake source
+    manifests and reviewed stitch plan; a matched cross-venue build records the
+    certified overlap and every declared venue.
+- `horizons`: `{tag: ns}` (§D). `generated_at`: ISO-8601 UTC, **injectable**
+  (a build param, fixed in tests) and **excluded from `build_id`** so identical
+  rebuilds share a `build_id`/logical rows (§I/#10).
 - `max_lookback_ns`, `embargo_ns` (`embargo_ns ≥ max_lookback_ns`, §F);
   `availability_lag_ns: 0` (synchronous — §C/§E). Optional `extra_cols`
-  (`emitted_by_time_cap`, funding/OI diagnostics), `dtypes`, `gate` (the pre-registered
-  G1 block, `eval/runner.py:resolve_gate`).
+  (`emitted_by_time_cap`; funding/OI diagnostics only in a mode that declares
+  those sources), `dtypes`, `gate` (the pre-registered gate block,
+  `eval/runner.py:resolve_gate`).
 
-**Feature registry (explicit `feature_cols`, §6 / E1.2, stationarized).** Core names align
-with the existing synthetic stand-ins (`eval/synthetic.py:FEATURES`) so fixtures
-interoperate: `ofi_integrated` (multi-level Cont-style OFI — E1.2 #1), `microprice_dev`,
-`queue_imb`, `spread_tick` (also the regime tag source), `cvd`; plus `depth_imbalance`,
-`book_slope`, `vwap_minus_mid`, `trade_count`, `signed_vol`, `aggressor_imb`,
-`largest_print`, `rv_intrabar`, `mae_intrabar`, `basis_binance_coinbase`,
-`ofi_binance_lagged`, `elapsed_ns`, `tod_sin`/`tod_cos`. Perp state
-(`funding`,`oi_change`,`liq_intensity`) enters as low-priority features or `extra_cols`
-conditioners (E2.4). Final list is pinned per build in the manifest. **Causal normalizers (Codex
+**Feature registry (explicit `feature_cols`, §6 / E1.2, stationarized).** The
+G0-BN registry contains only own-venue book/trade features:
+`ofi_integrated`, `microprice_dev`, `queue_imb`, `spread_tick`, `cvd`,
+`depth_imbalance`, `book_slope`, `vwap_minus_mid`, `trade_count`,
+`signed_vol`, `aggressor_imb`, `largest_print`, `event_intensity`,
+`rv_intrabar`, `mae_intrabar`, `elapsed_ns`, and `tod_sin`/`tod_cos`.
+Deferred manifests may add `basis_binance_coinbase`, `ofi_binance_lagged`,
+spot features, or perp-state conditioners (`funding`, `oi_change`,
+`liq_intensity`) only when their mode declares and opens those sources. No
+absent-source column is zero-filled. Final lists are pinned per build.
+Core names align where possible with the existing synthetic stand-ins
+(`eval/synthetic.py:FEATURES`). **Causal normalizers (Codex
 deep-review #3):** every stationarizer — rolling z-score/scaler, EWMA, PCA-integrated OFI — must be
 fit **as-of `≤ t_event`** (trailing/shifted state, **never** full-window/full-day statistics), or it
 leaks future regimes into every feature while still passing `validate_frame` (which checks *declared*
@@ -752,8 +776,10 @@ identical `build_id`** (`build_id` = hash of canonical logical row values + buil
 **not** file-byte identity. The §J acceptance test compares **logical-row equality**
 (canonicalized values); if byte-identity is wanted instead, first **pin/normalize writer options**
 (`version`, `compression`, `use_dictionary`, `write_statistics`, row-group size). Rules: iterate
-the **sorted** usable-day list from `data/usable_calendar.json`; apply the seam masks (§C.3)
-deterministically; stable-sort rows by `t_event` (also required for reproducible PBO blocking —
+the **sorted** day list from the mode's hash-pinned certified coverage artifact
+(`#68` for G0-BN; `data/usable_calendar.json` only for the deferred legacy
+cross-venue scope); apply any coverage/seam masks (§C.3) deterministically;
+stable-sort rows by `t_event` (also required for reproducible PBO blocking —
 `eval/study.py:58-61`); pin the per-day threshold schedule by hash (§A); seed all RNG
 (`np.random.default_rng(seed)`). **`generated_at` is an injectable build param** (fixed in tests,
 real wall-clock in production) — the *only* field allowed to differ between otherwise-identical
@@ -791,7 +817,7 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   delayed trade in bar N whose `received_time` exceeds bar N+1's members — `t_event` must be
   **non-decreasing** (`t_event(N+1) ≥ t_event(N)`, #13); for an `emitted_by_time_cap` bar (incl. a
   **zero-trade** quiet interval), `t_event ≥` the cap fire time and the prior `t_event`;
-  the **observable feature/cost book** resolves to `coinbase_read_ts` while the **label `P0`**
+  the **observable feature/cost book** resolves to `target_read_ts` while the **label `P0`**
   reads the *true* book at `t_event` (§C.2/#1); `t_available == t_event` holds *without* look-ahead.
 - **Trade-flow membership (Codex #3):** plant an early-arriving next-bar trade (origin after the
   crossing trade, `received ≤ t_event`); the bar's `cvd`/`aggressor_imb`/`largest_print` must be
@@ -834,8 +860,8 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
 - **Labels:** planted up/down/flat paths → expected triple-barrier `label` and sign of
   `y_fwd_bps` off the selected target venue's **mid** anchor (§B); barrier resolves within the horizon
   (`t_barrier ≤ t_event + horizon_ns`). **Span-anchor:** `t0 == t_event` and **`P0` = the true
-  reconstructed mid at `t_event`** (an origin cut, not the lagged `coinbase_read_ts` read); since
-  the label reads the offline ground-truth book at `t_event`, **no `[coinbase_read_ts, t_event]`
+  reconstructed mid at `t_event`** (an origin cut, not the lagged `target_read_ts` read); since
+  the label reads the offline ground-truth book at `t_event`, **no `[target_read_ts, t_event]`
   gap case applies** (Changelog / #1).
 - **Leakage-control gate (E0.4):** random k-fold (no purge) shows inflated CV vs
   purged/embargoed on a synthetic overlapping-label series — the controls bite.
@@ -851,6 +877,12 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   tiny/weak fixture yields an ordinary G1 **fail**, not `g1_inconclusive` — that flag needs a
   LightGBM rung to pass the solo gate with PBO unavailable (`eval/study.py:70-72`). Assert a
   specific G1 outcome only with a deliberately-planted-signal fixture sized to pass solo.
+- **Mode isolation / manifest templates (P2):** a `binance_single_venue`
+  fixture declares exactly one `BINANCE_FUTURES/BTC-USDT-PERP` venue and only
+  Binance book/trade/certification/coverage/cost sources. Injecting a Coinbase,
+  CoinAPI, stitch, spot, funding, OI, or liquidation source/feature fails the
+  G0-BN mode contract before file access. Deferred mode fixtures prove their
+  own explicit venue/source templates without changing G0-BN's row schema.
 - **Determinism (P3/#10):** two builds of the same fixture with **different injected
   `generated_at`** ⇒ **identical canonical logical rows and identical `build_id`** (the timestamp
   is excluded from the hash) — assert **logical-row equality**, not raw parquet bytes (which are
@@ -905,7 +937,7 @@ pre-backfill except T10. Suggested branch names in `feat/…`.
 | **T2** `feat/bars-snapshot` | **Two target-venue reads (#1):** observable book at `target_read_ts` (received-gated — features + `half_spread_bps`) **and** the true label book at `t_event` (origin cut — `P0`); `sample_topk_as_of` cuts on origin, so features pre-filter `received ≤ t_event` (#2); staleness cap on `t_event − target_read_ts` (#8); mid + microprice (both emitted). G0-BN binds target to Binance perpetual; deferred modes bind it explicitly. | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py` + received-time + label-at-t_event tests | Pre |
 | **T3** `feat/bars-features` | Per-bar §6/E1.2 vector (OFI/CVD/microprice_dev/queue_imb/spread_tick/depth/slope/VWAP/intra-bar path); stationarization; **value-level no-lookahead test** | T2, `recon/orderbook.py:snapshot` | `bars/features.py` + no-lookahead test | Pre |
 | **T4** `feat/bars-xvenue` | Deferred cross-venue increment: **`t_event` = monotone watermark `max(t_event(N−1), max(received_time) over the bar's trades, cap_fire)` (non-decreasing across bars — #13); every input gated by per-event `received_time ≤ t_event` (exact); p99/max tail only for the live watermark, never medians** (P1); basis; spot/perp and later Coinbase alignment; **sample-timing test (delayed-event guard)**. G0-BN does not depend on this task. | T3, data.md §5/§5b | `bars/align.py` + sample-timing test | Deferred until G0-BN PASS |
-| **T5** `feat/labels-triple-barrier` | Triple-barrier (**as-of/trailing** vol-scaled EWMA barriers — vol from returns `≤ t_event` only, params persisted, deep-review #4; vertical=horizon, **off the selected target venue's mid**; microprice arm gated on parity) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, `P0` = TRUE reconstructed mid at `t_event` (#1)**; unresolved barrier → realized return + `label=0` (#4) | T2 target anchor | `data/labels.py` + span-anchor + as-of-vol tests | Pre |
+| **T5** `feat/labels-triple-barrier` | Triple-barrier (**as-of/trailing** vol-scaled EWMA barriers — vol from returns `≤ t_event` only, params persisted, deep-review #4; vertical=horizon, **off the selected target venue's mid**; any microprice target requires source-specific evidence and a label rebuild) → `y_fwd_bps`/`label`/`t_barrier` per horizon; **span `[t_event, t_barrier]`, `P0` = TRUE reconstructed mid at `t_event` (#1)**; unresolved barrier → realized return + `label=0` (#4) | T2 target anchor | `data/labels.py` + span-anchor + as-of-vol tests | Pre |
 | **T6** `feat/labels-uniqueness-cv` | Concurrency uniqueness **per horizon** (port `_concurrency_uniqueness`, group by `horizon` — P2); embargo sizing; **leakage-control gate test** | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py` + E0.4 gate + per-horizon test | Pre |
 | **T7** `feat/bars-cost` | Per-row `cost_bps` (2× target-venue taker fee + slippage, fee-tier param; **slippage includes the `target_read_ts→t_event` entry-latency drift — #1**) + `half_spread_bps` from the observable target-venue book at `target_read_ts` (one-sided book → drop, #4). Persist the Binance fee assumption for G0-BN; do not reuse Coinbase costs. | `eval/cost.py:net_pnl` (consumer) | `bars/cost.py` + tests | Pre |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit `feature_cols`; staged `dataset_id`/`build_id`/`venues`/`sources`; emit a one-venue `binance_single_venue` manifest first, then deferred Coinbase-only and matched Coinbase/Binance/combined views; **`validate_frame` + `validate_matrix` before write** (fail closed, P2) | `eval/manifest.py`, `eval/matrix.py:validate_matrix` | manifest writer + round-trip + bad-row-rejection + feature-subset identity tests | Pre |
@@ -927,18 +959,19 @@ schema change.
 2. **Label anchor** = selected target venue **mid** (primary; Binance perpetual for
    G0-BN, Coinbase for deferred transfer/cross-venue evaluation). For Coinbase, this is
    the anchor the seam-parity gate validates (`recon/parity.py:68,243`). **Microprice** is
-   an ablation arm **gated on first adding a
-   microprice-parity check** (P2c; §B). **`P0` is read from the TRUE book at `t_event`** (an
-   origin cut, offline ground truth), **not** the observable `coinbase_read_ts` read — the
+   an ablation arm gated on a **source-specific semantic/parity check** (P2c;
+   §B). **`P0` is read from the TRUE book at `t_event`** (an
+   origin cut, offline ground truth), **not** the observable `target_read_ts` read — the
    entry-latency drift is a `cost_bps` slippage, not a label shift (Changelog / #1).
 3. **Sample timing / observability (P1):** decision `t_event` on the **received-time** axis;
    every input gated by its own **`received_time ≤ t_event`** (exact, per-event — the target
    venue is **not** zero-lag), with **p99/max tail** constants (never medians) only for the
    live watermark, giving `t_available == t_event` by construction — never `availability_lag_ns`
    (the consumer requires 0 — §C.2/§E).
-4. **Vendor seams (P2a):** the producer **consumes the reviewed stitch plan** and applies
-   `recon/stitch_policy.py` seam/guard/vendor masks; no training row crosses a seam. Hard
-   input + T9/T10 acceptance (§C.3).
+4. **Coverage/vendor seams (P2a):** every mode consumes its certified coverage
+   artifact. Only a mode with vendor seams consumes a reviewed stitch plan and
+   applies `recon/stitch_policy.py`; G0-BN must not declare Coinbase/CoinAPI
+   sources or seam artifacts. Hard input + T9/T10 acceptance (§C.3).
 5. **Bar-clock threshold (P2b):** **trailing/as-of-only** per-day schedule (prior days
    only) + warm-up, pinned by hash in the manifest — not a single scalar (§A).
 6. **Output** = day-partitioned intermediates → one consolidated
@@ -946,7 +979,8 @@ schema change.
    expected paths and AGENTS.md streaming rule.
 7. **Determinism (P3/#10)** = canonical **logical rows** + `build_id` (not fragile parquet
    bytes), with `generated_at` **injectable and excluded from the hash** (§I).
-8. **Horizon ladder** = `{2s,10s,60s}` default; the ~20–30 s τ-rung is added post-backfill by
+8. **Horizon ladder** = `{2s,10s,60s}` default; the ~20–30 s τ-rung is added after the
+   selected mode's certified data is available by
    **rerunning label/matrix production** (T10) to emit its bar×horizon rows — the runner rejects
    a declared-but-missing horizon, so it is **not** a manifest-only edit (§D, Codex P2).
 9. **CV / cost / DSR / PBO** = **reuse built code** (`data/cv.py`, `eval/`); the producer
@@ -957,24 +991,25 @@ schema change.
 
 ## Open questions (for reviewer / to resolve in the owning task)
 
-- **Q1 (T7):** which Coinbase Advanced **fee tier** to pre-register as the default
-  `taker_fee_bps` (base ~120 bps vs. an assumed volume tier)? Sets the G1 cost wall.
-- **Q2 (T4/E2.5) — resolved for pre-E2.5, open for the switch:** the pre-E2.5 default is
-  **Coinbase-triggered**, whose close is a local trade with a known `received_time` (§A/#1).
-  The remaining question is the **post-E2.5 switch**: once E2.5 pins the Binance live-watermark
-  tail, is the Binance-triggered clock's information-content gain
-  (spec §5.1) worth the added lag-modeling risk (too-low ⇒ sample-timing leakage; too-high ⇒
-  biases against the Binance-increment premise)? Gate the switch on E2.5 confidence + an E2.2
-  downstream-PnL check.
+- **Q1 (T7):** which Binance futures **fee tier** and slippage/latency policy
+  should G0-BN pre-register? A later Coinbase mode resolves its Coinbase
+  Advanced tier separately; neither mode may inherit the other's cost block.
+- **Q2 (T4/E2.5) — G0-BN resolved; deferred live cross-venue question:** G0-BN
+  is Binance-triggered and uses exact per-event `received_time` offline without
+  E2.5. If a later Coinbase-targeted live experiment switches from a local
+  Coinbase clock to a remote Binance-triggered clock, E2.5 must first pin the
+  Binance live-watermark tail and E2.2 must show the information-content gain is
+  worth the lag-modeling risk. This question cannot block or reroute G0-BN.
 - **Q3 (T5):** vol-scaling estimator for the horizontal barriers — EWMA half-life of the
   micro-window returns (spec says "EWMA"; the half-life is unspecified). The EWMA must be
   **trailing/as-of `≤ t_event`** (never using returns in/after `[t_event, t_barrier]`, deep-review
   #4), its params persisted; §J: mutating post-`t_event` returns cannot change the barrier width.
 - **Q4 (T1):** `target_bars_per_day` / time-cap `T` / `warmup_days` seed values before real
-  calibration (drives the E0.3 gate; only the *seed* is pre-backfill, the calibrated value
-  is T10).
-- **Q5 (T5/§B, P2c):** add a **microprice-parity check** to the seam gate before promoting
-  microprice to the primary label anchor — or accept mid as primary indefinitely?
+  calibration (drives the E0.3 gate; only the seed exists before certified
+  mode data, and T10 records the calibrated value).
+- **Q5 (T5/§B, P2c) — resolved policy:** keep mid as the primary target. Any future microprice
+  target requires source-specific semantic/parity evidence and a complete label
+  rebuild; stitched Coinbase additionally requires a microprice seam check.
 
 ---
 
@@ -1141,37 +1176,39 @@ schema change.
 ## Risks & assumptions
 
 - **Risk (label-leak fix is load-bearing, #1):** `P0` at `t_event` (the true reconstructed book),
-  **not** `coinbase_read_ts`, is the corrected discipline. A future edit that re-lags `P0` to the
+  **not** `target_read_ts`, is the corrected discipline. A future edit that re-lags `P0` to the
   observable read reintroduces the common-mode target leak (Changelog); the
-  `[coinbase_read_ts, t_event]` entry drift belongs in `cost_bps` slippage, not the label.
-- **Assumes** `origin_time` stays 100% populated for `book_delta_v2` (data.md §5,
-  measured 2026-06-22) — if a future span is empty, the sampler falls back to
-  `received_time` (Tokyo capture keeps it a tight proxy; `recon/ingest.py` already
-  supports the fallback). **100% *presence* ≠ gap absence (#8):** an intra-vendor book-feed
-  dropout still needs the §B staleness cap.
+  `[target_read_ts, t_event]` entry drift belongs in `cost_bps` slippage, not the label.
+- **Assume only what the #64/#68 source contract certifies.** G0-BN may not silently
+  substitute `received_time` for missing origin time or vice versa; any fallback
+  must be explicit, source-specific, and hash-pinned. Timestamp presence still
+  does not prove gap absence, so every mode needs the §B staleness cap.
 - **Assumes** the consumer contract (`eval/matrix.py:RESERVED`, `eval/manifest.py` v1) is
   stable; if it changes, T8/T9 must re-sync. Low risk — it is frozen and heavily tested.
-- **Risk:** threshold/latency/fee defaults (Q1–Q5) are seeds until real data; the plan
+- **Risk:** threshold/latency/fee/calibration choices (Q1–Q4) are seeds until real data; the plan
   isolates all as manifest parameters so calibration (T10) never forces a code change.
 - **Risk (sample timing, P1):** offline correctness relies on per-event `received_time` being
-  present and trustworthy on every feed (Lake `received_time`, CoinAPI `time_coinapi_ns`);
+  present and trustworthy on every declared feed (for example Lake `received_time` or deferred
+  CoinAPI `time_coinapi_ns`);
   where a scalar is used (live watermark, manifest bound) it must be a **p99/max tail**, never
   a median (~50 % of events exceed the median — a median read re-opens the ~5–8 % 2 s-label
-  look-ahead). The Binance tail is deferred to E2.5 and gates enabling the Binance-triggered
-  clock (Q2). All default conservative-high.
-- **Risk (CoinAPI order + trades, P2):** Coinbase fill segments must replay in `seq` (file)
+  look-ahead). G0-BN's offline Binance clock uses exact receipts and is already
+  enabled; E2.5 gates only a deferred live remote-trigger clock (Q2).
+- **Deferred risk (CoinAPI order + trades, P2):** Coinbase fill segments must replay in `seq` (file)
   order, not a `ts_engine` merge (the opening snapshot carries a prior-day timestamp); T9 must
   dispatch by `vendor_source` or the target book/labels corrupt. **And a CoinAPI
   Coinbase-trades normalizer does not exist yet** — without it the 52 fill days have no trade
-  stream for the clock/CVD, silently shrinking the usable calendar. Both are T1/T9
-  prerequisites (§C.1).
-- **Risk (seams, P2a):** the producer is only seam-safe if it consumes the **final
-  reviewed** stitch plan; a stale/partial seam list would let a cross-vendor window train.
-  T9 asserts on synthetic seams; T10 re-asserts on the real plan post-backfill.
-- **Risk:** Coinbase trade-order gotcha (data.md §5b) is one-day/one-symbol measured;
-  extend to multi-day before relying on it (T1 sorts defensively regardless).
-- **Backfill dependency:** T10 (and any *quantitative* E0.3/E0.5 gate result) is blocked
-  until the §5a parity + reseed multi-day validation unlocks backfill; T1–T9 are not.
+  stream for the clock/CVD, silently shrinking the usable calendar. Both are
+  prerequisites only for the deferred Coinbase mode (§C.1), not G0-BN.
+- **Risk (coverage/seams, P2a):** every mode must consume its final certified
+  coverage artifact. A stitched Coinbase build additionally requires the final
+  reviewed seam plan; G0-BN must not fabricate that dependency.
+- **Deferred risk:** the Coinbase trade-order observation (data.md §5b) is
+  one-day/one-symbol evidence; the Coinbase mode sorts defensively and validates
+  it before use. It does not constrain G0-BN.
+- **Data dependency:** G0-BN T10 is blocked on #64 source certification and #68
+  bounded data. The §5a Coinbase backfill/parity gate applies only to deferred
+  Coinbase/cross-venue calibration; T1–T9 remain fixture-testable.
 
 ## Follow-ups (deferred, tracked)
 
