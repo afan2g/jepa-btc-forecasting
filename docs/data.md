@@ -1127,13 +1127,16 @@ requires only the futures L2 snapshot/delta and trade units. The completed
 `2026-04-01` *nine-unit* smoke measured **687,215,789 bytes** (~0.687 decimal
 GB). Scaling that observation gives **~63.2 GB**, but this is a one-day smoke
 projection only — **not an estimate, quota guarantee, or approval ceiling**. The
-current Crypto Lake planner budgets the required futures `book_delta_v2`,
-`trades`, and `book` seed at `0.5738 + 0.025 + 0.18 = 0.7788 GB/day`, or
-**~71.65 GB for 92 days**. That planner value is itself provisional because the
-trade/seed constants are partly derived and #64 may select a different source.
-#68 must replace both figures with the selected source's exact unit manifest and
-use that reconciled estimate, plus quota headroom, for approval and batch caps.
-It may not add spot or auxiliary futures feeds opportunistically.
+required futures `book_delta_v2`, `trades`, and `book` seed constants currently
+sum to `0.5738 + 0.025 + 0.18 = 0.7788 GB/day`, or **~71.65 GB for 92 days**.
+That is a provisional requirement-side calculation, **not** the output of the
+current `scripts/plan_lake_binance_batches.py`: the existing full-archive planner
+budgets `1.2278 GB/day`, selects both perpetual and spot, and emits a downloader
+command whose omitted `--feeds` means all valid feeds. It must not be used as-is
+for #68. #68 must replace both projections with the selected source's exact
+minimal-unit manifest (or a separately reviewed scoped planner), reconcile the
+downloader's estimate, and use that result plus quota headroom for approval and
+batch caps. It may not add spot or auxiliary futures feeds opportunistically.
 
 **Deferred six-month cross-venue budget:** the former `2025-11-01` through
 `2026-04-30` nine-unit plan remains approximately **222.63 GB** under the

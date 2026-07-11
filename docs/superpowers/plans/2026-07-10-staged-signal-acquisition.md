@@ -186,11 +186,15 @@ artifact, candidate ledger where applicable, and build ID.
 The completed nine-unit `2026-04-01` smoke measured ~0.687 decimal GB. Scaling
 that observation over 92 days gives ~63.2 GB, but a single day is **not** an
 upper bound, quota guarantee, or approval estimate. The current Crypto Lake
-planner instead budgets the required futures delta/trade/seed units at
-`0.7788 GB/day`, or **~71.65 GB for 92 days**; that value is also provisional
-because some per-feed constants are derived and #64 may select another source.
-#68 must replace both projections with the selected source's exact minimal-feed
-manifest before approval and retain explicit quota headroom.
+required-feed constants instead sum to `0.7788 GB/day`, or **~71.65 GB for 92
+days**; that value is also provisional because some per-feed constants are
+derived and #64 may select another source. It is **not** the current batch
+planner's output: `scripts/plan_lake_binance_batches.py` still budgets `1.2278
+GB/day`, selects both perpetual and spot, and omits `--feeds` (therefore all valid
+feeds). #68 must not use that full-archive planner as-is. It must replace both
+projections with the selected source's exact minimal-feed manifest (or a
+separately reviewed scoped planner) before approval and retain explicit quota
+headroom.
 
 Broad Coinbase L3, the former 181-day nine-unit Binance pilot, multi-asset data,
 and 12–24-month history remain blocked. A GO decision selects a source or next

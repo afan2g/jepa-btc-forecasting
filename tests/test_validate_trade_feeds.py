@@ -101,7 +101,7 @@ def test_default_day_selection_is_the_safe_five_day_sample():
     # the coinapi_fill route (plan §3.4).
     assert "2024-08-06" in days
     assert "2026-03-15" in days                     # recent development control replaces April OOS
-    assert not any(vf.is_pilot_oos_day(d) for d in days)
+    assert not any(vf.is_protected_oos_day(d) for d in days)
 
 
 def test_explicit_days_take_precedence_and_dedupe():
@@ -172,26 +172,28 @@ def test_range_selection_is_deterministic_and_reproducible():
     assert len(d1) > len([d for d in vf.REGIME_COHORT if "2024-07-01" <= d <= "2026-03-31"])
 
 
-def test_range_and_stratified_samples_exclude_pilot_oos():
-    # April is a fixed pilot holdout. Range/random selection must never pull it into the
-    # outcome-bearing full-metric validator before #52 freezes G0-XV.
-    usable = ([f"2026-03-{d:02d}" for d in range(1, 29)]
+def test_range_cohort_and_stratified_samples_exclude_protected_oos():
+    # January and April are fixed holdouts. Range/cohort/random selection must never pull either into
+    # the outcome-bearing full-metric validator before its controlling gate freezes.
+    usable = ([f"2026-01-{d:02d}" for d in range(1, 29)]
+              + [f"2026-03-{d:02d}" for d in range(1, 29)]
               + [f"2026-04-{d:02d}" for d in range(1, 29)]
               + [f"2026-05-{d:02d}" for d in range(1, 6)])
-    args = vf.parse_args(["--start", "2026-03-01", "--end", "2026-05-05",
+    args = vf.parse_args(["--start", "2026-01-01", "--end", "2026-05-05",
                           "--sample-n", "20", "--seed", "7"])
     days, mode = vf.resolve_days(args, {"usable_days": usable})
     assert mode == "range_sample"
     assert days
-    assert not any(vf.is_pilot_oos_day(d) for d in days)
+    assert not any(vf.is_protected_oos_day(d) for d in days)
     sample = vf.stratified_sample_days(usable, 30, seed=7)
     assert sample
-    assert not any(vf.is_pilot_oos_day(d) for d in sample)
+    assert not any(vf.is_protected_oos_day(d) for d in sample)
 
 
 def test_stratified_sample_is_deterministic_and_spans_splits():
     usable = ([f"2024-{m:02d}-{d:02d}" for m in range(7, 13) for d in range(1, 28)]
               + [f"2026-01-{d:02d}" for d in range(1, 28)]
+              + [f"2026-03-{d:02d}" for d in range(1, 28)]
               + [f"2026-04-{d:02d}" for d in range(1, 28)])
     s1 = vf.stratified_sample_days(usable, 6, seed=7)
     s2 = vf.stratified_sample_days(usable, 6, seed=7)
@@ -234,22 +236,23 @@ def test_empty_selection_is_rejected(tmp_path):
     assert not out.exists()
 
 
-def test_live_pilot_oos_metrics_are_rejected_before_vendor_access(tmp_path):
-    # A dry-run may resolve/print an April plan because it reads no data. A live run would emit
+@pytest.mark.parametrize("day", ["2026-01-15", "2026-04-15"])
+def test_live_protected_oos_metrics_are_rejected_before_vendor_access(tmp_path, day):
+    # A dry-run may resolve/print a protected plan because it reads no data. A live run would emit
     # outcome-bearing price/size/notional/interarrival metrics, so it must fail before session/load
-    # creation until the future #48/#52-controlled holdout-consumption path exists.
+    # creation until the controlling holdout-consumption path exists.
     out = tmp_path / "reports"
-    dry = vf.parse_args(["--days", "2026-04-15", "--dry-run", "--out-dir", str(out),
+    dry = vf.parse_args(["--days", day, "--dry-run", "--out-dir", str(out),
                          "--calendar", str(tmp_path / "none.json")])
     assert vf.run(dry, load_fn=_raiser, session_factory=_raiser, used_data_fn=_raiser) == 0
     assert not out.exists()
 
-    live = vf.parse_args(["--days", "2026-04-15", "--out-dir", str(out),
+    live = vf.parse_args(["--days", day, "--out-dir", str(out),
                           "--calendar", str(tmp_path / "none.json")])
-    with pytest.raises(ValueError, match="pilot OOS.*full trade metrics"):
+    with pytest.raises(ValueError, match="protected OOS.*full trade metrics"):
         vf.run(live, load_fn=_raiser, session_factory=_raiser, used_data_fn=_raiser)
     assert not out.exists()
-    assert vf.main(["--days", "2026-04-15", "--calendar",
+    assert vf.main(["--days", day, "--calendar",
                     str(tmp_path / "none.json")]) == 2
 
 

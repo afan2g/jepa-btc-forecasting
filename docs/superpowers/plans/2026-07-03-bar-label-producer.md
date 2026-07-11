@@ -1121,10 +1121,10 @@ schema change.
   **#A (P2):** the label seam/guard mask must run over the **actual `[t_event, t_barrier]` span**
   (guard-extended, via `window_crosses_seam`), **not** `label_valid_mask(horizon_ns)` which masks
   the full `[t_event, t_event+horizon]` and over-drops early-resolving (TP/SL) 60 s rows for a
-  post-`t_barrier` seam — worsening the #5 horizon-survival risk (§C.3/§J); **#B (P3):** post-backfill
-  **threshold calibration uses real *Coinbase* volume** (the pre-E2.5 default clock's reference
-  stream), not Binance — Binance-volume calibration is scoped to the post-E2.5 Binance-clock path
-  (§split) — traced to `recon/stitch_policy.py:391-403`.
+  post-`t_barrier` seam — worsening the #5 horizon-survival risk (§C.3/§J); **#B (P3, historical
+  pre-G0-BN contract):** post-backfill Coinbase-mode threshold calibration used real *Coinbase*
+  volume. #66 supersedes that old global default: G0-BN uses Binance-perpetual volume directly,
+  while deferred Coinbase-targeted builds retain their local Coinbase clock (§A/Q2).
 - Review round 13 (Codex on `75ab2ae`) incorporated — 1 finding: **#13 (P1)** — `t_event` is a
   **monotone, cumulative watermark** `max(t_event(N−1), max(received_time) over members, cap_fire)`,
   **non-decreasing across bars**. Per-bar `max(received_time)` *alone* is not monotone: a delayed
