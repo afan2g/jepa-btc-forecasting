@@ -1343,8 +1343,8 @@ Other open items:
       local raw store → certified top-K L2 + normalized trades/funding/OI/liquidations,
       seed-source crossed-rate gate (>5% → `inconclusive`, no certified output), fail-closed
       publishing, resumable processed manifest; the Binance tick scales were measured by the
-      preregistered #64 tick-scale step (zero off-tick prices on every price-bearing feed,
-      2026-04-01) and registered in `_TICK_SCALE` (issue #71) — `--engine auto` selects native
+      preregistered #64 tick-scale step (zero off-tick prices across `book_delta_v2`/`trades`/
+      `book`, 2026-04-01) and registered in `_TICK_SCALE` (issue #71) — `--engine auto` selects native
       when the extension is built, Python stays the correctness oracle, and real-data
       native/Python conformance is still pending. Still open in the amended order: #64 bounded
       source certification; #68 minimal 92-day futures L2+trades acquisition; #67

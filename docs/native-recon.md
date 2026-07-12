@@ -76,7 +76,10 @@ registry lives in `recon/native.py::_TICK_SCALE`:
 | BINANCE         | BTC-USDT     | \$0.01  | 100         | #64 tick-scale step (issue #71)   |
 
 The Binance scales were measured by the preregistered #64 tick-scale step on Lake day `2026-04-01`
-(prereg commit `60a2b745`): **zero off-tick prices** across every price-bearing feed — perp
+(prereg commit `60a2b745`): **zero off-tick prices** across `book_delta_v2`, `trades`, and `book` —
+every feed the tick contract governs (only delta and `book`-seed prices are tick-keyed by the
+native replay; passthrough tables such as the perp `liquidations` prices are never tick-keyed and
+were not measured) — perp
 `book_delta_v2` 109,317,254 / `trades` 1,591,574 / `book` 30,724,880 prices, spot `book_delta_v2`
 33,892,363 / `trades` 1,024,789 / `book` 29,185,440 prices (report
 `data/reports/binance_source_quality/tick_scale.json`, `pass=true`, report_hash

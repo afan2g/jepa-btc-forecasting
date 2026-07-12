@@ -5,8 +5,8 @@ Synthetic only, no vendor access. Two halves:
 
   * **Engine resolution** (always runs): the Binance tick scales ARE registered in
     `recon/native.py::_TICK_SCALE` — perp $0.10 tick -> scale 10, spot $0.01 tick -> scale 100 —
-    measured by the #64 tick-scale step: ZERO off-tick prices across every price-bearing feed
-    (`book_delta_v2`/`trades`/`book`) on Lake day 2026-04-01 (report
+    measured by the #64 tick-scale step: ZERO off-tick prices across `book_delta_v2`/`trades`/
+    `book` — every feed the tick-keyed replay consumes — on Lake day 2026-04-01 (report
     `data/reports/binance_source_quality/tick_scale.json`, report_hash `d5025c58aa48…`, issue #71).
     So `--engine auto` selects native for exactly these pairs when the extension is importable and
     falls back to Python (with a note, never silently) when it is not; an explicit
