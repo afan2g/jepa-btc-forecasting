@@ -2,7 +2,14 @@
 
 **What this is.** Proposed replacement/added language for [`jepa_btc_forecasting_spec.md`](../jepa_btc_forecasting_spec.md), derived from [`docs/literature-review.md`](literature-review.md) (LR) and the [`docs/experiment-plan.md`](experiment-plan.md). Each item: a **CHANGE** summary, the **TEXT** to drop in (written in the spec's voice), and **Why + ref**. Items that reverse or modify a deliberate **Why:**-marked spec decision are marked **⚠ REVERSES A SPEC DECISION** and explain the reversal explicitly (per the spec's own governance rule).
 
-**How to apply.** Review; then I apply as edits to the spec. Nothing here is applied yet.
+**Status.** Historical literature-derived revision proposal. Many recommendations
+were incorporated separately, but this file is not an executable plan or current
+spec. The 2026-07-11 #66 amendment supersedes its Coinbase-first execution
+assumption: `G0-BN` tests Binance perpetual own-venue signal first, and the
+Coinbase/cross-venue recommendations below are conditional follow-ons.
+
+**How to apply.** Do not copy this document wholesale. Resolve each proposal
+against the current spec, experiment plan, and issue graph before opening work.
 
 ---
 

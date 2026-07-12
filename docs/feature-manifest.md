@@ -41,6 +41,30 @@ Required fields:
 | `generated_at` | ISO-8601 timestamp with explicit timezone. |
 | `max_lookback_ns` / `embargo_ns` | Longest feature look-back and CV embargo; `embargo_ns >= max_lookback_ns`. |
 
+## Staged Dataset Modes
+
+The 2026-07-11 Binance-first amendment does **not** change manifest version 1 or
+add an inferred mode field. Dataset capability is explicit in `dataset_id`,
+`venues`, `sources`, and especially `feature_cols`:
+
+- **`binance_single_venue` (`G0-BN`):** one `venues` entry for
+  `BINANCE_FUTURES/BTC-USDT-PERP` (role may be omitted because the same
+  instrument supplies features and targets); only certified Binance L2/trade
+  sources; Binance-specific labels and costs; no Coinbase, spot, auxiliary
+  derivatives, or other-asset feature columns.
+- **Conditional increment manifests:** add spot, derivatives state, Coinbase,
+  or another asset only through a new manifest/build. Never mutate the
+  `binance_single_venue` feature list or zero-fill an unavailable source.
+- **Matched ablations:** when an increment is tested, the base and augmented
+  manifests must share target rows, reserved columns, labels, costs, horizons,
+  splits, and source-independent row IDs. Only their explicit feature lists may
+  differ.
+
+`G0-BN` development and January OOS are physically/logically separate builds.
+The development manifest's complete guarded support ends before
+`2026-01-01T00:00:00Z`; the sealed OOS build is not opened before candidate,
+cost, threshold, and trial-ledger freeze.
+
 Optional: `extra_cols` (explicitly allowed diagnostics columns), `dtypes`
 (column → dtype expectations), `availability_lag_ns` (allowed `t_available -
 t_event`, default 0 = synchronous), `as_of_ns` (snapshot bound on

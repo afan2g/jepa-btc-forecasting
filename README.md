@@ -1,13 +1,15 @@
 # JEPA BTC Forecasting
 
-Research infrastructure for forecasting short-horizon Coinbase BTC-USD mid-price
-moves from cross-venue market structure, with Binance spot and perpetual markets
-as the primary signal sources.
+Research infrastructure for testing short-horizon BTC microstructure forecasts.
+The first project-defining gate uses one venue and one instrument: Binance
+BTC-USDT perpetual L2 book and trades predicting that instrument's own future
+mid-price returns.
 
 The project is testing a staged question: does a reproducible, cost-surviving
-signal exist, and if so, does causal forward JEPA pretraining improve on a strong
-supervised baseline? It is not a latency-arbitrage, order-routing, or production
-trading system.
+single-venue signal exist; do spot, derivatives-state, Coinbase/cross-exchange,
+or multi-asset inputs add incremental OOS value; and only then does causal
+forward JEPA pretraining improve on a strong supervised baseline? It is not a
+latency-arbitrage, order-routing, or production trading system.
 
 ## Current Status
 
@@ -28,17 +30,20 @@ the supervised signal gates to pass before deep or JEPA model work begins.
 
 ## Research Design
 
-- **Target:** Coinbase BTC-USD spot mid-price returns and triple-barrier labels at
-  fixed physical horizons.
-- **Primary signal:** Binance BTC-USDT perpetual market structure, with Binance
-  spot as a secondary source.
+- **First target and signal:** Binance BTC-USDT perpetual own-book/trade
+  microstructure predicting Binance future mid returns.
+- **First data scope:** `2025-11-01..2026-01-31`; November-December development,
+  January untouched OOS.
+- **Conditional increments:** Binance spot, derivatives state, Coinbase transfer
+  and cross-exchange context, then multi-asset signals. Each must beat the
+  preceding rung on identical target rows and costs.
 - **Input clock:** trade-driven notional bars with a wall-clock cap.
 - **Timing:** event-time reconstruction on a deterministic merged stream; labels
   use fixed physical time rather than a fixed number of bars.
 - **Evaluation:** purged and embargoed CPCV, explicit leakage checks, realistic
   costs, no-trade bands, DSR, PBO, and regime slices.
-- **Model sequence:** supervised baselines first; CF-JEPA only after the signal
-  and design gates justify the added complexity.
+- **Model sequence:** persistence/microprice/linear/LightGBM first; CF-JEPA only
+  after the single-venue signal and later increment gates justify complexity.
 
 The binding design rationale and timing rules live in the
 [implementation spec](jepa_btc_forecasting_spec.md).
@@ -46,7 +51,7 @@ The binding design rationale and timing rules live in the
 ## Pipeline
 
 ```text
-Crypto Lake / CoinAPI
+Crypto Lake / CryptoHFTData / CoinAPI
         |
         v
 ingest/ normalized, partitioned market data

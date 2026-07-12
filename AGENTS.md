@@ -5,8 +5,10 @@ file as the durable reviewer and repository-contract guidance.
 
 ## Project Architecture
 
-- The project forecasts short-horizon Coinbase BTC-USD mid moves using Binance
-  futures/spot market structure as the primary signal source.
+- The first project-defining gate forecasts Binance BTC-USDT perpetual mid
+  moves from that instrument's own L2 book and trades. Coinbase transfer,
+  cross-exchange features, Binance spot/derivatives state, multi-asset inputs,
+  and JEPA are conditional increments after the single-venue `G0-BN` gate.
 - Current source-of-truth planning docs:
   - `jepa_btc_forecasting_spec.md`: product and modeling spec.
   - `docs/data.md`: vendor, coverage, cost, and data-quality decisions.

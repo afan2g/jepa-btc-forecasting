@@ -1,18 +1,27 @@
 # G0 Evaluator (issue #52)
 
-Executable evaluation path for the staged G0 screens
-(`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md` §2–§3). It is the
-consumer of issue #37's producer partitions; everything here runs on the producer's
-hash-pinned contracts and synthetic fixtures — no vendor I/O anywhere in this layer.
-The per-manifest formal G1 path (`eval/runner.py`, `scripts/run_baseline.py`) is
-unchanged and remains the project-defining gate.
+Executable evaluation path for the original staged G0-CB/G0-XV screens. It is
+the consumer of issue #37's producer partitions; everything here runs on the
+producer's hash-pinned contracts and synthetic fixtures — no vendor I/O anywhere
+in this layer. The per-manifest formal G1 path (`eval/runner.py`,
+`scripts/run_baseline.py`) remains available as a later full-data confirmation.
+
+## 2026-07-11 G0-BN Amendment
+
+#66 makes Binance BTC-USDT perpetual single-venue `G0-BN` the first
+outcome-bearing gate. The code documented below does **not yet** implement that
+mode: #67 must add a source/date-generic development ledger and fixed-holdout
+path, Binance-specific costs, and the November-December development / January
+OOS partition without opening Coinbase. Existing G0-CB/G0-XV behavior and tests
+remain valid for deferred transfer/cross-venue work; do not relabel their output
+as G0-BN evidence.
 
 ## Modules
 
 | Module | Role |
 | --- | --- |
 | `eval/hashing.py` | One canonical hash encoding for every pinned object: JSON content hashes, matched-row content hashes (logical rows, not file bytes), CPCV split hashes. |
-| `eval/partition.py` | Partition-contract schema + hash; manifest↔contract binding via a `sources` entry (`{"name": "partition_contract", "sha256", "partition", "boundary_drop_counts"}` — v1 manifests already allow extra source keys, so G1 needed no migration); fail-closed span validation. The conservative prefilter `t_event + horizons[horizon] + guard_ns < holdout_start_ns` is checked independently of `t_barrier`, so an early-resolving barrier cannot bypass it; the symmetric rule at `holdout_end_ns` keeps April labels out of May. |
+| `eval/partition.py` | Partition-contract schema + hash; manifest↔contract binding via a `sources` entry (`{"name": "partition_contract", "sha256", "partition", "boundary_drop_counts"}` — v1 manifests already allow extra source keys, so G1 needed no migration); fail-closed span validation. The conservative prefilter `t_event + horizons[horizon] + guard_ns < holdout_start_ns` is checked independently of `t_barrier`, so an early-resolving barrier cannot bypass it; the symmetric rule at `holdout_end_ns` keeps labels from consuming the next partition (January→February for G0-BN; April→May for deferred G0-XV). |
 | `eval/ledger.py` | Deterministic trial ledger. Trial identity = (protocol, arm, dataset/build, **ordered** feature list, model config, horizon, variant + params). Identical re-runs are idempotent; the same identity with a different result fails closed. Order-independent ledger hash. |
 | `eval/g0.py` | `run_g0cb_study` (development-only; no holdout parameter exists; holdout-bound manifests rejected before data; every venue must declare `role: target` explicitly — omitted roles fail closed) and `run_g0xv_development` (ONE unified study over matched arms; reserved-row + split hashes must be identical across arms; DSR uses the complete effective trial count including imported G0-CB history; PBO runs over the common cross-arm candidate-PnL matrix — keeping exactly one naive benchmark column, since matched arms share bit-identical naive PnL — and fails closed when unavailable; the combined arm must beat the matched Coinbase-only control beyond a preregistered block-bootstrap noise band whose knobs are validated and whose degenerate small-sample case fails closed). Both paths run `validate_matrix` value-domain checks (non-negative costs, label domain, uniqueness range, finite inputs) before any fit. |
 | `eval/freeze.py` | Hash-pinned selection artifact built strictly from development evidence: winner/config, resolved gate rules, frozen trade-validation thresholds, exact holdout scope (explicit day list — ranges/globs/months rejected — that together with explicitly **reasoned exclusions** must cover the FULL contract holdout window: the holdout cannot be silently shortened), the contract's holdout window, source pins (contract, arm manifests, matched row/split hashes, **per-arm full-content matrix hashes** covering feature values), trial history (counts derived from the pinned ledger). Only a passing G0-XV study authorizes a freeze, and the winner plus every horizon verdict (PBO/noise-band values included) must reconcile against ledger-pinned evidence — an edited dev-result JSON cannot promote a failed-closed study. |
@@ -21,7 +30,7 @@ unchanged and remains the project-defining gate.
 | `scripts/run_g0.py` | Orchestrator CLI: `g0cb`, `g0xv-dev`, `freeze`, `holdout-open`, `holdout-validate`, `holdout-score`. G0-CB has no holdout arguments and fails on a holdout-bound manifest **before** the matrix file is opened; `g0xv-dev` requires the persisted G0-CB history (`--prior-ledger`, explicit `--no-prior-history` opt-out); trial ledgers persist attempted trials even when a run aborts; `holdout-validate` requires a strict JSON boolean verdict; holdout scoring refuses before any holdout read unless the transaction is in the right state and pre-flights the output path before the irreversible consumption step. |
 | `eval/synthetic.py` (`make_g0_world`, …) | Synthetic staged-pilot fixtures implementing the producer contracts: span-safe dev/holdout partitions with real per-horizon boundary-drop counts, and matched arm builds (identical reserved rows, differing `feature_cols`). |
 
-## Protocol flow
+## Deferred G0-CB/G0-XV Protocol Flow
 
 ```
 run_g0cb_study (dev only, every attempt → ledger)          # G0-CB, issue #47

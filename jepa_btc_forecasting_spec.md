@@ -1,19 +1,33 @@
-# JEPA BTC/Coinbase Forecasting — Implementation Spec
+# JEPA BTC Forecasting — Implementation Spec
 
 **Purpose.** This is a design + implementation handoff for a coding agent. It captures *what* to build, *why* each choice was made, and the failure modes we already reasoned through so you don't reintroduce them. Where a decision is deliberate, it's marked **Why:** — do not "optimize" those away without flagging.
 
-**Status.** Greenfield. Nothing built yet. Build order is in §12. Read §5 (clock) and §10 (validation) carefully — they contain the two most counterintuitive, project-defining decisions.
+**Status.** Active implementation. The Binance-first premise amendment adopted
+2026-07-11 supersedes older Coinbase-first sequencing in historical plans. Build
+order is in §12. Read §5 (clock) and §10 (validation) carefully.
 
 ---
 
 ## 1. Objective & scope
 
-- **Goal:** forecast the short-horizon (seconds → minutes) move of **Coinbase BTC-USD** mid price, using **Binance** (the leading, highest-information venue) as the primary signal source.
+- **First goal (`G0-BN`):** determine whether Binance **BTC-USDT perpetual** L2
+  book and trade flow predict that instrument's own 2 s / 10 s future mid returns
+  with stable OOS lift and positive net performance. Keep 60 s as a decay/control
+  horizon.
+- **Conditional goal:** only after `G0-BN` passes, test Binance spot/derivatives
+  state, Coinbase transfer and cross-exchange context, and multi-asset inputs as
+  incremental rungs. Coinbase is no longer a prerequisite for proving signal
+  existence.
 - **Output:** a normalized forward return (bps) and/or a triple-barrier label at a fixed physical horizon. Multiple horizons (e.g. 2s / 10s / 60s).
 - **Use:** a statistical directional / fair-value signal. **Not** an HFT latency play. The same fair-value estimate can feed a separate BRTI / Kalshi-BTC workflow.
 - **Explicitly out of scope:** sub-second latency arbitrage, co-location, order routing optimization, the execution/OMS layer (a thin paper-trading harness is enough for evaluation).
 
-**Why Binance→Coinbase and not Coinbase→Coinbase:** at seconds-to-minutes the venues are cointegrated and any mechanical lead-lag has already reconciled, so this is *not* a lead-lag arb. Binance matters because it's the deepest, highest-volume, most information-rich BTC venue (spot + perp + funding + liquidations); its order flow carries information about where BTC is going next, and Coinbase moves with BTC. We forecast the common asset's move via the best information source.
+**Why single-venue first:** additional sources can reduce OOS accuracy through
+noise, missingness, alignment error, domain shift, and extra researcher degrees
+of freedom. The cheapest falsifiable question is whether normalized own-book and
+trade flow contains any tradeable signal at all. A failed `G0-BN` stops broad
+Coinbase/cross-venue/multi-asset acquisition and JEPA work unless a separate pivot
+is reviewed. A pass establishes the fixed baseline every added source must beat.
 
 ---
 
@@ -31,8 +45,8 @@
 | Training | SSL-pretrain encoder → freeze → small heads | §9 |
 | First milestone | Supervised baseline (LightGBM) BEFORE any JEPA | §10, §12 |
 | Eval metric | Fees-included PnL w/ no-trade band, not accuracy | §10 |
-| Data: Binance | Crypto Lake `book_delta_v2` | §4 |
-| Data: Coinbase | Tardis or self-capture (Crypto Lake too gappy) | §4 |
+| First data scope | Binance BTC-USDT perpetual L2 + trades only | §4 |
+| Deferred data | Binance spot/state, Coinbase, other assets | §4, §10 |
 | Model size | ~5–15M params (start small) | §7 |
 
 ---
@@ -56,12 +70,21 @@ eval/         # supervised baseline, backtest harness, PnL/no-trade-band metrics
 ## 4. Data layer
 
 ### Venues & instruments
-- **Signal:** Binance `BTCUSDT` **perpetual** (primary) + Binance `BTCUSDT` spot (secondary). Perp leads price discovery; funding/basis/OI/liquidations are extra signal.
-- **Target:** Coinbase `BTC-USD` spot (the venue we label and trade).
+- **`G0-BN` signal and target:** Binance `BTCUSDT` perpetual. Inputs are L2
+  snapshots/deltas and trades; labels and costs are Binance-specific.
+- **Deferred increments:** Binance spot first; funding/OI/liquidations second;
+  Coinbase target/transfer and cross-exchange features third; other assets only
+  after those rungs prove incremental net OOS value.
 
 ### Vendor decision (verified against crypto-lake.com docs)
-- **Binance → Crypto Lake.** Use `book_delta_v2` (true incremental L2, 1000+ levels, with `sequence_number`), `trades`, `funding`, `open_interest`, `liquidations`. Binance/Binance-futures book history starts **2022-11-14** (≥3 yr available; covers the 12–24 mo window). Crypto Lake captures in **AWS Tokyo**, next to Binance's engine, so `received_time` is a tight proxy for exchange time. $64/mo individual plan, Parquet on S3 + Python API. **Why:** structurally equivalent to Tardis for Binance, much cheaper, well-located.
-- **Coinbase → Tardis.dev or self-capture.** Crypto Lake's Coinbase order book is only **~80% covered with large gaps** and isn't a first-class feed. For the venue we *label and trade against*, contiguous gaps fragment labels and bias regime coverage. Either buy Coinbase from Tardis (near-complete, history to 2019, exchange timestamps) or capture it live yourself off the free Coinbase Advanced Trade WS (`level2` + `market_trades`) going forward and backfill only what's needed from Tardis. **Mix vendors per venue** — don't pay all-Tardis for Binance data Crypto Lake already nails.
+- **Binance source is gated by #64.** Crypto Lake and CryptoHFTData are
+  candidates; downstream code consumes a normalized contract and must not assume
+  a vendor until bounded independent parity selects one. No 92-day pull starts
+  before that GO decision.
+- **Coinbase is deferred by #65.** The completed Crypto Lake quality map and
+  CoinAPI L3 tooling remain valid evidence/fallback infrastructure. Broad L3
+  spend is paused while cheap quote/L2 target alternatives are evaluated, and
+  only if `G0-BN` authorizes the cross-venue rung.
 
 ### Coinbase `level2` feed mechanics (for self-capture)
 - `level2` sends a `snapshot` then `update` messages; each update is `{price_level, new_quantity, side, event_time}`.
@@ -69,9 +92,16 @@ eval/         # supervised baseline, backtest harness, PnL/no-trade-band metrics
 - Log local receipt time alongside `event_time` to measure/feed-lag and to reconstruct on exchange time.
 
 ### History span & split
-- SSL pretrain: **12–24 months** (book dynamics are more stationary than alpha → more data helps the representation).
-- Head finetune: recent **3–6 months**.
-- Hold out a clean, contiguous, recent **~1 month** OOS, never touched; walk forward.
+- Bounded `G0-BN` acquisition: **2025-11-01 through 2026-01-31**.
+- Development/CPCV: **2025-11-01 through 2025-12-31**; every guarded support
+  interval must end before January.
+- Untouched fixed OOS: **2026-01-01 through 2026-01-31**; no outcome-bearing
+  load before complete configuration/trial-ledger freeze.
+- Conditional post-gate SSL pretrain: **12–24 months** (book dynamics are more
+  stationary than alpha → more data helps the representation).
+- Conditional head finetune: recent **3–6 months**.
+- Formal G1/JEPA work freezes a new clean, contiguous **~1 month** OOS outside
+  every earlier pilot holdout; never select it from model outcomes.
 - **Why not >2–3 yr:** BTC microstructure drifts (perp dominance, ETF flows, fee changes); stale data can hurt. Weight recent data; use the long span for SSL only.
 
 ### Storage
@@ -92,7 +122,8 @@ This is the most refined and most counterintuitive part. Read fully.
 Emit a bar each time cumulative **traded notional** crosses a threshold.
 - **Clock off the *trade* stream, never the book-update stream. Why:** book-update events are dominated by quote churn and spoofing — the exact uninformative noise JEPA is meant to discard. Trades are realized aggression; they carry information.
 - **Dollar, not volume. Why:** BTC ranges 2x+ across a training window; a fixed *volume* threshold carries very different information at $40k vs $100k. Dollar bars give the most homoscedastic, closest-to-Gaussian increments (subordination result), sample densely exactly when information arrives, and fight collapse (each bar = a roughly constant information quantum, so consecutive bars carry real change).
-- Drive off Binance-perp notional (or combined Binance+Coinbase notional). Snapshot **both** books at each trigger.
+- For `G0-BN`, drive only off Binance-perpetual notional and snapshot only that
+  certified book. Combined clocks are deferred cross-venue ablations.
 - Tune the threshold for **~1 bar per 0.5–2s** of normal activity.
 
 ### 5.2 Hybrid time cap
@@ -125,8 +156,10 @@ Each bar is a feature vector (the encoder ingests a sequence of these, not raw b
 - **Trade-flow composition (within the bar):** trade count, signed volume / CVD increment, aggressor imbalance, largest print, VWAP−mid, a couple of trade-size-distribution moments.
   - **Why this set specifically:** a single $500k sweep and 1,000 × $500 retail flickers have identical notional but opposite alpha. They only "look identical" if you under-feature the bar. With trade_count, largest_print, and aggressor imbalance the two become maximally separable. A JEPA encoder mapping different compositions to different latents is the encoder doing its job — this is signal, not instability.
 - **Intra-bar path:** realized variance within the bar, max adverse excursion. **Why:** a coarse bar can average away a sweep-then-refill into something that looks calm; path features recover that. (Also a reason to keep bars small.)
-- **Cross-venue:** the full book+flow set for **both** Binance and Coinbase, plus the **Binance−Coinbase mid spread**.
-- **Perp state:** funding rate, basis (perp−spot), OI change; optionally liquidation flags/intensity.
+- **Deferred cross-venue:** Coinbase/Binance book+flow and basis features enter
+  only after `G0-BN`, through explicit matched-row ablations.
+- **Deferred perp state:** funding, basis, OI, and liquidations are an increment,
+  not part of the first signal-existence gate.
 - **Time:** elapsed wall-clock duration of the bar, time-of-day encoding.
 
 ---
@@ -173,32 +206,48 @@ Each bar is a feature vector (the encoder ingests a sequence of these, not raw b
 ### 10.1 Supervised baseline FIRST (non-negotiable, milestone 0)
 Before any JEPA: build the bar pipeline + features, then fit a **dead-simple supervised baseline** — LightGBM or a small supervised transformer predicting forward return from the same features, with purged CV and a fees-included PnL metric.
 - **Why:** it confirms there's *any* signal at your horizon, sets the benchmark JEPA must beat, and shakes out the data/label/CV plumbing. **If the supervised baseline shows no edge, JEPA will not conjure one** — it adds representation quality + multi-horizon transfer on top of a real signal; it does not manufacture signal from noise.
-- **Stage the data spend:** follow [`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md). Run a development-only Coinbase preliminary screen, then a matched six-month Coinbase/Binance pilot before acquiring the remaining Binance archive. These are acquisition screens, not substitutes for the formal full-data G1. Weak Coinbase-own-book signal alone does not refute the primary Binance→Coinbase hypothesis. G0-CB never scores April: development rows whose guarded forward support reaches April are dropped before label reads. G0-XV selection uses one ledger across all arms/configs/horizons/variants and performs the first and only modeling evaluation of the physically separate April holdout. Three independent manifest runs are not valid evidence.
+- **Stage the data spend:** follow
+  [`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md).
+  Run `G0-BN` first on the bounded single-venue partition. Coinbase,
+  cross-exchange, multi-asset, full-archive, and JEPA work remain blocked on its
+  reviewed result. Every variant enters one trial ledger; January OOS is loaded
+  once after freeze.
 
 ### 10.2 Metric
 - **Fees-included PnL with a no-trade band:** act only when `|forecast| > cost + margin`. The round-trip fee defines a no-trade band around the forecast.
 - **Not** classification accuracy. **Why:** high forecasting power ≠ tradeable edge (the LOBFrame finding) — a model can nail next-tick direction and still not clear spread + fees + queue position.
-- Coinbase Advanced fee context (for the cost model): taker ranges from ~1.20% (base) down to ~0.05% only at very high volume; maker is much lower (→0% at top tiers). At realistic solo volume, a patient-maker or selective-taker stance is the only economic option; treat fees as the minimum-signal filter.
+- `G0-BN` uses a versioned, configurable Binance fee schedule plus observed
+  spread, explicit latency, and slippage. A gross-only result is not tradeable.
+  `PREDICTIVE_NOT_TRADEABLE` may justify only a separately reviewed
+  fair-value/maker pivot, not automatic data expansion.
 
 ---
 
 ## 11. Hardware & compute
 - **Training:** RTX 3070 (8GB) is sufficient for a 5–15M model on GB-scale features (use grad accumulation, bf16, modest context). A single SSL run is **hours → a couple days** on the 3070 depending on model size / window overlap / epochs. Rent a single 24GB GPU (A10G/L4/4090/A100, ~$0.3–2/hr) for sweeps. **No multi-GPU / A100 cluster needed** — that's for models 10–100x larger.
 - **Data pipeline:** the real wall-clock cost; CPU/IO-bound, parallel per (day, instrument), Rust.
-- **Inference:** trivial; CPU-fine at seconds-to-minutes (sub-ms to low-ms forward pass). Run the live loop (Binance ingest → features → forward → signal → Coinbase order) on one small box, no GPU.
+- **Inference:** trivial; CPU-fine at seconds-to-minutes. The first live-shaped
+  loop is Binance ingest → Binance features → signal; execution integration is
+  outside this research gate.
 - **Heads:** minutes to train.
 
 ---
 
 ## 12. Suggested build order
-1. **Ingest + staged archive:** verify bounded vendor samples and produce raw Parquet partitioned by (exchange, symbol, day). Complete the Coinbase pilot inputs first; acquire the predeclared six-month Binance pilot next; acquire the remaining 12–24-month Binance archive only after the cross-venue spend gate passes.
+1. **Ingest + bounded source gate:** complete #64, then acquire only Binance
+   BTC-USDT perpetual L2+trades for `2025-11-01..2026-01-31` through #68.
 2. **Event-time reconstruction (`recon`):** merge trades + book deltas on engine-time; produce a consistent book-state-at-T API + replay.
-3. **Notional-bar sampler + features (`bars`):** §5 clock (with time cap), §6 feature vector. Support explicit Coinbase-only and matched cross-venue datasets; never zero-fill an unavailable venue. Output model-ready tensors plus versioned feature manifests.
+3. **Notional-bar sampler + features (`bars`):** add explicit
+   `binance_single_venue` mode first; retain deferred Coinbase/cross-venue modes
+   without zero-filling unavailable sources.
 4. **Labels + purged/embargoed CV (`data`).**
-5. **Supervised baseline (`eval`):** run the Coinbase-only preliminary screen, then the matched six-month cross-venue acquisition gate. After approved full-data acquisition, run formal G1: LightGBM on explicit features → forward return; purged CV; fees-included PnL + no-trade band. **Gate: is there signal?**
+5. **Supervised baseline (`eval`):** run `G0-BN` with persistence,
+   microprice, penalized-linear OFI, and LightGBM on identical rows and costs.
+   Stop on FAIL; condition later source increments on PASS.
 6. **CF-JEPA pretraining (`model`/`train`):** §7. Sanity-check for collapse (monitor embedding variance / VICReg terms).
 7. **Heads + comparison:** does the SSL representation beat the supervised baseline **after costs**?
-8. **Walk-forward + (later) extensions:** MTS-JEPA multi-resolution, imbalance/run bars, richer cross-venue context.
+8. **Conditional extensions:** Binance spot/state, Coinbase transfer and
+   cross-venue context, multi-asset signals, then walk-forward/JEPA extensions.
 
 ---
 

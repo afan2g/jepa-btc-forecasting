@@ -1,244 +1,238 @@
 # Staged Signal Acquisition and Gate Protocol
 
-**Status:** adopted execution policy. This document changes acquisition order and
-experiment sequencing; it does not replace the reviewed downloader, reconstruction,
-bar/label, or baseline implementation plans.
+**Status:** adopted 2026-07-10 and **amended 2026-07-11 by #66**. The
+Binance-first amendment supersedes the former Coinbase-first execution order.
+Completed Coinbase quality, reconstruction, manifest, and executor work remains
+valid evidence and fallback infrastructure.
 
-**Tracks:** GitHub issue #46.
+**Tracks:** #46 (original policy), #66 (current amendment).
 
 **References:**
 
+- `jepa_btc_forecasting_spec.md`
 - `docs/experiment-plan.md`
 - `docs/data.md`
+- `docs/feature-manifest.md`
 - `docs/superpowers/plans/2026-07-03-bar-label-producer.md`
 - `docs/superpowers/plans/2026-07-02-binance-downloader-plan.md`
 - `docs/superpowers/plans/2026-06-22-lightgbm-baseline.md`
 
 ## 1. Decision
 
-Stage data spend and model evidence in this order:
+Stage evidence and data spend in this order:
 
-1. Complete the Coinbase quality/backfill gate for a predeclared pilot window.
-2. Build a pre-April Coinbase-only ModelMatrix and run a development-only preliminary
-   signal/economics screen (`G0-CB`).
-3. Acquire and reconstruct six months of Binance data.
-4. On one matched row universe, compare Coinbase-only, Binance-only, and combined
-   LightGBM arms (`G0-XV`).
-5. Acquire and reconstruct the remaining Binance archive only if `G0-XV` authorizes
-   the spend.
-6. Run the formal full-data G1 and later E2.3 analyses with a separate untouched
-   holdout.
+1. **Certify one Binance source (#64).** Use bounded existing/sample evidence to
+   select Crypto Lake, CryptoHFTData, or a documented fallback for Binance
+   BTC-USDT perpetual.
+2. **Implement single-venue modeling support (#67).** Add a source-neutral
+   `binance_single_venue` producer/evaluator mode.
+3. **Acquire only the bounded core dataset (#68).** Pull Binance BTC-USDT
+   perpetual L2 snapshots/deltas and trades for 92 days; no spot, auxiliary
+   derivatives, Coinbase, other assets, or broad archive.
+4. **Run `G0-BN` (#69).** Determine whether own-venue book/trade features predict
+   Binance future mid returns with stable OOS lift and positive net performance.
+5. **Expand one source at a time after PASS.** Test Binance spot, then
+   derivatives state, then Coinbase transfer/cross-venue data, then other
+   assets. Every rung must prove incremental OOS net-of-cost lift on fixed target
+   rows.
+6. **Acquire long history and build JEPA only after the cheap supervised gates.**
 
-The long-term data target remains 12-24 months. This protocol avoids committing the
-full Binance quota/storage budget before the cross-venue premise has bounded OOS
-evidence.
+The first gate is deliberately one exchange, one instrument, and one asset. More
+data sources are not assumed to help: they add missingness, alignment error,
+domain shift, and trial multiplicity. They must earn inclusion.
 
-## 2. Gate Semantics
+## 2. G0-BN Gate Semantics
 
-### G0-CB: Coinbase-only preliminary screen
+### 2.1 Hypothesis
 
-`G0-CB` validates target-venue data, labels, costs, CPCV, and the lower bound supplied
-by Coinbase's own book and trade flow. It uses the existing manifest-driven baseline
-ladder and a preregistered development gate block. Selection/CPCV uses only
-November-March rows whose complete guarded support stays before April. `G0-CB` must
-not load or score April features, labels, costs, or model outputs. Every candidate,
-configuration, horizon, threshold, and post-hoc variant it tries is persisted as trial
-history for the later #52 G0-XV ledger.
+Binance BTC-USDT perpetual L2 book and trade flow predict that instrument's own
+2 s / 10 s future mid returns with stable OOS lift over persistence and positive
+net performance after realistic Binance execution costs. The 60 s horizon is a
+fixed decay/control arm.
 
-- PASS: proceed to the six-month Binance pilot.
-- FAIL because the target data, label timing, cost model, or execution economics are
-  invalid: stop and repair or record a human-approved pivot before more data spend.
-- FAIL only because Coinbase-own-book predictivity is weak: this does **not** falsify
-  the Binance-to-Coinbase hypothesis. The default is a documented human decision on
-  whether to run the bounded Binance pilot, not an automatic project stop.
+Sub-second source events may be reconstructed causally, but a 100 ms forecast
+horizon is outside this project's non-HFT scope.
 
-`G0-CB` is not formal G1, has no fixed-holdout claim, and must not be reported as the
-project-defining gate.
+### 2.2 Inputs and baseline ladder
 
-### G0-XV: six-month cross-venue spend gate
+The first gate uses only:
 
-Build three arms over identical rows, labels, costs, horizons, CPCV splits, and regime
-tags:
+- Binance BTC-USDT perpetual L2 snapshots/deltas;
+- Binance BTC-USDT perpetual trades;
+- stationarized own-venue OFI, imbalance, microprice displacement,
+  spread/tick, trade-flow composition, event intensity, and short realized
+  volatility; and
+- persistence/no-change, microprice displacement, penalized linear OFI, and
+  LightGBM models.
 
-1. Coinbase-only features.
-2. Binance-only signal features, lagged to their observable decision time.
-3. Combined Coinbase and Binance features.
+Funding, open interest, liquidations, Binance spot, Coinbase, and other assets
+are excluded from the first gate even when files are readily available.
 
-The exact numerical gate and fixed-holdout blocks are frozen before the pilot OOS
-month is loaded by the evaluator. Authorization for the full Binance archive requires:
+### 2.3 Evaluation contract
 
-- at least one non-naive cross-venue arm to clear the existing net-of-cost G1-style
-  gate block (including DSR and PBO); and
-- the combined arm to beat the matched Coinbase-only control OOS net-of-cost by more
-  than its preregistered bootstrap noise band.
+- Reconstruct and feature on received-time-observable, deterministic event
+  streams. No future snapshot or source event may affect a decision.
+- Purge complete label spans and embargo at least the maximum label horizon and
+  feature lookback.
+- Freeze features, horizons, costs, latency, model configurations, thresholds,
+  exclusions, splits, and the complete candidate ledger before OOS loading.
+- Charge a versioned Binance fee schedule, observed spread, explicit latency,
+  slippage, turnover, and the no-trade band. Report gross and net side by side.
+- Report persistence lift, DSR, PBO, bootstrap uncertainty, turnover, and
+  spread/volatility regime slices. Accuracy alone cannot pass.
+- Every candidate/configuration/horizon/threshold/post-hoc variant enters one
+  immutable effective trial count and PBO study.
 
-Any post-hoc feature, horizon, cost, or threshold change is another trial and enters
-the DSR/PBO trial ledger. A no-verdict or unavailable PBO fails closed. A failed
-`G0-XV` blocks the full Binance pull until a documented stop or pivot decision.
+### 2.4 Outcomes
 
-The three arms are **not** three independent `run_from_manifest` studies. One G0-XV
-study ledger covers every registered `(arm, feature-manifest build, model config,
-horizon, variant)` candidate and carries forward every G0-CB trial as prior search
-history. DSR uses the complete effective trial count. PBO uses common development-OOS
-candidate-PnL matrices across the matched G0-XV arms/configurations before any arm or
-winner is selected. Only then does the frozen selection artifact control the first and
-only modeling evaluation of April on matched holdout rows. Per-arm significance cannot
-authorize the archive when the unified ledger fails.
+- **PASS / tradeable:** stable OOS persistence lift and positive preregistered
+  net evidence authorize the next incremental-data gate.
+- **PREDICTIVE_NOT_TRADEABLE:** stable predictive lift but no taker-cost edge.
+  Do not expand automatically; record a human decision for a separately scoped
+  fair-value or maker-execution experiment.
+- **FAIL:** no stable predictive lift. Stop Coinbase, cross-venue, multi-asset,
+  broad-archive, supervised-deep, and JEPA work unless a new pivot is reviewed.
+- **INCONCLUSIVE:** data, leakage, cost, PBO, or reproducibility failure. Repair
+  fail-closed without selecting a replacement OOS from observed outcomes.
 
-`G0-XV` is an acquisition screen, not final E2.3. Six post-ETF months cannot satisfy
-E2.3's pre/post-ETF comparison.
+G0-BN is a bounded acquisition/signal screen, not the later full-data formal G1.
+Formal G1 may confirm and expand only a premise that G0-BN has already passed.
 
-### Formal G1 and E2.3
-
-Formal G1 remains the project hard stop defined in `docs/experiment-plan.md`. It runs
-only after the approved full-data inputs and a separately frozen final holdout exist.
-The pilot OOS month is model-selection evidence and may not be reused as that holdout.
-
-E2.3 still requires the Coinbase-only, Binance-only, and combined ablation on the
-full approved coverage. Its pre/post-ETF claim remains blocked unless certified
-Coinbase target data extends to both regimes; additional Binance history alone does
-not satisfy that requirement.
-
-### Executable evaluator prerequisite
-
-The current `eval.runner.run_from_manifest`/`eval.study.run_study` path performs CPCV
-over every supplied row and accepts one feature list at a time. It therefore cannot
-implement either fixed April scoring or the unified multi-arm ledger above. Issue #52
-must land before G0-CB/G0-XV execution. Its minimum contract is:
-
-- a development-only G0-CB mode that cannot accept a holdout input and persists every
-  attempted candidate/variant;
-- physically/logically separate G0-XV development and holdout inputs;
-- development-only CPCV, threshold/config/feature selection, DSR, and PBO;
-- a deterministic G0-XV candidate ledger spanning arms, models, horizons, and variants,
-  with the G0-CB trial history included in the effective trial count;
-- a hash-pinned winner/config/split/source artifact produced before holdout loading;
-- fit on pre-April matched data only, followed by the first and only April modeling
-  score; and
-- outputs that keep the G0-CB development diagnosis, G0-XV development evidence, and
-  G0-XV fixed-holdout evidence separate and cannot feed April results back into
-  selection.
-
-## 3. Frozen Pilot Window
+## 3. Frozen G0-BN Window
 
 | Use | Inclusive dates | Treatment |
 |---|---|---|
-| Six-month pilot | `2025-11-01` through `2026-04-30` | Six complete calendar months; all pilot vendor acquisition is bounded to this range. |
-| Development/CPCV | `2025-11-01` through `2026-03-31` | Training, CPCV, calibration, and registered trials; only rows whose complete guarded support stays before April. |
-| Pilot OOS | `2026-04-01` through `2026-04-30` | No outcome-bearing access in G0-CB; after complete freeze, one G0-XV workflow runs fixed data validation and one model score, then the month is consumed. |
+| Bounded acquisition | `2025-11-01` through `2026-01-31` | 92 days; Binance perpetual L2+trades only. |
+| Development/CPCV | `2025-11-01` through `2025-12-31` | 61 days; tuning, CPCV, calibration, and complete trial capture. |
+| Fixed OOS | `2026-01-01` through `2026-01-31` | 31 days; physically/logically sealed until complete freeze. |
 
-These are **support-span partitions**, not filters on `t_event`'s calendar date. Let
-`holdout_start_ns` be `2026-04-01T00:00:00Z` and `guard_ns` be the consumed stitch
-policy's guard. Before any forward label path or adjacent-day source is read, the
-producer drops each development candidate unless
-`t_event + horizons[horizon] + guard_ns < holdout_start_ns`. After construction it
-also asserts that the actual guarded feature, cost, and label windows do not intersect
-April, including `t_barrier + guard_ns < holdout_start_ns`. A development build must
-never open April merely to decide that a boundary row should be dropped. The April
-holdout applies the symmetric future-boundary rule at `2026-05-01T00:00:00Z`, so its
-labels do not silently consume May.
+These are support-span partitions, not filters on `t_event`. Before any adjacent
+source or label path is opened, a development candidate is dropped unless its
+complete guarded feature, cost, and label support ends before
+`2026-01-01T00:00:00Z`. January applies the symmetric future-boundary rule at
+`2026-02-01T00:00:00Z`, so labels cannot silently consume February.
 
-The producer records the partition bounds, horizon map, guard, prefilter rule, and
-per-horizon boundary-drop counts in a hash-pinned partition-contract source artifact.
-The artifact hash enters each dataset/build ID and is validated by #52 before CPCV,
-fit, or score.
+The producer records bounds, horizon map, guard, prefilter rule, source hashes,
+and per-horizon drop counts in a hash-pinned partition artifact. The artifact
+enters every dataset/build ID and is validated before CPCV, fit, or score.
 
-The existing `2026-04-01` Binance Stage-1 smoke is inside the pilot window. Coverage
-gaps remain explicit exclusions; neither producer nor evaluator may silently shorten
-the date range to improve results.
+The existing `2026-04-01` Binance smoke is integrity evidence only and is not a
+G0-BN modeling partition. April remains frozen for the deferred cross-venue
+workflow. G0-BN must not open April features, labels, costs, forecasts, PnL,
+trade distributions, or model results.
 
-For this protocol, **touching the OOS** means accessing outcome-bearing derived data in
-a way that can influence feature/label/threshold/model selection or reporting: bar or
-feature distributions, labels, costs, forecasts, PnL, model metrics, manual price-path
-analysis, or equivalent summaries. Outcome-blind operations are permitted and logged:
-vendor transfer, path/size/footer/schema/hash/row-count checks, coverage routing, and
-deterministic reconstruction certification whose thresholds were already fixed. They
-must not emit or inspect modeling outcomes. The completed `2026-04-01` Stage-1 smoke
-performed only these permitted integrity checks, so it did not consume the pilot OOS.
-The full `ingest/validate_trade_feeds.py` report is **not** an integrity-only check: its
-price, size, notional, interarrival, lag, and side summaries are outcome-bearing. Its
-generic live CLI therefore rejects April before vendor access. After #52's freeze, #48
-may consume April once through a separate hash-pinned exact-scope path with fixed
-thresholds; any validation failure makes the gate blocking/inconclusive and cannot
-justify retuning, selective exclusions, or replacing the holdout.
+## 4. Conditional Increment Ladder
 
-The formal G1 holdout must:
+After G0-BN PASS, add at most one capability per reviewed gate:
 
-- be outside the pilot window;
-- be selected from the certified all-feed calendar using coverage only, never model
-  outcomes;
-- be frozen and hash-pinned before any full-data tuning or G1 run; and
-- remain untouched until the preregistered full-data configuration is final.
+1. **Binance spot increment:** same exchange and asset, separate instrument;
+   test incremental lift over the fixed perpetual-only champion.
+2. **Perpetual-state increment:** funding, OI, liquidations, and basis; test
+   beyond core book/trade flow rather than bundling them into the base model.
+3. **Coinbase transfer/cross-venue increment:** #65 selects an affordable,
+   certified Coinbase target/control contract. #34 acquires only that approved
+   scope; #47/#48 run revised matched controls.
+4. **Multi-asset increment:** ETH/SOL/etc. only after same-asset increments pass.
+5. **Full history/formal G1:** acquire/reconstruct the approved longer span and
+   freeze a new coverage-selected holdout outside all pilot OOS periods.
+6. **Supervised deep and JEPA:** proceed only after the supervised signal and
+   design gates justify complexity.
 
-## 4. Dataset and Manifest Contract
+Every increment compares base and augmented models on identical target rows,
+labels, costs, horizons, and splits. A source cannot win by changing coverage or
+dropping difficult periods. Missing source data is an explicit exclusion in the
+matched experiment, never a sentinel or zero-filled feature.
 
-The producer emits explicit, versioned datasets rather than zero-filling unavailable
-venue features:
+The former Coinbase-first `G0-CB`/`G0-XV` protocol is deferred, not silently
+executed. If #65 selects an L1-only target feed, the own-book control and matched
+arm contract must be reviewed before #47/#48; old multi-level wording cannot be
+claimed unchanged. April's one-time holdout transaction remains governed by
+#48/#52 if that rung is eventually authorized.
 
-- `coinbase_only_pilot_dev`: span-contained November-March Coinbase clock, book, trade, labels, and
-  costs for G0-CB; the manifest lists only Coinbase in `venues` and only Coinbase
-  features in `feature_cols`. Its guarded future support ends before April, and it has
-  no April companion consumed by G0-CB.
-- `cross_venue_pilot`: common matched rows with certified Coinbase and Binance
-  coverage and separate development/April partitions. It supports three explicit
-  manifests (Coinbase-only control, Binance-only, combined) whose feature lists differ
-  but whose reserved columns, labels, costs, row IDs, horizons, and splits are
-  identical within each partition.
-- `full_cross_venue`: produced only after the archive gate passes.
+## 5. Dataset and Manifest Contract
 
-Every manifest pins source manifests/hashes, usable-calendar hash, stitch policy,
-window, exclusions, bar-clock schedule, feature order, gate block, and build ID.
-Missing Binance data is an exclusion in cross-venue mode, not a column of zeros.
-G0-XV additionally pins the #52 candidate-ledger, imported G0-CB trial-history, and
-frozen-selection artifact hashes.
+The producer emits explicit builds:
 
-## 5. Acquisition and Resource Gates
+- `binance_single_venue_g0bn_dev`: November-December Binance-perpetual features,
+  Binance labels/costs, and no January or optional-source access.
+- `binance_single_venue_g0bn_oos`: sealed January build opened only by the
+  frozen G0-BN selection artifact.
+- conditional increment builds: matched-row base and augmented manifests whose
+  feature lists differ but whose row IDs, reserved columns, labels, costs,
+  horizons, and splits are identical.
+- full-data builds: produced only after the preceding acquisition gate passes.
 
-The six-month Binance pilot contains 181 days. The downloader plan's conservative
-estimate is approximately `181 * 1.23 GB = 222.63 GB`. The completed `2026-04-01`
-smoke measured `687,215,789` bytes, which extrapolates to about 124.4 decimal GB, but
-one day is not a quota guarantee.
+Manifest v1 remains sufficient. `binance_single_venue` uses one venue entry
+without a role because the same instrument supplies features and targets.
+`dataset_id`, `build_id`, `venues`, `sources`, and explicit `feature_cols` encode
+capability; training never infers columns from a frame.
 
-- Plan with the conservative estimate; reconcile actual manifest bytes after each
-  batch.
-- Keep the operational target at no more than 250 GB per quota window even though
-  the vendor's 300 GB figure is a soft limit.
-- At the recorded 156.25 GB usage snapshot, do not launch the entire pilot as one
-  batch. Generate deterministic resumable tranches and re-check usage/disk first.
-- Coinbase CoinAPI downloads are likewise staged, but the current contiguous-range,
-  book-only `ingest/download_coinapi.py` is not a safe manifest executor. Issue #53
-  must add a reviewed-manifest planner/executor for exact book and trade fill units.
-  It derives a hash-pinned pilot-window subset without recomputing policy, downloads
-  no intervening non-fill day, and preserves partial-fill stitch metadata even when
-  the vendor charges/transfers a whole daily file. Remaining full-window fills stay
-  deferred until the pilot decisions authorize them.
-- No data runner may infer scope from a directory glob. It consumes reviewed,
-  hash-pinned manifests and preserves exclusions.
+Every manifest pins raw/processed source manifests and hashes, window,
+exclusions, clock schedule, feature order, horizons, cost/gate block, partition
+artifact, candidate ledger where applicable, and build ID.
 
-## 6. Issue and Merge Boundaries
+## 6. Acquisition and Resource Gates
 
-- Coinbase quality-map resolution remains in #33.
-- Coinbase backfill #34 gains pilot-first and deferred-remainder milestones.
-- Binance Stage-1 #35 and Stage-2 #36 close on the six-month pilot deliverables.
-- Bar/label issue #37 owns both producer modes and matched-arm manifests.
-- Issue #38 remains formal full-data G1.
-- Issue #47 tracks `G0-CB`; #48 tracks `G0-XV`; #49 tracks remaining Binance
-  acquisition; #50 tracks full production reconstruction.
-- Issue #52 tracks the development-only G0-CB and fixed-holdout/unified-ledger G0-XV
-  evaluator; #53 tracks exact reviewed-manifest CoinAPI execution.
+#64 must select the Binance source before #68 plans the 92-day pull. #68 then:
 
-Operational downloads and generated reports remain untracked. Any code or durable-doc
-change discovered by a pilot run uses its own issue, branch, review, and PR.
+- enumerates exact source/product/day-or-hour units;
+- records conservative and measured bytes, disk, quota, and runtime;
+- obtains explicit human approval before vendor I/O;
+- downloads atomically and resumably without opportunistic extra feeds;
+- preserves source identity and forbids silent cross-vendor fallback;
+- reconstructs day-by-day and publishes only certified outputs; and
+- seals January outcome-bearing products until G0-BN freeze.
 
-## 7. Stop Conditions
+The completed nine-unit `2026-04-01` smoke measured ~0.687 decimal GB. Scaling
+that observation over 92 days gives ~63.2 GB, but a single day is **not** an
+upper bound, quota guarantee, or approval estimate. The current Crypto Lake
+required-feed constants instead sum to `0.7788 GB/day`, or **~71.65 GB for 92
+days**; that value is also provisional because some per-feed constants are
+derived and #64 may select another source. It is **not** the current batch
+planner's output: `scripts/plan_lake_binance_batches.py` still budgets `1.2278
+GB/day`, selects both perpetual and spot, and omits `--feeds` (therefore all valid
+feeds). #68 must not use that full-archive planner as-is. It must replace both
+projections with the selected source's exact minimal-feed manifest (or a
+separately reviewed scoped planner) before approval and retain explicit quota
+headroom.
 
-Do not start the remaining Binance archive when any of these holds:
+Broad Coinbase L3, the former 181-day nine-unit Binance pilot, multi-asset data,
+and 12–24-month history remain blocked. A GO decision selects a source or next
+experiment; it is never bulk-transfer authorization by itself.
 
-- `G0-XV` is FAIL, blocking, or inconclusive;
-- pilot source coverage or reconstruction is uncertified;
-- the three arms do not share identical rows/splits/labels/costs;
-- any development row's guarded feature, cost, or label support intersects April;
-- the pilot OOS had prohibited outcome-bearing access before manifests, candidates,
-  splits, and trials were frozen;
-- quota, disk, or spend approval is missing; or
-- a policy deviation has not been recorded on the owning issue.
+## 7. Issue and Merge Boundaries
+
+- #64: bounded Binance source-quality decision; may continue under this amended
+  premise without reopening completed Coinbase work.
+- #66: premise/docs/issues/roadmap amendment.
+- #67: `binance_single_venue` producer and evaluator support; subissue of #37.
+- #68: bounded 92-day Binance-perpetual acquisition and certification.
+- #69: decision-bearing G0-BN execution.
+- #65/#34/#47: deferred Coinbase target-data and Coinbase-only work, blocked on
+  G0-BN PASS.
+- #35/#36/#48: deferred six-month cross-venue acquisition/reconstruction/gate,
+  blocked on G0-BN PASS and the revised Coinbase contract.
+- #49/#50/#38: remaining archive, reconstruction, and formal G1, blocked on all
+  preceding gates.
+
+Operational downloads and generated reports remain untracked. Code or durable
+docs use one issue, one Conventional Branch worktree, review, and human merge.
+Expensive tests, reconstruction, and data jobs serialize on
+`/tmp/jepa-expensive-compute.lock`.
+
+## 8. Stop Conditions
+
+Do not start the next source or archive when any of these holds:
+
+- #64 has not certified a Binance source;
+- #67 has not proven causal source isolation and fixed-OOS behavior;
+- #68 manifests are incomplete, stale, degraded, or unsealed incorrectly;
+- G0-BN is FAIL, INCONCLUSIVE, or lacks a reviewed decision;
+- G0-BN is PREDICTIVE_NOT_TRADEABLE without an approved fair-value/maker pivot;
+- an increment changes target rows, costs, horizons, or splits instead of
+  measuring incremental features;
+- OOS outcomes influenced source, feature, threshold, cost, model, or exclusion
+  selection;
+- trial counts, DSR, or PBO do not reconcile;
+- vendor, quota, disk, byte, or spend approval is missing; or
+- a policy deviation has not been recorded on its owning issue.
