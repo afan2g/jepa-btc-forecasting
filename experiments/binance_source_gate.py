@@ -783,13 +783,19 @@ def frozen_metrics(frame: pd.DataFrame, *, min_run_samples: int = 60) -> dict:
             "stale_but_uncrossed_fraction": float((frozen_mask & valid).mean())}
 
 
-DETERMINISM_EXCLUDED_KEYS = ("secs", "ts")
+# Volatile keys excluded from the cross-run comparison: {secs, ts} are wall-clock; {engine,
+# price_scale} differ BY DESIGN under the 2026-07-12 cross-engine protocol amendment (run 1
+# = python oracle, run 2 = native at the measured scale) — every SEMANTIC field (rows,
+# sha256, classification, reasons, quality metrics, seed blocks, engine_time_col,
+# dropped_rows) must still be exactly equal, which is full-day cross-engine conformance.
+DETERMINISM_EXCLUDED_KEYS = ("secs", "ts", "engine", "price_scale")
 
 
 def compare_stage2_manifests(path_a: str, path_b: str) -> dict:
-    """Cross-run determinism comparator for two Stage-2 processed manifests (preregistered
-    determinism.stage2_cli): per-unit records keyed by (output, exchange, symbol, dt) must be
-    equal excluding volatile keys {secs, ts}. Returns {'equal': bool, 'diffs': [...]}."""
+    """Cross-run determinism/conformance comparator for two Stage-2 processed manifests
+    (preregistered determinism.stage2_cli + the 2026-07-12 amendment): per-unit records
+    keyed by (output, exchange, symbol, dt) must be equal excluding
+    DETERMINISM_EXCLUDED_KEYS. Returns {'equal': bool, 'diffs': [...]}."""
     def load(path: str) -> dict:
         recs = {}
         with open(path) as f:

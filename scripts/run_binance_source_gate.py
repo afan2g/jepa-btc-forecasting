@@ -7,9 +7,11 @@ Subcommands (all offline, reading only local files, except `fetch`):
                       2026-04-01 raw units against the preregistered Stage-1 pin.
   tick-scale          preregistered tick measurement over delta/book/trade price columns.
   silence             delta-stream inter-event gap metrics (book_delta_v2).
-  replay-conformance  in-process Python replay x2 (frame-hash determinism), frozen-book
-                      metrics, and the Python/native conformance arm at the measured scale.
-  stage2-compare      cross-run determinism comparison of two Stage-2 processed manifests.
+  replay-conformance  in-process replay x2 (frame-hash determinism; --engine python|native),
+                      frozen-book metrics, and (python mode) the native conformance arm.
+  stage2-native-run   production Stage-2 unit processing with an explicit native-engine
+                      override at the measured scales (2026-07-12 amendment).
+  stage2-compare      cross-run/cross-engine comparison of two Stage-2 processed manifests.
   verdict             aggregate the preregistered certified/degraded/inconclusive verdict.
   decide              machine-enforced final_source_decision routing (fail-closed).
   chd-validate        validate one local CryptoHFTData hourly object (no network).
@@ -254,15 +256,28 @@ def cmd_replay_conformance(args) -> int:
     pre = rbr.preclassify_snapshots(snaps, policy)
     grid = rbr.build_grid(dt.date.fromisoformat(day), 1000)
 
+    if args.engine == "native":
+        # 2026-07-12 amendment: the in-process determinism arm runs the NATIVE engine
+        # twice; the full-day cross-engine (oracle) equality is carried by stage2-compare.
+        if not rnative.native_available() or not args.scale:
+            print("ERROR: --engine native needs the recon_native extension and --scale",
+                  file=sys.stderr)
+            return SETUP_ERROR_EXIT
+        def _run():
+            return rnative.reconstruct_lake_l2_at_samples_seeded_native(
+                cleaned[0], grid, k=10, engine_time_col=col, price_scale=int(args.scale),
+                snapshots=snaps, policy=policy, frame_out=True)
+    else:
+        def _run():
+            return reconstruct_lake_l2_at_samples_seeded(
+                cleaned[0], grid, k=10, engine_time_col=col, snapshots=snaps,
+                policy=policy, frame_out=True)
+
     t0 = time.monotonic()
-    frame1, meta1 = reconstruct_lake_l2_at_samples_seeded(
-        cleaned[0], grid, k=10, engine_time_col=col, snapshots=snaps, policy=policy,
-        frame_out=True)
+    frame1, meta1 = _run()
     t_py1 = time.monotonic() - t0
     t0 = time.monotonic()
-    frame2, meta2 = reconstruct_lake_l2_at_samples_seeded(
-        cleaned[0], grid, k=10, engine_time_col=col, snapshots=snaps, policy=policy,
-        frame_out=True)
+    frame2, meta2 = _run()
     t_py2 = time.monotonic() - t0
 
     h1, h2 = bsg.frame_replay_hash(frame1), bsg.frame_replay_hash(frame2)
@@ -275,8 +290,11 @@ def cmd_replay_conformance(args) -> int:
     cls, reasons, frac = rbr.classify_replay(meta1, rbr.Thresholds())
 
     conformance: dict = {"ran": False, "native_available": rnative.native_available(),
-                         "price_scale": args.scale}
-    if rnative.native_available() and args.scale:
+                         "price_scale": args.scale, "engine": args.engine}
+    if args.engine == "native":
+        conformance["note"] = ("cross-engine full-day equality vs the Python-oracle run "
+                               "is carried by stage2-compare (2026-07-12 amendment)")
+    if args.engine == "python" and rnative.native_available() and args.scale:
         t0 = time.monotonic()
         nat_frame, nat_meta = rnative.reconstruct_lake_l2_at_samples_seeded_native(
             cleaned[0], grid, k=10, engine_time_col=col, price_scale=int(args.scale),
@@ -306,7 +324,7 @@ def cmd_replay_conformance(args) -> int:
     ok = determinism_ok and conformance_ok and not frozen_fired
     report = {
         "step": "replay-conformance", "prereg_commit": _prereg_commit(), "day": day,
-        "instrument": args.instrument, "engine_time_col": col,
+        "instrument": args.instrument, "engine": args.engine, "engine_time_col": col,
         "engine_time_fallback": bool(fallback),
         "dropped_rows": {"book_delta_v2": dropped[0], "book": dropped[1]},
         "src_rows": int(len(delta_df)), "book_rows": int(len(book_df)),
@@ -315,7 +333,7 @@ def cmd_replay_conformance(args) -> int:
         "replay_meta": _slim_meta(meta1),
         "frame_replay_hash": h1, "frame_replay_hash_run2": h2,
         "harness_determinism_ok": bool(determinism_ok),
-        "python_secs": [round(t_py1, 3), round(t_py2, 3)],
+        "replay_secs": [round(t_py1, 3), round(t_py2, 3)],
         "frozen": {**frozen, "frozen_fraction_max": frozen_cap,
                    "frozen_cap_fired": bool(frozen_fired)},
         "conformance": conformance, "conformance_ok": bool(conformance_ok),
@@ -327,6 +345,72 @@ def cmd_replay_conformance(args) -> int:
           f"conformance={'OK' if conformance_ok else ('SKIP' if not conformance['ran'] else 'FAIL')} "
           f"frozen_cap={'FIRED' if frozen_fired else 'ok'}")
     return 0 if ok else FAIL_EXIT
+
+
+# ----------------------------------------------------------------------------- stage2-native-run
+def cmd_stage2_native_run(args) -> int:
+    """Stage-2 production unit processing with an EXPLICIT native-engine override at the
+    measured tick scales (2026-07-12 amendment): reuses run_binance_recon's RunConfig /
+    plan_units / unit_is_done / process_unit VERBATIM — only resolve_engine's registry
+    lookup is bypassed, because no Binance tick scale is registered in recon/native.py
+    (that registration remains a separate reviewed change). Trust in the native output
+    comes from full-day cross-engine equality with the Python-oracle run
+    (stage2-compare), which is a hard invalidator when violated."""
+    import datetime as dt
+    import importlib.util
+    from threading import Lock
+    from ingest import lake_binance as lb
+    from recon import native as rnative
+    from recon.reseed import ReseedPolicy
+
+    if not rnative.native_available():
+        print(f"ERROR: recon_native unavailable ({rnative.native_import_error()!r})",
+              file=sys.stderr)
+        return SETUP_ERROR_EXIT
+    spec = importlib.util.spec_from_file_location(
+        "run_binance_recon_for_native_run", str(ROOT / "scripts" / "run_binance_recon.py"))
+    rbr = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = rbr
+    spec.loader.exec_module(rbr)
+
+    prereg = bsg.load_preregistration(args.prereg)
+    day = prereg["fixture"]["lake"]["day"]
+    engine_by_key = {"binance-perp": ("native", int(args.perp_scale)),
+                     "binance-spot": ("native", int(args.spot_scale))}
+    cfg = rbr.RunConfig(
+        raw_root=args.raw, out_root=args.out_root, manifest_root=args.out_root,
+        overwrite=False, k=10, grid_ms=1000, book_stride_ms=1000,
+        policy=ReseedPolicy(enabled=True, min_levels_per_side=5,
+                            reseed_after_crossed_s=2.0, max_spread_frac=None),
+        thresholds=rbr.Thresholds(), engine_by_key=engine_by_key)
+    units = rbr.plan_units(list(engine_by_key), None, [day])
+    lb.cleanup_tmp(cfg.out_root)
+    state = rbr.processed_state(cfg.manifest_root)
+    pending = [u for u in units if not rbr.unit_is_done(u, cfg, state)]
+
+    counts = {"ok": 0, "skip": len(units) - len(pending), "missing": 0,
+              "missing_required": 0, "inconclusive": 0, "degraded": 0, "error": 0}
+    per_unit = []
+    lock = Lock()
+    for u in pending:
+        res = rbr.process_unit(u, cfg, lock)
+        counts[res.status] = counts.get(res.status, 0) + 1
+        if res.status == "missing" and rbr.feed_miss_is_fatal(u.feed):
+            counts["missing_required"] += 1
+        per_unit.append({"output": u.output, "symbol": u.symbol, "status": res.status,
+                         "rows": res.rows})
+        print(f"{u.day}  {u.output:<14} {res.status:<12} rows={res.rows:,}")
+
+    report = {"step": "stage2-native-run", "prereg_commit": _prereg_commit(), "day": day,
+              "engine_by_key": {k: list(v) for k, v in engine_by_key.items()},
+              "raw": args.raw, "out": args.out_root, "counts": counts,
+              "per_unit": per_unit,
+              "note": "production process_unit path, explicit native override; validity "
+                      "gated by stage2-compare cross-engine equality"}
+    _write_report(args.out, "stage2_native_run.json", report)
+    if counts["error"] or counts["missing_required"]:
+        return FAIL_EXIT
+    return 0
 
 
 # ----------------------------------------------------------------------------- stage2-compare
@@ -825,10 +909,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = sub.add_parser("replay-conformance"); common(p)
     p.add_argument("--raw", required=True)
     p.add_argument("--instrument", required=True, choices=("binance-perp", "binance-spot"))
+    p.add_argument("--engine", choices=("python", "native"), default="python",
+                   help="in-process replay engine (native per the 2026-07-12 amendment; "
+                        "cross-engine equality is then carried by stage2-compare)")
     p.add_argument("--scale", type=int, default=None,
-                   help="conformance price scale (from tick-scale report); omit to skip native")
+                   help="price scale (from tick-scale report); required for native")
     p.add_argument("--frame-out", default=None,
-                   help="optional parquet path for the Python top-K frame (ignored store)")
+                   help="optional parquet path for the replayed top-K frame (ignored store)")
+
+    p = sub.add_parser("stage2-native-run"); common(p)
+    p.add_argument("--raw", required=True)
+    p.add_argument("--out-root", required=True,
+                   help="processed-store root for the native run (ignored path)")
+    p.add_argument("--perp-scale", type=int, required=True)
+    p.add_argument("--spot-scale", type=int, required=True)
 
     p = sub.add_parser("stage2-compare"); common(p)
     p.add_argument("--run1", required=True, help="run1 _manifest.jsonl path")
@@ -892,6 +986,7 @@ COMMANDS = {
     "tick-scale": cmd_tick_scale,
     "silence": cmd_silence,
     "replay-conformance": cmd_replay_conformance,
+    "stage2-native-run": cmd_stage2_native_run,
     "stage2-compare": cmd_stage2_compare,
     "verdict": cmd_verdict,
     "decide": cmd_decide,

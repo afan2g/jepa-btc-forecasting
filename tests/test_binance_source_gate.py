@@ -25,6 +25,10 @@ sys.path.insert(0, str(ROOT))
 
 from experiments import binance_source_gate as bsg                             # noqa: E402
 
+HAS_PYARROW = importlib.util.find_spec("pyarrow") is not None
+needs_pyarrow = pytest.mark.skipif(not HAS_PYARROW, reason="pyarrow not installed "
+                                   "(lightweight CI tier)")
+
 # ----------------------------------------------------------------------------- helpers
 HOUR0 = int(pd.Timestamp("2026-04-01T12:00:00", tz="UTC").value)   # probe hour open (ns)
 MS = 10**6
@@ -630,6 +634,23 @@ class TestStage2Determinism:
         out = bsg.compare_stage2_manifests(str(p1), str(p2))
         assert out["equal"] and out["n_units"] == 2
 
+    def test_engine_and_scale_excluded_semantics_still_pinned(self, tmp_path):
+        """2026-07-12 amendment: run1 python vs run2 native compare equal when every
+        semantic field matches, and UNEQUAL when a semantic field (sha256) differs."""
+        p1, p2, p3 = (tmp_path / n for n in ("m1.jsonl", "m2.jsonl", "m3.jsonl"))
+        base = {"output": "topk_l2", "exchange": "BINANCE_FUTURES",
+                "symbol": "BTC-USDT-PERP", "dt": "2026-04-01", "status": "ok",
+                "classification": "certified", "rows": 5, "sha256": "a" * 64}
+        p1.write_text(json.dumps({**base, "engine": "python", "price_scale": None,
+                                  "secs": 1.0, "ts": "t1"}) + "\n")
+        p2.write_text(json.dumps({**base, "engine": "native", "price_scale": 10,
+                                  "secs": 0.1, "ts": "t2"}) + "\n")
+        p3.write_text(json.dumps({**base, "engine": "native", "price_scale": 10,
+                                  "sha256": "b" * 64, "secs": 0.1, "ts": "t3"}) + "\n")
+        assert bsg.compare_stage2_manifests(str(p1), str(p2))["equal"]
+        out = bsg.compare_stage2_manifests(str(p1), str(p3))
+        assert not out["equal"] and any("sha256" in d["diff"] for d in out["diffs"])
+
     def test_semantic_difference_detected(self, tmp_path):
         p1, p2 = tmp_path / "m1.jsonl", tmp_path / "m2.jsonl"
         self._write_manifest(p1, rows_a=100)
@@ -892,9 +913,8 @@ class TestNetworkIsolation:
 
 
 # ----------------------------------------------------------------------------- fixture-file CLI
+@needs_pyarrow
 class TestCliWithFixtures:
-    pa = pytest.importorskip("pyarrow")
-
     def _write_hour(self, tmp_path, df, name="BTCUSDT_orderbook.parquet", zstd_outer=False):
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -984,3 +1004,88 @@ class TestCliWithFixtures:
         from experiments.snapshot_seed import frame_replay_hash as h54
         frame, _ = replay(valid_hour())
         assert bsg.frame_replay_hash(frame) == h54(frame)
+
+
+@needs_pyarrow
+class TestCrossEngineProtocol:
+    """End-to-end synthetic check of the 2026-07-12 amendment: a python-oracle Stage-2 CLI
+    run and a stage2-native-run over the SAME synthetic raw store must produce manifests
+    that compare EQUAL (semantic fields identical, engine/price_scale excluded)."""
+
+    def _write_raw_store(self, root):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from ingest import lake_binance as lb
+        day_open = int(pd.Timestamp("2026-04-01").value)
+        n = 600
+        deltas = pd.DataFrame({
+            "origin_time": [day_open + i * (86_400_000_000_000 // n) for i in range(n)],
+            "sequence_number": range(1, n + 1),
+            "side_is_bid": [i % 2 == 0 for i in range(n)],
+            "price": [100.0 + 0.1 * (i % 7) for i in range(n)],
+            "size": [1.0 + (i % 3) for i in range(n)],
+        })
+        book = pd.DataFrame([{
+            "origin_time": day_open + j * 3_600_000_000_000,
+            "received_time": day_open + j * 3_600_000_000_000,
+            **{f"bid_{i}_price": round(99.9 - 0.1 * i, 1) for i in range(20)},
+            **{f"bid_{i}_size": 1.0 for i in range(20)},
+            **{f"ask_{i}_price": round(100.8 + 0.1 * i, 1) for i in range(20)},
+            **{f"ask_{i}_size": 1.0 for i in range(20)},
+        } for j in range(24)])
+        trades = pd.DataFrame({
+            "timestamp": [day_open + i * 10**12 for i in range(50)],
+            "receipt_timestamp": [day_open + i * 10**12 + 5 for i in range(50)],
+            "price": [100.0 + 0.1 * (i % 5) for i in range(50)],
+            "amount": [0.5] * 50, "side": ["buy", "sell"] * 25, "id": range(50),
+        })
+        for inst_key, exchange, symbol in (("binance-perp", "BINANCE_FUTURES",
+                                            "BTC-USDT-PERP"),
+                                           ("binance-spot", "BINANCE", "BTC-USDT")):
+            for feed, df in (("book_delta_v2", deltas), ("book", book),
+                             ("trades", trades)):
+                path = lb.raw_parquet_path(str(root), feed, exchange, symbol,
+                                           "2026-04-01")
+                os_dir = pathlib.Path(path).parent
+                os_dir.mkdir(parents=True, exist_ok=True)
+                pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
+        # perp scalar feeds so the python CLI run has every required unit
+        for feed, df in (("funding", pd.DataFrame({
+                            "timestamp": [day_open + i * 10**13 for i in range(8)],
+                            "receipt_timestamp": [day_open + i * 10**13 for i in range(8)],
+                            "rate": [0.0001] * 8})),
+                         ("open_interest", pd.DataFrame({
+                            "timestamp": [day_open + i * 10**13 for i in range(8)],
+                            "receipt_timestamp": [day_open + i * 10**13 for i in range(8)],
+                            "open_interest": [5.0] * 8}))):
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            path = lb.raw_parquet_path(str(root), feed, "BINANCE_FUTURES", "BTC-USDT-PERP",
+                                       "2026-04-01")
+            pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
+
+    def test_python_cli_vs_native_override_manifests_equal(self, tmp_path):
+        from recon import native as rnative
+        if not rnative.native_available():
+            pytest.skip("recon_native unavailable")
+        raw = tmp_path / "raw"
+        self._write_raw_store(raw)
+        spec = importlib.util.spec_from_file_location(
+            "rbr_cross_engine", str(ROOT / "scripts" / "run_binance_recon.py"))
+        rbr = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = rbr
+        spec.loader.exec_module(rbr)
+        rc = rbr.main(["--start", "2026-04-01", "--end", "2026-04-01",
+                       "--raw", str(raw), "--out", str(tmp_path / "py"),
+                       "--report-dir", str(tmp_path / "rep"), "--engine", "python"])
+        assert rc == 0
+        cli = _cli()
+        rc = cli.main(["stage2-native-run", "--raw", str(raw),
+                       "--out-root", str(tmp_path / "nat"),
+                       "--perp-scale", "10", "--spot-scale", "10",
+                       "--out", str(tmp_path)])
+        assert rc == 0
+        out = bsg.compare_stage2_manifests(str(tmp_path / "py" / "_manifest.jsonl"),
+                                           str(tmp_path / "nat" / "_manifest.jsonl"))
+        assert out["equal"], out["diffs"]
