@@ -210,7 +210,7 @@ The schema has exactly these decision-bearing sections:
 | `clock` | `kind=dollar`, Binance-perpetual reference stream, exact development schedule/hash, target bars/day, time cap, warm-up, coverage normalization, monotone watermark, and the frozen adaptive-threshold/OOS causal-update rule plus its exact development-end initial-state hash; no realized January schedule |
 | `features` | Ordered registry below; formula/version and development-end normalizer initial-state hash per feature; frozen causal OOS update rule; `max_lookback_ns`; no realized January state |
 | `labels` | Mid anchor; bps return formula; trailing EWMA barrier estimator and all parameters; TP/SL multipliers; unresolved-barrier policy; per-horizon uniqueness policy |
-| `costs` | Exact T7 `CostAssumption`: `venue=binance`, product/source/version identity, scalar one-way `taker_fee_bps`, scalar aggregate `base_slippage_bps`, and `drift_policy=abs_true_over_observable_mid_v1`; fee-tier applicability/evidence hash; two fee sides; two spread crossings; no-trade margin |
+| `costs` | Exact T7 `CostAssumption`: `venue=binance`, product/source/version identity, scalar one-way `taker_fee_bps`, scalar aggregate `base_slippage_bps`, and `drift_policy=abs_true_over_observable_mid_v1`; fee-tier applicability/evidence hash; two fee sides; two spread crossings; no-trade margin; observable decision-cost versus realized charged-cost rule |
 | `exclusions` | Outcome-blind rule version; exact included days; map of every excluded day to reason and evidence hash; staleness/gap/one-sided-book/lookback rules and drop policy |
 | `partition` | Exact nanosecond bounds; horizon map; `partition_guard_ns`; prefilter string; `schema=g0bn-partition-plan-v1` and its SHA-256; realized development counts; holdout count schema and sufficiency rules, but no realized holdout counts |
 | `cv` | Fixed §3.4 `n_groups`, `k`, split/grouping versions, `embargo_ns`, PBO blocks/minimum rows, DSR/PBO definitions and thresholds |
@@ -710,18 +710,28 @@ and MCC, but they do not replace this definition.
 
 ### 8.2 Net performance
 
-For each row, using only the one frozen cost block:
+For each row, the no-trade decision uses only costs observable or frozen at
+decision time. Realized latency drift is still charged after the decision:
 
 ```text
-total_cost_i = cost_bps_i + 2 * half_spread_bps_i
-trade_i      = abs(f_i) > total_cost_i + no_trade_margin_bps
-gross_i      = trade_i * sign(f_i) * y_i
-net_i        = trade_i * (sign(f_i) * y_i - total_cost_i)
+fee_bps_i                 = 2 * frozen_taker_fee_bps
+spread_bps_i              = 2 * half_spread_bps_i
+decision_cost_bps_i       = fee_bps_i + frozen_base_slippage_bps
+decision_total_cost_bps_i = decision_cost_bps_i + spread_bps_i
+realized_total_cost_bps_i = cost_bps_i + spread_bps_i
+trade_i                   = abs(f_i) > decision_total_cost_bps_i + no_trade_margin_bps
+gross_i                   = trade_i * sign(f_i) * y_i
+net_i                     = trade_i * (sign(f_i) * y_i - realized_total_cost_bps_i)
 ```
 
-`cost_bps_i` already contains two taker-fee sides and the exact T7 slippage
-model; the spread is added exactly twice here. Costs are never optimized on
-January. Component reconciliation is exactly:
+The frozen fee, frozen base-slippage allowance, and observable half-spread are
+available when `trade_i` is chosen. `latency_drift_bps_i` is an ex-post
+diagnostic derived from T2's origin-cut label book. It MUST NOT feed the
+forecast, feature matrix, no-trade mask, or any per-row selection threshold. It
+enters the realized charged cost; the resulting realized net metrics may affect
+only the already-preregistered development ranking and terminal verdict, never
+retroactively alter a trade mask. Costs are never optimized on January.
+Component reconciliation is exactly:
 
 ```text
 fee_bps_i           = 2 * frozen_taker_fee_bps
@@ -729,6 +739,8 @@ latency_drift_bps_i = abs(true_t_event_mid_i / observable_mid_i - 1) * 1e4
 slippage_bps_i      = frozen_base_slippage_bps + latency_drift_bps_i
 cost_bps_i          = fee_bps_i + slippage_bps_i
 spread_bps_i        = 2 * half_spread_bps_i
+cost_bps_i          = decision_cost_bps_i + latency_drift_bps_i
+realized_total_cost_bps_i = decision_total_cost_bps_i + latency_drift_bps_i
 ```
 
 `observable_mid_i` is the received-time-safe target book at `target_read_ts`;
@@ -736,9 +748,18 @@ spread_bps_i        = 2 * half_spread_bps_i
 policy is `abs_true_over_observable_mid_v1`. V1 has no second configurable
 latency function or separate entry/exit slippage model: changing that formula
 requires a reviewed cost/protocol version rather than an extra runtime
-coefficient. The manifest's serialized `CostAssumption` must exactly match its
-venue, product, and normalized source identity. Report sums of gross, fee,
-spread, base slippage, latency drift, total slippage, and net bps. Define
+coefficient. T7's `cost_bps_i` remains the realized non-spread cost for
+compatibility, and T8/T9 must persist `latency_drift_bps_i` as a required,
+non-feature diagnostic. The dedicated G0-BN scorer derives
+`decision_cost_bps_i`, verifies both reconciliation identities above within the
+`math.isclose` policy `rel_tol=1e-12, abs_tol=1e-12` bps, and fails closed
+(terminal INCONCLUSIVE after either burn) on a missing, negative, non-finite,
+or inconsistent component. It MUST NOT call the legacy
+`eval.cost.net_pnl` path with realized `cost_bps_i`, because that legacy helper
+uses its supplied cost in both the mask and charge. The manifest's serialized
+`CostAssumption` must exactly match its venue, product, and normalized source
+identity. Report sums of gross, fee, decision cost, spread, base slippage,
+latency drift, total slippage, realized total cost, and net bps. Define
 `n_trades=sum(trade_i)`,
 `effective_trades=sum(u_i * trade_i)`, and
 `decision_trade_rate=n_trades/n_valid_rows`,
@@ -895,8 +916,8 @@ contains:
   and effective-trial-count provenance;
 - per evaluated candidate/horizon: zero-persistence and candidate weighted loss,
   exact lift `L`, paired percentile interval and applicable one-sided lower
-  bound, RMSE, MAE, mean/sum gross, fee, spread, base slippage, latency drift,
-  total slippage, and net with paired
+  bound, RMSE, MAE, mean/sum gross, fee, decision cost, spread, base slippage,
+  latency drift, total slippage, realized total cost, and net with paired
   uncertainty, both Sharpes, trades, effective trades,
   `decision_trade_rate`, `round_trip_turnover_units`,
   `round_trip_turnover_rate`, and tight/wide spread plus development-frozen
@@ -959,7 +980,7 @@ to mutate GitHub from this plan:
 | **67-C — freeze and holdout plan** | Outcome-blind plan builder, reproducible freeze reconstruction, exact-scope and no-OOS-field validation | 67-A/B; T8 bindings |
 | **67-D — generic-runner guard** | Manifest-only holdout rejection in path/in-memory generic APIs and CLI, proven before loader invocation | 67-A; T8 bindings |
 | **67-E — one-shot runner** | Separate durable raw- and matrix-access claims, non-resumable state machine, pre-burn dev fit, blind T9 materialization/attestation, post-matrix-burn validation/score, terminal journal | 67-C/D; T7 cost contract; T8 writer/bindings; T9 callable materializer |
-| **67-F — metrics and report** | Paired circular two-day moving-block bootstrap, Bonferroni tails, exact metrics, four predicates/verdicts, strict report and hashes | 67-B/E |
+| **67-F — metrics and report** | Dedicated split decision/realized-cost scorer, paired circular two-day moving-block bootstrap, Bonferroni tails, exact metrics, four predicates/verdicts, strict report and hashes | 67-B/E |
 | **67-G — integration/regression** | End-to-end synthetic PASS/PNT/FAIL/INCONCLUSIVE cases and unchanged G0-CB/G0-XV suite | 67-A–F, T7–T9 |
 
 T7 owns honest cost-column production and requires evidenced operator-supplied
@@ -1014,8 +1035,12 @@ At minimum, #67's subissues include cheap tests for:
 11. a hand-computed paired circular two-day lift/gross/net/MCC bootstrap with
     PCG64 seed 0, 10,000 replicates, linear percentiles, development `0.05/8`
     and OOS `0.05/2` tails, `>=20` day and `sum(u)>=100` failures, and no row-IID
-    fallback; and
-12. all four truth-table outcomes, full report schema/hash, and a check that no
+    fallback;
+12. exact decision/realized-cost reconciliation plus a causality test that
+    mutates only `true_t_event_mid`/`latency_drift_bps` while holding forecasts,
+    observable books, and frozen costs fixed: the trade mask/count must remain
+    byte-identical while realized net changes; and
+13. all four truth-table outcomes, full report schema/hash, and a check that no
     60 s metric can change the verdict.
 
 All use synthetic/tiny fixtures. No test opens vendor data, runs #69, or creates

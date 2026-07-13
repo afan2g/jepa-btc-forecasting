@@ -110,6 +110,18 @@ adaptive schedule/state, or result. Those values are first derived and attested
 by blind materialization. Removing or renaming a binding changes the
 manifest/config hashes and cannot turn a holdout build into a generic one.
 
+Every G0-BN development and holdout manifest also lists
+`latency_drift_bps` in `extra_cols` with a finite non-negative float dtype. It
+is a required non-feature diagnostic, not a model input or target. T7's
+reserved `cost_bps` remains the realized non-spread cost
+`2*taker_fee_bps + base_slippage_bps + latency_drift_bps`. The dedicated G0-BN
+scorer derives the decision cost as `cost_bps - latency_drift_bps`, reconciles
+it to the frozen `2*taker_fee_bps + base_slippage_bps`, and uses only that
+decision cost plus the observable spread and frozen margin for the trade mask.
+It charges the full realized `cost_bps` to net PnL. Missing, non-finite,
+negative, or inconsistent drift diagnostics fail the one-shot transaction
+INCONCLUSIVE; the legacy generic evaluator contract is unchanged.
+
 Optional: `extra_cols` (explicitly allowed diagnostics columns), `dtypes`
 (column → dtype expectations), `availability_lag_ns` (allowed `t_available -
 t_event`, default 0 = synchronous), `as_of_ns` (snapshot bound on

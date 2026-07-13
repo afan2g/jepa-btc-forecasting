@@ -113,8 +113,10 @@ are excluded from the first gate even when files are readily available.
 - Charge T7's exact versioned Binance cost assumption: two sides of one frozen
   scalar taker fee, two observable half-spread crossings, aggregate base
   slippage, and absolute `target_read_ts`-to-`t_event` mid drift under
-  `abs_true_over_observable_mid_v1`, plus the frozen no-trade margin. Report
-  gross and net side by side plus
+  `abs_true_over_observable_mid_v1`, plus the frozen no-trade margin. The
+  no-trade mask uses only the frozen fee/base allowance and observable spread;
+  label-side realized drift is charged to net after selection and cannot affect
+  the mask. Report gross and net side by side plus
   `decision_trade_rate=n_trades/n_valid_rows`.
 - Report paired persistence-lift uncertainty, gross/net uncertainty, MCC
   intervals with undefined/degenerate reasons, development DSR/PBO provenance,

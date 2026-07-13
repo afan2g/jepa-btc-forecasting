@@ -178,7 +178,7 @@ for the deferred cross-venue workflow; G0-BN never opens it.
 - **Refs:** §8; LR §6.
 
 ### E0.5 — Cost model + no-trade-band PnL + DSR/PBO evaluator
-- **Setup:** Net PnL charges **2×taker fee + 2×half-spread + base slippage + absolute observable-to-`t_event` mid drift** under T7's `abs_true_over_observable_mid_v1` policy; no-trade band = round-trip cost + margin. Report **gross vs net side-by-side**. Add **MCC** (skill vs monetizability), **Deflated Sharpe Ratio**, **PBO via CSCV**. Honest taker fills (no passive-fill-at-mid assumption). G0-BN freezes the evidenced real Binance Futures scalar fee tier, aggregate base-slippage allowance, source identity, and no-trade margin; it has no guessed numeric default or unimplemented alternate latency/entry/exit model.
+- **Setup:** Net PnL charges **2×taker fee + 2×half-spread + base slippage + absolute observable-to-`t_event` mid drift** under T7's `abs_true_over_observable_mid_v1` policy. The G0-BN no-trade band uses only decision-time-observable/frozen **2×fee + 2×observable half-spread + base slippage + margin**; realized label-side latency drift affects the charged net result but never trade selection. Report **gross vs net side-by-side**. Add **MCC** (skill vs monetizability), **Deflated Sharpe Ratio**, **PBO via CSCV**. Honest taker fills (no passive-fill-at-mid assumption). G0-BN freezes the evidenced real Binance Futures scalar fee tier, aggregate base-slippage allowance, source identity, and no-trade margin; it has no guessed numeric default or unimplemented alternate latency/entry/exit model.
 - **GATE (E0.5):** Evaluator reproduces a known-zero-edge synthetic series as DSR≈0 / PnL≤0 (sanity that it isn't manufacturing edge).
 - **Deliverable:** `eval/` harness.
 - **Refs:** §10; LR §4, §6.
