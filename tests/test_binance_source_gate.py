@@ -1459,14 +1459,16 @@ class TestNetworkIsolation:
 # ----------------------------------------------------------------------------- fixture-file CLI
 @needs_pyarrow
 class TestCliWithFixtures:
-    def _write_hour(self, tmp_path, df, name="BTCUSDT_orderbook.parquet", zstd_outer=False):
+    def _write_hour(self, tmp_path, df, name="BTCUSDT_orderbook.parquet", zstd_outer=False,
+                    exchange="binance_futures"):
         import pyarrow as pa
         import pyarrow.parquet as pq
-        plain = tmp_path / name
+        (tmp_path / exchange).mkdir(exist_ok=True)
+        plain = tmp_path / exchange / name
         pq.write_table(pa.Table.from_pandas(df, preserve_index=False), plain)
         if not zstd_outer:
             return str(plain)
-        z = tmp_path / (name + ".zst")
+        z = tmp_path / exchange / (name + ".zst")
         with open(plain, "rb") as src, pa.output_stream(str(z), compression="zstd") as out:
             out.write(src.read())
         plain.unlink()
@@ -1591,11 +1593,24 @@ class TestCliWithFixtures:
         assert rep["frozen"]["frozen_cap_fired"]
         assert rep["meta"]["crossed_rate"] == 0.0             # frozen alone drove degraded
 
+    def test_wrong_exchange_path_refuses(self, tmp_path):
+        """The vendor object path is the market identity: a local object under another
+        exchange's directory must never be labeled as the requested market (round 25)."""
+        cli = _cli()
+        path = self._write_hour(tmp_path, valid_hour(), exchange="binance_spot")
+        rc = cli.main(["chd-validate", "--file", path, "--exchange", "binance_futures",
+                       "--date", "2026-04-01", "--hour", "12", "--out", str(tmp_path)])
+        assert rc == cli.FAIL_EXIT
+        rep = json.loads((tmp_path / "chd_validate_binance_futures_2026-04-01_12.json")
+                         .read_text())
+        assert not rep["pass"] and rep["refusal"] == "wrong_exchange_path"
+
     def test_corrupt_objects_refuse_instead_of_crashing(self, tmp_path):
         """Truncated/corrupt vendor bytes must produce the fail-closed refusal report
         (SourceGateError), never a raw pyarrow crash (Codex round 4)."""
         cli = _cli()
-        bad_zst = tmp_path / "corrupt.parquet.zst"
+        (tmp_path / "binance_futures").mkdir(exist_ok=True)
+        bad_zst = tmp_path / "binance_futures" / "corrupt.parquet.zst"
         bad_zst.write_bytes(b"\x28\xb5\x2f\xfd" + b"garbage-not-a-zstd-frame")
         rc = cli.main(["chd-validate", "--file", str(bad_zst), "--exchange",
                        "binance_futures", "--date", "2026-04-01", "--hour", "12",
@@ -1604,7 +1619,7 @@ class TestCliWithFixtures:
         rep = json.loads((tmp_path / "chd_validate_binance_futures_2026-04-01_12.json")
                          .read_text())
         assert not rep["pass"] and rep["refusal"] == "corrupt_object"
-        bad_parquet = tmp_path / "corrupt.parquet"
+        bad_parquet = tmp_path / "binance_futures" / "corrupt.parquet"
         bad_parquet.write_bytes(b"PAR1" + b"\x00" * 64)
         rc = cli.main(["chd-validate", "--file", str(bad_parquet), "--exchange",
                        "binance_futures", "--date", "2026-04-01", "--hour", "12",
@@ -1629,7 +1644,7 @@ class TestCliWithFixtures:
                          chd_frame(update_rows(1007, 1008, 1006, HOUR0 + 4 * SEC,
                                                [("bid", 99.4, 1.0)]))],
                         ignore_index=True)
-        (tmp_path / "BTCUSDT_orderbook.parquet.zst").unlink()
+        (tmp_path / "binance_futures" / "BTCUSDT_orderbook.parquet.zst").unlink()
         v2 = self._write_hour(tmp_path, df2, zstd_outer=True)
         assert v2 == v1
         rc = cli.main(["chd-validate", "--file", v2, "--exchange", "binance_futures",
@@ -1664,6 +1679,9 @@ class TestCliWithFixtures:
         assert rc == cli.SETUP_ERROR_EXIT
         # off-contract depth refuses (Codex round 23)
         rc = cli.main(base + ["--scale", "10", "--k", "1"])
+        assert rc == cli.SETUP_ERROR_EXIT
+        # half-specified window refuses (Codex round 25)
+        rc = cli.main(base + ["--scale", "10", "--window-start", "2026-04-01T12:00:00"])
         assert rc == cli.SETUP_ERROR_EXIT
         rc = cli.main(base + ["--scale", "10"])
         assert rc == 0

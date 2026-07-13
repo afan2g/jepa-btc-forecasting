@@ -927,6 +927,15 @@ def _decompress_if_zstd(path: str) -> tuple[str, dict]:
 
 def _load_chd_hour(path: str, *, exchange: str, symbol: str, date_iso: str, hour: int):
     import pyarrow.parquet as pq
+    # the CommonOrderbookEvent schema carries no exchange column, so the vendor object
+    # PATH is the market identity — the requested exchange must appear as a path segment
+    # (the preregistered store layout is data/raw/chd/{exchange}/dt=.../hour=.../...)
+    # (Codex round 25)
+    if exchange not in pathlib.Path(path).parts:
+        raise bsg.ChdValidationError(
+            "wrong_exchange_path",
+            f"{path} has no {exchange!r} path segment — cannot bind the object to the "
+            "requested market")
     parquet_path, prov = _decompress_if_zstd(path)
     try:
         with pq.ParquetFile(parquet_path) as pf:
@@ -1096,6 +1105,12 @@ def cmd_compare(args) -> int:
               f"{measured} for {args.instrument} ({args.tick_report}).", file=sys.stderr)
         return SETUP_ERROR_EXIT
 
+    if bool(args.window_start) != bool(args.window_end):
+        # a half-specified window silently skips slicing while the report records the
+        # one-sided bound (Codex round 25)
+        print("ERROR: provide BOTH --window-start and --window-end, or neither.",
+              file=sys.stderr)
+        return SETUP_ERROR_EXIT
     frames = {}
     full_hashes = {}
     for label, path in (("lake", args.lake_frame), ("chd", args.chd_frame)):
