@@ -88,6 +88,11 @@ def _read_json(path: str) -> dict:
         return json.load(f)
 
 
+def _stat_identity(path: str) -> list:
+    st = os.stat(path)
+    return [int(st.st_size), int(st.st_mtime_ns)]
+
+
 def _slim_meta(meta: dict) -> dict:
     """Report-sized replay meta: unbounded per-sample lists dropped/capped (the #54
     _slim_meta convention) so the April guard's series bound holds."""
@@ -141,17 +146,25 @@ def cmd_verify_inputs(args) -> int:
             entry["ok"] = False
             results.append(entry)
             continue
+        # TOCTOU guard (Codex round 29): the recorded identity must describe the exact
+        # bytes the sha256/schema/row reads consumed — stat before AND after, refuse if
+        # the file changed underneath the verification.
+        ident_before = _stat_identity(path)
         schema = pq.read_schema(path)
         with pq.ParquetFile(path) as pf:
             n_rows = pf.metadata.num_rows
-        st = os.stat(path)
-        entry["identity"] = [int(st.st_size), int(st.st_mtime_ns)]
+        sha_ok = _sha256_file(path) == u["sha256"]
+        ident_after = _stat_identity(path)
+        changed = ident_before != ident_after
+        entry["identity"] = ident_after
+        entry["identity_changed_during_verification"] = changed
         checks = {
-            "sha256": _sha256_file(path) == u["sha256"],
+            "sha256": sha_ok,
             "schema_fingerprint": schema_fingerprint(schema) == u["schema_fingerprint"],
             "schema_cols": list(schema.names) == list(u["schema_cols"]),
             "rows": n_rows == u["rows"],
             "out_bytes": os.path.getsize(path) == u["out_bytes"],
+            "identity_stable": not changed,
         }
         entry.update(checks=checks, ok=all(checks.values()))
         results.append(entry)

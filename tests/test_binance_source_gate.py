@@ -1864,6 +1864,27 @@ class TestCrossEngineProtocol:
         assert perp["per_feed"]["liquidations"]["reason"] == "no_integral_scale"
         assert perp["conformance_scale"] == 10           # replay scale survives
 
+    def test_verify_inputs_refuses_concurrent_refresh(self, tmp_path, monkeypatch):
+        """A raw partition refreshed during verification must fail the identity-stable
+        check — the recorded identity must describe the hashed bytes (Codex round 29)."""
+        raw = tmp_path / "raw"
+        self._write_raw_store(raw)
+        cli = _cli()
+        calls = {"n": 0}
+        real = cli._stat_identity
+
+        def flapping(path):
+            calls["n"] += 1
+            ident = real(path)
+            return [ident[0], ident[1] + calls["n"]]     # mtime changes every stat
+
+        monkeypatch.setattr(cli, "_stat_identity", flapping)
+        rc = cli.main(["verify-inputs", "--raw", str(raw), "--out", str(tmp_path)])
+        assert rc == cli.FAIL_EXIT
+        rep = json.loads((tmp_path / "verify_inputs.json").read_text())
+        assert all(e["identity_changed_during_verification"] for e in rep["units"]
+                   if e.get("path_exists"))
+
     def test_python_cli_vs_native_override_manifests_equal(self, tmp_path):
         from recon import native as rnative
         if not rnative.native_available():
