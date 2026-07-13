@@ -3,14 +3,14 @@
   "generated_utc": "2026-07-13",
   "preregistration_first_commit": "633d4e4f771574a2b8b207edf1947e87fbc987b8",
   "preregistration_last_amended_commit": "4b66c7232511b8e7abdc2e24364e5e2bea1e0388",
-  "reports_generated_at_commit": "d05b5c6c9c029744dcd6bb8ec7acccb6584bf672",
+  "reports_generated_at_commit": "23e4e65fc54b504de1950942e8887ad01f5c4bb8",
   "provenance_note": "Local Crypto Lake 2026-04-01 Stage-2 integrity evidence for issue #64. Inputs are the nine Stage-1 raw units pinned (sha256/fingerprint/rows/bytes) inside the preregistration fixture and re-verified by verify_inputs.json. Run 1 = production scripts/run_binance_recon.py --engine auto (Python oracle; perp replay 84,153 s). Run 2 = stage2-native-run (production process_unit path, explicit native override, perp+spot scales 10/100; perp replay ~29 s). stage2_cross_engine_determinism pins run1==run2 on every semantic manifest field incl. published parquet sha256 (full-day cross-engine conformance, 2026-07-12 amendment). No vendor I/O of any kind was performed; no raw market rows appear in any tracked file. Regenerated 2026-07-13 with content-hash provenance binding (round 21): every report records prereg_sha256 (canonical content hash of the preregistration) and every consumer requires it to match; all reports re-ran under the amendment-5 contract with identical results \u2014 all PASS, cross-engine EQUAL (7 units), verdict CERTIFIED, conformance scales 10/100.",
   "tracked_files": {
     "lake_verdict_2026-04-01.json": "d24769a6fc05bd601a9c97440935be2a6ac3d21968076e0bf3431321a2c6ecf8",
     "stage2_cross_engine_determinism.json": "fcdd8b76206b2c112c6900848a815d0bb6524f7cf0ae94c10f578b82540c7152"
   },
   "ignored_reports_sha256": {
-    "verify_inputs.json": "ab6a72639f8f01d0a0f73d91e2d779cae42ee6012edb180ff0d06a85095b7af7",
+    "verify_inputs.json": "2c10cb489fbab68902b73ad08a9c2a550ccb739e932324a42e9acbccb88fe3c7",
     "tick_scale.json": "d268222c0350fcde247faf29a4d92c2b2e79e5a38c6d92894454e0b3c530d9c4",
     "silence.json": "0bc4a991afe08a8402dcc78efee3e85ccc8987699980b9537c85efbe55728f99",
     "replay_conformance_binance-perp.json": "94d8ce75bfef2bb98ddcb5e2b93461d760e27acd088f555f2c5025d2bfc5c599",
