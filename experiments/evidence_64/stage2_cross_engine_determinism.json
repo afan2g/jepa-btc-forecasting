@@ -1,6 +1,6 @@
 {
   "step": "stage2-compare",
-  "prereg_commit": "c80ad2935aa360790f2179da92a0c3cf0ed8e3a4",
+  "prereg_commit": "4b66c7232511b8e7abdc2e24364e5e2bea1e0388",
   "run1": "data/reports/binance_source_quality/stage2/run1/_manifest.jsonl",
   "run2": "data/reports/binance_source_quality/stage2/run2_native/_manifest.jsonl",
   "equal": true,
@@ -79,5 +79,6 @@
     "price_scale"
   ],
   "pass": true,
-  "report_hash": "3181fa664f4dabe015bd5fc80c2406e6bea67843738eaee78efd9ca3f8680798"
+  "prereg_sha256": "208e365fa15f1df9fdf5562bf2df76701e3b3ae1b256d31730acac035ac39c26",
+  "report_hash": "0f0e049c84b2f722ef3158c8f1c7d370487827fbf92b827c8da10019251308d4"
 }

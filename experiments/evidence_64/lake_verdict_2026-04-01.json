@@ -1,6 +1,6 @@
 {
   "step": "verdict",
-  "prereg_commit": "c80ad2935aa360790f2179da92a0c3cf0ed8e3a4",
+  "prereg_commit": "4b66c7232511b8e7abdc2e24364e5e2bea1e0388",
   "day": "2026-04-01",
   "unit_checks": [
     {
@@ -86,5 +86,6 @@
     "degraded": "units complete but any topk_l2 classifies degraded, or any anomaly cap fired (off-tick / silence / frozen), with no hard invalidator",
     "inconclusive": "any hard invalidator fired, any required unit missing or errored, any topk_l2 classifies inconclusive (seed gate), or the run cannot complete"
   },
-  "report_hash": "6733cd0eb0949ffd773c17202db4cf6854965f6797639fe8b5c45d4251e2a4c1"
+  "prereg_sha256": "208e365fa15f1df9fdf5562bf2df76701e3b3ae1b256d31730acac035ac39c26",
+  "report_hash": "2f194540ad5c2c510fab13762ca92a0de12ae1ebd246ddbd01a5da70ff456e62"
 }
