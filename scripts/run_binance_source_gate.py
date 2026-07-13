@@ -535,6 +535,22 @@ def cmd_verdict(args) -> int:
         inconclusive_reasons.append("hard invalidator: input identity/schema mismatch")
     if not determinism["pass"]:
         inconclusive_reasons.append("hard invalidator: stage2 cross-run determinism failed")
+    # Bind the determinism evidence to THIS manifest's content and coverage: a stale
+    # passing comparison from another output root must never vouch for a different or
+    # edited manifest (Codex P1). run1 is the manifest under verdict by convention.
+    fingerprint = bsg.semantic_manifest_fingerprint(args.stage2_manifest)
+    if determinism.get("run1_semantic_fingerprint") != fingerprint:
+        inconclusive_reasons.append(
+            "hard invalidator: determinism report is not about this manifest "
+            f"(run1 fingerprint {determinism.get('run1_semantic_fingerprint')} != "
+            f"{fingerprint})")
+    compared_units = {tuple(u) for u in determinism.get("units", [])}
+    for (exchange, symbol), reqs in REQUIRED_UNITS.items():
+        for output in reqs:
+            if (output, exchange, symbol, day) not in compared_units:
+                inconclusive_reasons.append(
+                    "hard invalidator: determinism report does not cover "
+                    f"{exchange}/{symbol}/{output} for {day}")
     for path, rep in replays.items():
         if not rep["harness_determinism_ok"]:
             inconclusive_reasons.append(f"hard invalidator: harness determinism failed "

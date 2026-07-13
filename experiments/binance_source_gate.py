@@ -230,24 +230,33 @@ def normalize_epoch_ns(values: np.ndarray, *, fieldname: str) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------- decimal / tick rules
+def parse_decimal(text: str, *, field: str = "decimal") -> Decimal:
+    """Vendor decimal string -> finite Decimal, fail closed: any unparseable or non-finite
+    value raises ChdValidationError('malformed_decimal') so the CLI refusal path (which
+    catches only SourceGateError) writes the preregistered inconclusive report instead of
+    crashing on a raw decimal.InvalidOperation/ValueError."""
+    try:
+        d = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError) as e:
+        raise ChdValidationError("malformed_decimal",
+                                 f"unparseable {field} {text!r}") from e
+    if not d.is_finite():
+        raise ChdValidationError("malformed_decimal", f"non-finite {field} {text!r}")
+    return d
+
+
 def decimal_places(text: str) -> int:
     """Exact decimal places of a vendor decimal string after normalization (trailing zeros
     stripped): '50000.10' -> 1, '50000.05' -> 2, '50000' -> 0. Raises on a non-decimal."""
-    try:
-        d = Decimal(text)
-    except InvalidOperation as e:
-        raise ChdValidationError("malformed_decimal", f"unparseable decimal {text!r}") from e
-    if not d.is_finite():
-        raise ChdValidationError("malformed_decimal", f"non-finite decimal {text!r}")
-    exp = d.normalize().as_tuple().exponent
+    exp = parse_decimal(text).normalize().as_tuple().exponent
     return max(0, -int(exp))
 
 
 def to_ticks(text: str, scale: int) -> int:
     """Exact integer ticks of a vendor decimal string at `scale` (=10^d). Never round-trips
-    through float; an off-scale price refuses rather than rounding."""
-    d = Decimal(text)
-    scaled = d * scale
+    through float; an off-scale price refuses rather than rounding; a malformed/non-finite
+    price refuses with a stable code (never a raw decimal exception)."""
+    scaled = parse_decimal(text, field="price") * scale
     ticks = int(scaled)
     if scaled != ticks:
         raise ChdValidationError("off_tick", f"{text!r} is not integral at scale {scale}")
@@ -404,7 +413,7 @@ def _group_events(df: pd.DataFrame, *, price_scale: int) -> list[ChdEvent]:
         asks: dict[int, float] = {}
         for i in rows:
             ticks = to_ticks(price[i], price_scale)
-            size = float(Decimal(qty[i]))
+            size = float(parse_decimal(qty[i], field="quantity"))
             book = bids if side[i] == "bid" else asks
             if ticks in book:
                 raise ChdValidationError("duplicate_level_in_event",
@@ -791,23 +800,37 @@ def frozen_metrics(frame: pd.DataFrame, *, min_run_samples: int = 60) -> dict:
 DETERMINISM_EXCLUDED_KEYS = ("secs", "ts", "engine", "price_scale")
 
 
+def _load_semantic_manifest(path: str) -> dict:
+    """(output, exchange, symbol, dt) -> semantic record view (last record wins,
+    DETERMINISM_EXCLUDED_KEYS removed)."""
+    recs = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            key = (r["output"], r["exchange"], r["symbol"], r["dt"])
+            recs[key] = {k: v for k, v in r.items() if k not in DETERMINISM_EXCLUDED_KEYS}
+    return recs
+
+
+def semantic_manifest_fingerprint(path: str) -> str:
+    """Content fingerprint of a Stage-2 manifest's SEMANTIC state: canonical-JSON hash of
+    the per-unit last-wins records with DETERMINISM_EXCLUDED_KEYS removed. Binds a
+    stage2-compare report to the exact manifest content the verdict certifies — a stale
+    passing comparison from another output root cannot vouch for a different manifest."""
+    recs = _load_semantic_manifest(path)
+    return hash_obj({"|".join(k): v for k, v in recs.items()})
+
+
 def compare_stage2_manifests(path_a: str, path_b: str) -> dict:
     """Cross-run determinism/conformance comparator for two Stage-2 processed manifests
     (preregistered determinism.stage2_cli + the 2026-07-12 amendment): per-unit records
     keyed by (output, exchange, symbol, dt) must be equal excluding
-    DETERMINISM_EXCLUDED_KEYS. Returns {'equal': bool, 'diffs': [...]}."""
-    def load(path: str) -> dict:
-        recs = {}
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                r = json.loads(line)
-                key = (r["output"], r["exchange"], r["symbol"], r["dt"])
-                recs[key] = {k: v for k, v in r.items() if k not in DETERMINISM_EXCLUDED_KEYS}
-        return recs
-    a, b = load(path_a), load(path_b)
+    DETERMINISM_EXCLUDED_KEYS. Returns equal/diffs plus the compared unit keys and each
+    side's semantic fingerprint (consumed by the verdict binding check)."""
+    a, b = _load_semantic_manifest(path_a), _load_semantic_manifest(path_b)
     diffs = []
     for key in sorted(set(a) | set(b), key=str):
         ra, rb = a.get(key), b.get(key)
@@ -816,7 +839,10 @@ def compare_stage2_manifests(path_a: str, path_b: str) -> dict:
         elif ra != rb:
             changed = sorted(k for k in set(ra) | set(rb) if ra.get(k) != rb.get(k))
             diffs.append({"unit": list(key), "diff": f"keys_differ:{changed}"})
-    return {"equal": not diffs, "n_units": len(set(a) | set(b)), "diffs": diffs}
+    return {"equal": not diffs, "n_units": len(set(a) | set(b)), "diffs": diffs,
+            "units": sorted([list(k) for k in set(a) | set(b)]),
+            "run1_semantic_fingerprint": semantic_manifest_fingerprint(path_a),
+            "run2_semantic_fingerprint": semantic_manifest_fingerprint(path_b)}
 
 
 # ----------------------------------------------------------------------------- fixed comparison

@@ -488,6 +488,17 @@ class TestChdReplayFailClosed:
         _, meta = replay(chd_frame(rows))
         assert meta["counters"]["delete_absent_levels"] == 1
 
+    def test_malformed_vendor_decimals_refuse_with_gate_code(self):
+        """A malformed/non-finite price or quantity must surface as a SourceGateError
+        (stable code), never a raw decimal.InvalidOperation that would bypass the CLI's
+        fail-closed refusal report (Codex P2)."""
+        for column, bad in (("price", "not-a-price"), ("price", "NaN"),
+                            ("quantity", "garbage"), ("quantity", "Infinity")):
+            df = valid_hour()
+            df.loc[len(df) - 1, column] = bad
+            with pytest.raises(bsg.ChdValidationError, match="malformed_decimal"):
+                replay(df)
+
     def test_duplicate_level_in_one_event_refuses(self):
         bids, asks = five_levels()
         rows = snapshot_rows(1000, HOUR0 + SEC, bids, asks)
@@ -719,13 +730,16 @@ class TestVerdictCli:
                             rec["rows"] = 0
                     f.write(json.dumps(rec) + "\n")
 
-    def _step_reports(self, tmp_path, *, determinism_pass=True, tick_pass=True):
+    def _step_reports(self, tmp_path, manifest, *, determinism_pass=True, tick_pass=True,
+                      det_manifest=None):
+        det = dict(bsg.compare_stage2_manifests(str(det_manifest or manifest),
+                                                str(det_manifest or manifest)))
         paths = {}
         for name, payload in {
             "verify": {"step": "verify-inputs", "pass": True},
             "tick": {"step": "tick-scale", "pass": tick_pass},
             "silence": {"step": "silence", "pass": True},
-            "det": {"step": "stage2-compare", "pass": determinism_pass},
+            "det": {"step": "stage2-compare", "pass": determinism_pass, **det},
         }.items():
             p = tmp_path / f"{name}.json"
             p.write_text(json.dumps(payload))
@@ -755,36 +769,36 @@ class TestVerdictCli:
     def test_all_green_is_certified(self, tmp_path):
         m = tmp_path / "m.jsonl"
         self._stage2_manifest(m)
-        rep = self._run(tmp_path, m, self._step_reports(tmp_path))
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path, m))
         assert rep["lake_verdict"] == "certified"
 
     def test_degraded_topk_or_cap_is_degraded(self, tmp_path):
         m = tmp_path / "m.jsonl"
         self._stage2_manifest(m, perp_topk_cls="degraded")
-        rep = self._run(tmp_path, m, self._step_reports(tmp_path))
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path, m))
         assert rep["lake_verdict"] == "degraded"
         m2 = tmp_path / "m2.jsonl"
         self._stage2_manifest(m2)
-        rep = self._run(tmp_path, m2, self._step_reports(tmp_path, tick_pass=False))
+        rep = self._run(tmp_path, m2, self._step_reports(tmp_path, m2, tick_pass=False))
         assert rep["lake_verdict"] == "degraded"
 
     def test_hard_invalidator_is_inconclusive(self, tmp_path):
         m = tmp_path / "m.jsonl"
         self._stage2_manifest(m)
-        rep = self._run(tmp_path, m, self._step_reports(tmp_path, determinism_pass=False))
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path, m, determinism_pass=False))
         assert rep["lake_verdict"] == "inconclusive"
 
     def test_inconclusive_topk_is_inconclusive(self, tmp_path):
         m = tmp_path / "m.jsonl"
         self._stage2_manifest(m, perp_topk_cls="inconclusive")
-        rep = self._run(tmp_path, m, self._step_reports(tmp_path))
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path, m))
         assert rep["lake_verdict"] == "inconclusive"
 
     def test_missing_replay_report_is_inconclusive(self, tmp_path):
         """A required instrument with no replay-conformance report must never certify."""
         m = tmp_path / "m.jsonl"
         self._stage2_manifest(m)
-        paths = self._step_reports(tmp_path)
+        paths = self._step_reports(tmp_path, m)
         cli = _cli()
         rc = cli.main(["verdict", "--stage2-manifest", str(m),
                        "--verify-report", paths["verify"], "--tick-report", paths["tick"],
@@ -803,7 +817,7 @@ class TestVerdictCli:
         bad = dict(self.TOPK_CONTRACT,
                    policy=dict(self.TOPK_CONTRACT["policy"], min_levels_per_side=1))
         self._stage2_manifest(m, contract=bad)
-        rep = self._run(tmp_path, m, self._step_reports(tmp_path))
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path, m))
         assert rep["lake_verdict"] == "inconclusive"
         assert any("contract differs" in r for r in rep["reasons"])
 
@@ -812,8 +826,32 @@ class TestVerdictCli:
         m = tmp_path / "m.jsonl"
         self._stage2_manifest(m, perp_topk_cls="degraded", dt="2026-04-01")
         self._stage2_manifest(m, perp_topk_cls="certified", dt="2026-04-02", mode="a")
-        rep = self._run(tmp_path, m, self._step_reports(tmp_path))
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path, m))
         assert rep["lake_verdict"] == "degraded"     # 04-02's certified must not win
+
+    def test_stale_determinism_report_is_inconclusive(self, tmp_path):
+        """A passing stage2-compare report about a DIFFERENT manifest must never vouch
+        for the manifest under verdict (Codex P1: fingerprint binding)."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m)
+        other = tmp_path / "other.jsonl"
+        self._stage2_manifest(other, perp_topk_cls="degraded")   # different content
+        rep = self._run(tmp_path, m,
+                        self._step_reports(tmp_path, m, det_manifest=other))
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("not about this manifest" in r for r in rep["reasons"])
+
+    def test_determinism_report_must_cover_all_required_units(self, tmp_path):
+        """A comparison that never covered a required fixture-day unit must not certify."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m)
+        paths = self._step_reports(tmp_path, m)
+        det = json.loads(pathlib.Path(paths["det"]).read_text())
+        det["units"] = [u for u in det["units"] if u[0] != "funding"]
+        pathlib.Path(paths["det"]).write_text(json.dumps(det))
+        rep = self._run(tmp_path, m, paths)
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("does not cover" in r and "funding" in r for r in rep["reasons"])
 
 
 class TestDecideCli:
