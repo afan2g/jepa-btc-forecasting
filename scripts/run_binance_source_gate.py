@@ -1085,13 +1085,31 @@ def cmd_fetch(args) -> int:
     # ("every probe check passed AND the approval explicitly permits expansion"): the
     # expansion objects enter the allowlist only when both are supplied (Codex rounds 7/8)
     if args.expansion_approved_by and args.expansion_approved_by.strip():
-        if not args.probe_validate_report or not args.probe_replay_report:
-            print("REFUSING fetch: expansion requires --probe-validate-report and "
-                  "--probe-replay-report proving every probe check passed "
-                  "(request_bounds.expansion).", file=sys.stderr)
+        if not args.probe_validate_report or not args.probe_replay_report or \
+                not args.probe_fetch_report:
+            print("REFUSING fetch: expansion requires --probe-fetch-report, "
+                  "--probe-validate-report and --probe-replay-report proving every probe "
+                  "check passed on the FETCHED object (request_bounds.expansion).",
+                  file=sys.stderr)
+            return SETUP_ERROR_EXIT
+        # the evidence chain starts at the vendor: the validated bytes must be the bytes
+        # the approved probe fetch actually downloaded (Codex round 19) — a synthetic
+        # local parquet claiming the probe identity can never unlock expansion
+        fetch_rep = _read_json(args.probe_fetch_report)
+        if fetch_rep.get("step") != "fetch" or not fetch_rep.get("pass") or \
+                fetch_rep.get("object") != probe["object"] or not fetch_rep.get("sha256"):
+            print("REFUSING fetch: --probe-fetch-report is not a PASSING fetch report "
+                  f"for the preregistered probe object {probe['object']!r}.",
+                  file=sys.stderr)
             return SETUP_ERROR_EXIT
         val = _read_json(args.probe_validate_report)
         ident = val.get("identity") or {}
+        if ((ident.get("provenance") or {}).get("object_sha256")
+                != fetch_rep.get("sha256")):
+            print("REFUSING fetch: --probe-validate-report validated object sha256 "
+                  f"{(ident.get('provenance') or {}).get('object_sha256')!r}, not the "
+                  f"fetched probe object ({fetch_rep.get('sha256')!r}).", file=sys.stderr)
+            return SETUP_ERROR_EXIT
         if val.get("step") != "chd-validate" or not val.get("pass") or \
                 ident.get("exchange") != probe["exchange"] or \
                 ident.get("symbol") != probe["symbol"] or \
@@ -1325,6 +1343,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--expansion-approved-by", default=None,
                    help="explicit EXPANSION approval provenance; without it only the "
                         "preregistered probe object may be fetched")
+    p.add_argument("--probe-fetch-report", default=None,
+                   help="PASSING fetch report for the probe object (required with "
+                        "--expansion-approved-by; anchors the evidence chain to the "
+                        "vendor bytes)")
     p.add_argument("--probe-validate-report", default=None,
                    help="PASSING chd-validate report for the probe object (required with "
                         "--expansion-approved-by)")

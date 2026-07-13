@@ -1213,14 +1213,18 @@ class TestNetworkIsolation:
         assert rc == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"do-not-overwrite"
 
+    PROBE_OBJECT = "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst"
+
     def _probe_evidence(self, tmp_path, *, validate_pass=True, replay_verdict="certified",
-                        k=10, tick_report_day="2026-04-01", replay_sha="probesha"):
+                        k=10, tick_report_day="2026-04-01", replay_sha="probesha",
+                        validate_obj_sha="objsha"):
         val = tmp_path / "probe_validate.json"
         val.write_text(json.dumps({
             "step": "chd-validate", "pass": validate_pass,
             "identity": {"exchange": "binance_futures", "symbol": "BTCUSDT",
                          "date": "2026-04-01", "hour": 12,
-                         "provenance": {"parquet_sha256": "probesha"}}}))
+                         "provenance": {"object_sha256": validate_obj_sha,
+                                        "parquet_sha256": "probesha"}}}))
         rep = tmp_path / "probe_replay.json"
         rep.write_text(json.dumps({
             "step": "chd-replay", "chd_verdict": replay_verdict,
@@ -1231,66 +1235,69 @@ class TestNetworkIsolation:
             "meta": {"k": k}}))
         return str(val), str(rep)
 
+    def _probe_fetch(self, tmp_path, *, obj=None, sha="objsha", ok=True):
+        p = tmp_path / "probe_fetch.json"
+        p.write_text(json.dumps({"step": "fetch", "pass": ok,
+                                 "object": obj or self.PROBE_OBJECT, "sha256": sha}))
+        return str(p)
+
     def test_fetch_expansion_needs_separate_approval_and_probe_evidence(self, tmp_path):
         """Expansion objects require BOTH an explicit expansion approval AND passing
         probe evidence (Codex rounds 7-8); with both, the object clears the allowlist
         (stopped here by the dest-exists guard, before any network)."""
         cli = _cli()
         expansion_obj = "binance_spot/2026-04-01/03/BTCUSDT_orderbook.parquet.zst"
-        val, rep = self._probe_evidence(tmp_path)
         dest = tmp_path / "e.zst"
+
+        def attempt(val=None, rep=None, fetch=None, *, expansion=True):
+            argv = ["fetch", "--object", expansion_obj, "--dest", str(dest),
+                    "--approved-by", "user", "--out", str(tmp_path)]
+            if expansion:
+                argv += ["--expansion-approved-by", "user-exp"]
+            if fetch:
+                argv += ["--probe-fetch-report", fetch]
+            if val:
+                argv += ["--probe-validate-report", val]
+            if rep:
+                argv += ["--probe-replay-report", rep]
+            return cli.main(argv)
+
+        good_fetch = self._probe_fetch(tmp_path)
         # probe approval alone: refused
-        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
-                       "--approved-by", "user", "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
-        # expansion approval without probe evidence: refused
-        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
-                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
-                       "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        assert attempt(expansion=False) == cli.SETUP_ERROR_EXIT and not dest.exists()
+        # expansion approval without full probe evidence: refused
+        assert attempt() == cli.SETUP_ERROR_EXIT and not dest.exists()
+        val, rep = self._probe_evidence(tmp_path)
+        assert attempt(val, rep) == cli.SETUP_ERROR_EXIT       # no fetch report (round 19)
+        # fetch report for the wrong object / failed / different bytes (round 19)
+        assert attempt(val, rep, self._probe_fetch(
+            tmp_path, obj="binance_futures/2026-04-01/13/BTCUSDT_orderbook.parquet.zst")) \
+            == cli.SETUP_ERROR_EXIT
+        assert attempt(val, rep, self._probe_fetch(tmp_path, ok=False)) \
+            == cli.SETUP_ERROR_EXIT
+        assert attempt(val, rep, self._probe_fetch(tmp_path, sha="other-bytes")) \
+            == cli.SETUP_ERROR_EXIT
         # failing probe evidence: refused
         bad_val, _ = self._probe_evidence(tmp_path, validate_pass=False)
-        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
-                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
-                       "--probe-validate-report", bad_val, "--probe-replay-report", rep,
-                       "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        good_fetch = self._probe_fetch(tmp_path)
+        assert attempt(bad_val, rep, good_fetch) == cli.SETUP_ERROR_EXIT
         val, rep = self._probe_evidence(tmp_path)
         _, bad_rep = self._probe_evidence(tmp_path, replay_verdict="degraded")
-        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
-                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
-                       "--probe-validate-report", val, "--probe-replay-report", bad_rep,
-                       "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        assert attempt(val, bad_rep, good_fetch) == cli.SETUP_ERROR_EXIT
         # off-contract probe depth must never unlock vendor spend (round 11)
         val, k1_rep = self._probe_evidence(tmp_path, k=1)
-        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
-                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
-                       "--probe-validate-report", val, "--probe-replay-report", k1_rep,
-                       "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        assert attempt(val, k1_rep, good_fetch) == cli.SETUP_ERROR_EXIT
         # stale tick binding behind the probe evidence (round 17)
         val, stale_rep = self._probe_evidence(tmp_path, tick_report_day="2026-03-31")
-        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
-                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
-                       "--probe-validate-report", val, "--probe-replay-report", stale_rep,
-                       "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        assert attempt(val, stale_rep, good_fetch) == cli.SETUP_ERROR_EXIT
         # replay of DIFFERENT bytes than the validated probe object (round 18)
         val, wrong_bytes = self._probe_evidence(tmp_path, replay_sha="oldsha")
-        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
-                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
-                       "--probe-validate-report", val, "--probe-replay-report", wrong_bytes,
-                       "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
-        # full evidence: clears the allowlist, stopped by the dest guard (no network)
+        assert attempt(val, wrong_bytes, good_fetch) == cli.SETUP_ERROR_EXIT
+        assert not dest.exists()
+        # full evidence chain: clears the allowlist, stopped by the dest guard (no network)
         val, rep = self._probe_evidence(tmp_path)        # regenerate passing evidence
         dest.write_bytes(b"sentinel")
-        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
-                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
-                       "--probe-validate-report", val, "--probe-replay-report", rep,
-                       "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT
+        assert attempt(val, rep, good_fetch) == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"sentinel"
 
     def test_fetch_byte_cap_is_terminal_not_retried(self, tmp_path, monkeypatch):

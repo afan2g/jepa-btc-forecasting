@@ -447,7 +447,17 @@ def _group_events(df: pd.DataFrame, *, price_scale: int) -> list[ChdEvent]:
                 # refuse p <= 0 downstream via classify_chd_snapshot)
                 raise ChdValidationError("malformed_price",
                                          f"non-positive price {price[i]!r} in event row")
-            size = float(parse_decimal(qty[i], field="quantity"))
+            try:
+                size = float(parse_decimal(qty[i], field="quantity"))
+            except OverflowError as e:
+                raise ChdValidationError("malformed_quantity",
+                                         f"quantity {qty[i]!r} overflows float") from e
+            if not isfinite(size) or size < 0:
+                # validate at GROUPING so a pre-snapshot/skipped event cannot hide a
+                # malformed level from the apply-time check (Codex round 19); zero stays
+                # legal (update deletes; snapshot zero-size levels refuse downstream)
+                raise ChdValidationError("malformed_quantity",
+                                         f"negative/non-finite quantity {qty[i]!r}")
             book = bids if side[i] == "bid" else asks
             if ticks in book:
                 raise ChdValidationError("duplicate_level_in_event",
