@@ -759,6 +759,7 @@ def cmd_decide(args) -> int:
     chd_reports = [_read_json(p) for p in (args.chd_replay or [])]
     chd_frame_hashes = set()
     chd_hash_exchange: dict[str, str] = {}
+    chd_hash_report: dict[str, dict] = {}
     for path, rep in zip(args.chd_replay or [], chd_reports):
         if rep.get("step") != "chd-replay":
             raise ValueError(f"{path} is not a chd-replay report")
@@ -797,6 +798,7 @@ def cmd_decide(args) -> int:
         if h:
             chd_frame_hashes.add(h)
             chd_hash_exchange[h] = rep["exchange"]
+            chd_hash_report[h] = rep
     if not chd_reports:
         chd_verdict = "inconclusive"    # never approved/downloaded — fail closed
     elif any(r.get("chd_verdict") != "certified" for r in chd_reports):
@@ -811,14 +813,16 @@ def cmd_decide(args) -> int:
         if comp.get("step") != "compare":
             raise ValueError(f"{args.comparison} is not a compare report")
         _require_current_prereg(args.comparison, comp)
-        # window binding: both bounds or neither (a stale half-window report must not
-        # pass, Codex round 26), and any stated bound must lie inside the fixture day
+        # window binding (Codex rounds 25/26/30): both bounds must be present and equal
+        # EXACTLY the matched replay report's approved hour range — a cherry-picked
+        # favorable sub-interval of April can never stand in for the preregistered
+        # window's bars
         bounds = list(comp.get("window") or [None, None])
-        if len(bounds) != 2 or bool(bounds[0]) != bool(bounds[1]):
-            raise ValueError(f"{args.comparison} records a half-specified window "
-                             f"{bounds!r} — regenerate the comparison")
+        if len(bounds) != 2 or not bounds[0] or not bounds[1]:
+            raise ValueError(f"{args.comparison} records window {bounds!r} — the "
+                             "comparison must be sliced to the approved replay window")
         for bound in bounds:
-            if bound is not None and not str(bound).startswith(fixture_day):
+            if not str(bound).startswith(fixture_day):
                 raise ValueError(f"{args.comparison} window bound {bound!r} is outside "
                                  f"the fixture day {fixture_day}")
         # content binding is MANDATORY on BOTH sides: a comparison is only evidence when
@@ -888,6 +892,22 @@ def cmd_decide(args) -> int:
             raise ValueError(
                 f"{args.comparison} was scaled by a tick report for "
                 f"{comp.get('tick_report_day')!r}, not the fixture day {fixture_day}")
+        import pandas as pd
+        matched_rep = chd_hash_report.get(comp_chd_hash) or {}
+        rep_hours = sorted(matched_rep.get("hours") or [])
+        if not rep_hours or rep_hours != list(range(rep_hours[0], rep_hours[-1] + 1)):
+            raise ValueError("matched chd-replay report has no contiguous approved hours")
+        expected = [
+            int(pd.Timestamp(f"{fixture_day}T{rep_hours[0]:02d}:00:00", tz="UTC").value),
+            int(pd.Timestamp(f"{fixture_day}T{rep_hours[-1]:02d}:00:00", tz="UTC").value)
+            + 3600 * 10**9,
+        ]
+        got = [int(pd.Timestamp(b, tz="UTC").value) for b in bounds]
+        if got != expected:
+            raise ValueError(
+                f"{args.comparison} window {bounds!r} does not equal the matched replay "
+                f"report's approved hours {rep_hours} — regenerate the comparison over "
+                "the approved window")
         if comp.get("k") != int(prereg["replay_contract"]["k"]):
             # a stale comparison generated at another depth under the same contract hash
             # must never be trusted (Codex round 24)

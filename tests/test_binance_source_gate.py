@@ -692,6 +692,11 @@ class TestComparison:
         b.loc[0, "ask_0_price"] = 100.1234
         with pytest.raises(bsg.SourceGateError, match="off_tick"):
             bsg.compare_topk_frames(a, b, price_scale=10)
+        # deep levels get the same guard (round 30 P3)
+        a, b = self._frame(), self._frame()
+        b.loc[0, "bid_5_price"] = 99.5123
+        with pytest.raises(bsg.SourceGateError, match="off_tick"):
+            bsg.compare_topk_frames(a, b, price_scale=10)
 
 
 # ----------------------------------------------------------------------------- determinism cmp
@@ -1217,6 +1222,9 @@ class TestDecideCli:
         assert run({"k": 1}) == cli.SETUP_ERROR_EXIT
         # stale half-specified window (round 26)
         assert run({"window": ("2026-04-01T12:00:00", None)}) == cli.SETUP_ERROR_EXIT
+        # cherry-picked sub-interval of the approved replay window (round 30)
+        assert run({"window": ("2026-04-01T12:30:00",
+                               "2026-04-01T13:00:00")}) == cli.SETUP_ERROR_EXIT
 
     def test_stale_prereg_lake_verdict_hard_rejects(self, tmp_path):
         p = tmp_path / "stale_verdict.json"

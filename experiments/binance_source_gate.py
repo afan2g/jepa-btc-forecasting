@@ -963,10 +963,19 @@ def compare_topk_frames(lake: pd.DataFrame, chd: pd.DataFrame, *, price_scale: i
         within1 = (dbid <= 1.0) & (dask <= 1.0)
         exact = (dbid == 0.0) & (dask == 0.0)
         q = lambda a, p: float(np.quantile(a, p))
-        # descriptive top-K price-set overlap per side (mean shared level count)
+        # descriptive top-K price-set overlap per side (mean shared level count) — every
+        # level used here passes the same integral-tick guard as the touch (round 30 P3)
         shared = {"bid": [], "ask": []}
         for side in ("bid", "ask"):
             lcols = [f"{side}_{i}_price" for i in range(k)]
+            for frame_, name in ((lake, "lake"), (chd, "chd")):
+                arr = frame_[lcols].to_numpy(dtype="float64")
+                bad = np.isfinite(arr) & (np.abs(arr * price_scale
+                                                 - np.round(arr * price_scale)) > 1e-6)
+                if bad.any():
+                    raise SourceGateError(
+                        "off_tick", f"{name} {side} depth levels: {int(bad.sum())} values "
+                                    f"not integral at scale {price_scale}")
             lt = np.round(lake[lcols].to_numpy(dtype="float64") * price_scale)
             ct = np.round(chd[lcols].to_numpy(dtype="float64") * price_scale)
             idx = np.flatnonzero(joint)
