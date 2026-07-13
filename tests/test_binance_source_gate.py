@@ -1155,7 +1155,8 @@ class TestNetworkIsolation:
         assert rc == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"do-not-overwrite"
 
-    def _probe_evidence(self, tmp_path, *, validate_pass=True, replay_verdict="certified"):
+    def _probe_evidence(self, tmp_path, *, validate_pass=True, replay_verdict="certified",
+                        k=10):
         val = tmp_path / "probe_validate.json"
         val.write_text(json.dumps({
             "step": "chd-validate", "pass": validate_pass,
@@ -1165,7 +1166,7 @@ class TestNetworkIsolation:
         rep.write_text(json.dumps({
             "step": "chd-replay", "chd_verdict": replay_verdict,
             "pass": replay_verdict == "certified", "exchange": "binance_futures",
-            "symbol": "BTCUSDT", "date": "2026-04-01", "hours": [12]}))
+            "symbol": "BTCUSDT", "date": "2026-04-01", "hours": [12], "meta": {"k": k}}))
         return str(val), str(rep)
 
     def test_fetch_expansion_needs_separate_approval_and_probe_evidence(self, tmp_path):
@@ -1197,6 +1198,13 @@ class TestNetworkIsolation:
         rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
                        "--approved-by", "user", "--expansion-approved-by", "user-exp",
                        "--probe-validate-report", val, "--probe-replay-report", bad_rep,
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        # off-contract probe depth must never unlock vendor spend (round 11)
+        val, k1_rep = self._probe_evidence(tmp_path, k=1)
+        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
+                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
+                       "--probe-validate-report", val, "--probe-replay-report", k1_rep,
                        "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
         # full evidence: clears the allowlist, stopped by the dest guard (no network)

@@ -1047,6 +1047,12 @@ def cmd_fetch(args) -> int:
             print("REFUSING fetch: --probe-replay-report is not a CERTIFIED chd-replay "
                   "report covering the preregistered probe hour.", file=sys.stderr)
             return SETUP_ERROR_EXIT
+        if (rep.get("meta") or {}).get("k") != int(prereg["replay_contract"]["k"]):
+            # off-contract probe evidence must never unlock vendor spend (Codex round 11)
+            print("REFUSING fetch: --probe-replay-report was produced at "
+                  f"k={(rep.get('meta') or {}).get('k')}, not the preregistered "
+                  f"replay_contract.k={prereg['replay_contract']['k']}.", file=sys.stderr)
+            return SETUP_ERROR_EXIT
         for exchange in ("binance_futures", "binance_spot"):
             for hour in range(24):
                 allowed.add(f"{exchange}/{probe['date']}/{hour:02d}/"
