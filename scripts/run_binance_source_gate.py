@@ -969,6 +969,12 @@ def cmd_chd_replay(args) -> int:
     tick = _read_json(args.tick_report)
     if tick.get("step") != "tick-scale":
         raise ValueError(f"{args.tick_report} is not a tick-scale report")
+    if tick.get("prereg_sha256") != bsg.preregistration_content_hash(args.prereg):
+        # a prerequisite generated under an older contract must not launder itself into
+        # a derived report stamped with the current hash (Codex round 22)
+        print(f"ERROR: {args.tick_report} was generated under a different "
+              "preregistration content — regenerate it first.", file=sys.stderr)
+        return SETUP_ERROR_EXIT
     fixture_day = prereg["fixture"]["lake"]["day"]
     if tick.get("day") != fixture_day:
         print(f"ERROR: {args.tick_report} measures day {tick.get('day')!r}, not the "
@@ -1054,6 +1060,10 @@ def cmd_compare(args) -> int:
     tick = _read_json(args.tick_report)
     if tick.get("step") != "tick-scale":
         raise ValueError(f"{args.tick_report} is not a tick-scale report")
+    if tick.get("prereg_sha256") != bsg.preregistration_content_hash(args.prereg):
+        print(f"ERROR: {args.tick_report} was generated under a different "
+              "preregistration content — regenerate it first.", file=sys.stderr)
+        return SETUP_ERROR_EXIT
     fixture_day = bsg.load_preregistration(args.prereg)["fixture"]["lake"]["day"]
     if tick.get("day") != fixture_day:
         # a stale tick report from another day authorizes an UNMEASURED scale (round 15)

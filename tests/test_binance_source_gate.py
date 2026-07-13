@@ -1490,6 +1490,7 @@ class TestCliWithFixtures:
         p = tmp_path / "tick_scale.json"
         p.write_text(json.dumps({
             "step": "tick-scale", "day": "2026-04-01", "pass": True,
+            "prereg_sha256": PREREG_SHA,
             "instruments": {"binance-perp": {"conformance_scale": 10},
                             "binance-spot": {"conformance_scale": 100}}}))
         return str(p)
@@ -1521,6 +1522,24 @@ class TestCliWithFixtures:
         assert rep["meta"]["missing_book_fraction"] <= 0.02
         with pq.ParquetFile(str(frame_out)) as pf:
             assert pf.metadata.num_rows == 3600
+
+    def test_chd_replay_refuses_stale_contract_tick_report(self, tmp_path):
+        """A tick report generated under an older preregistration must not launder its
+        scale into a current-contract chd-replay report (Codex round 22)."""
+        cli = _cli()
+        path = self._write_hour(tmp_path, valid_hour())
+        stale = tmp_path / "stale_tick.json"
+        stale.write_text(json.dumps({
+            "step": "tick-scale", "day": "2026-04-01", "pass": True,
+            "prereg_sha256": "0" * 64,
+            "instruments": {"binance-perp": {"conformance_scale": 10},
+                            "binance-spot": {"conformance_scale": 100}}}))
+        rc = cli.main(["chd-replay", "--files", path, "--exchange", "binance_futures",
+                       "--date", "2026-04-01", "--start-hour", "12", "--n-hours", "1",
+                       "--tick-report", str(stale),
+                       "--scale", "10", "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
+        assert not (tmp_path / "chd_replay_binance_futures_2026-04-01_12_1h.json").exists()
 
     def test_chd_replay_refuses_off_contract_k(self, tmp_path):
         """The chd_verdict is only defined at the preregistered k=10 — an operator --k
@@ -1631,6 +1650,7 @@ class TestCliWithFixtures:
         tick = tmp_path / "tick_scale.json"
         tick.write_text(json.dumps({
             "step": "tick-scale", "day": "2026-04-01", "pass": True,
+            "prereg_sha256": PREREG_SHA,
             "instruments": {"binance-perp": {"conformance_scale": 10},
                             "binance-spot": {"conformance_scale": 100}}}))
         base = ["compare", "--lake-frame", str(tmp_path / "lake.parquet"),
