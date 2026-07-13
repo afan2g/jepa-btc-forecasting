@@ -49,6 +49,11 @@ ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 PARQUET_MAGIC = b"PAR1"
 
 
+class _ByteCapExceeded(RuntimeError):
+    """The preregistered per-object byte ceiling fired — a TERMINAL abort condition,
+    never retried (retrying would multiply vendor traffic past the registered cap)."""
+
+
 # ----------------------------------------------------------------------------- shared helpers
 def _prereg_commit() -> str | None:
     """Commit SHA that last touched the preregistration artifact (recorded in every report)."""
@@ -1101,11 +1106,14 @@ def cmd_fetch(args) -> int:
                         break
                     got_bytes += len(chunk)
                     if got_bytes > args.byte_cap:
-                        raise RuntimeError(f"byte cap {args.byte_cap} exceeded")
+                        raise _ByteCapExceeded(f"byte cap {args.byte_cap} exceeded")
                     out.write(chunk)
             os.replace(tmp, args.dest)
             failure = None
             break
+        except _ByteCapExceeded as e:
+            failure = str(e)
+            break                                        # terminal abort — never retried
         except urllib.error.HTTPError as e:
             failure = f"HTTP {e.code}"
             if e.code == 429 or 500 <= e.code < 600:

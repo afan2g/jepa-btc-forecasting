@@ -1217,6 +1217,42 @@ class TestNetworkIsolation:
         assert rc == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"sentinel"
 
+    def test_fetch_byte_cap_is_terminal_not_retried(self, tmp_path, monkeypatch):
+        """The preregistered byte ceiling is an ABORT condition: exactly one attempt, no
+        retries multiplying vendor traffic (Codex round 12). Fake urlopen — no network."""
+        import urllib.request
+
+        calls = {"n": 0}
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n):
+                return b"x" * n                          # endless stream, exceeds any cap
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            return FakeResp()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        cli = _cli()
+        dest = tmp_path / "probe.zst"
+        rc = cli.main(["fetch", "--object",
+                       "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
+                       "--dest", str(dest), "--approved-by", "user",
+                       "--byte-cap", "1024", "--out", str(tmp_path)])
+        assert rc == cli.FAIL_EXIT
+        assert calls["n"] == 1                           # terminal: no retry
+        assert not dest.exists() and not (tmp_path / "probe.zst.tmp").exists()
+        rep = json.loads((tmp_path / "fetch_binance_futures_2026-04-01_12_"
+                                     "BTCUSDT_orderbook.parquet.zst.json").read_text())
+        assert not rep["pass"] and "byte cap" in rep["failure"]
+        assert rep["attempts"] == 1
+
     def test_fetch_refuses_cap_overrides(self, tmp_path):
         """The preregistered request caps are ceilings — operator overrides above them
         refuse before any network code runs (Codex round 6)."""
