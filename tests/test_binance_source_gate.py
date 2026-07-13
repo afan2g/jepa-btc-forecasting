@@ -488,6 +488,21 @@ class TestChdReplayFailClosed:
         _, meta = replay(chd_frame(rows))
         assert meta["counters"]["delete_absent_levels"] == 1
 
+    def test_duplicate_with_different_pu_is_a_conflict(self):
+        """A re-capture sharing U/u and payload but carrying a DIFFERENT
+        prev_final_update_id is conflicting update-ID metadata, not a harmless duplicate
+        (Codex round 7)."""
+        bids, asks = five_levels()
+        h12 = snapshot_rows(1000, HOUR0 + SEC, bids, asks)
+        h12 += update_rows(1001, 1003, 1000, HOUR0 + 2 * SEC, [("bid", 100.2, 2.0)])
+        h13 = update_rows(1001, 1003, 999, HOUR0 + 3601 * SEC, [("bid", 100.2, 2.0)])
+        df12, df13 = chd_frame(h12), chd_frame(h13)
+        i13 = bsg.validate_chd_frame(df13, exchange="binance_futures", symbol="BTCUSDT",
+                                     date_iso="2026-04-01", hour=13)
+        with pytest.raises(bsg.ChdContinuityError, match="conflicting_duplicate_event"):
+            bsg.replay_chd_window([(_identity(df12), df12), (i13, df13)],
+                                  market="futures", price_scale=10, grid=grid(4))
+
     def test_backwards_update_id_range_refuses(self):
         """An update with first_update_id > final_update_id is malformed regardless of
         how it chains — it must never mutate the book (Codex round 6)."""
@@ -948,10 +963,11 @@ class TestDecideCli:
                                  "lake_frame_full_replay_hash": lake_hash}))
         return str(p)
 
-    def _lake_replay(self, tmp_path, *, frame_hash="lakehash", day="2026-04-01"):
+    def _lake_replay(self, tmp_path, *, frame_hash="lakehash", day="2026-04-01",
+                     instrument="binance-perp"):
         p = tmp_path / "lake_replay.json"
         p.write_text(json.dumps({"step": "replay-conformance", "day": day,
-                                 "instrument": "binance-perp",
+                                 "instrument": instrument,
                                  "frame_replay_hash": frame_hash}))
         return str(p)
 
@@ -1029,6 +1045,9 @@ class TestDecideCli:
         # lake-side binding (round 6): stale/wrong lake frame, or no pinning evidence
         assert run({"lake_hash": "stale-lake-frame"}) == cli.SETUP_ERROR_EXIT
         assert run(lake_replay=None) == cli.SETUP_ERROR_EXIT
+        # instrument binding (round 7): Lake spot frame vs CHD futures frame
+        assert run(lake_replay=self._lake_replay(
+            tmp_path, instrument="binance-spot")) == cli.SETUP_ERROR_EXIT
 
     def test_wrong_day_lake_verdict_hard_rejects(self, tmp_path):
         cli = _cli()
@@ -1122,6 +1141,25 @@ class TestNetworkIsolation:
                        "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"do-not-overwrite"
+
+    def test_fetch_expansion_needs_separate_approval(self, tmp_path):
+        """The probe approval alone never unlocks an expansion object; with an explicit
+        --expansion-approved-by the object clears the allowlist (and is then stopped by
+        the dest-exists guard here, before any network) (Codex round 7)."""
+        cli = _cli()
+        expansion_obj = "binance_spot/2026-04-01/03/BTCUSDT_orderbook.parquet.zst"
+        rc = cli.main(["fetch", "--object", expansion_obj,
+                       "--dest", str(tmp_path / "e.zst"), "--approved-by", "user",
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
+        assert not (tmp_path / "e.zst").exists()
+        dest = tmp_path / "e.zst"
+        dest.write_bytes(b"sentinel")                    # stops AFTER the allowlist
+        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
+                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
+        assert dest.read_bytes() == b"sentinel"
 
     def test_fetch_refuses_cap_overrides(self, tmp_path):
         """The preregistered request caps are ceilings — operator overrides above them

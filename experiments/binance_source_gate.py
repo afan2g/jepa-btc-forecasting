@@ -610,7 +610,11 @@ def replay_chd_window(hour_frames: list[tuple[dict, pd.DataFrame]], *, market: s
             if prev_event is not None and prev_event.kind == "update" and \
                     ev.first_update_id == prev_event.first_update_id and \
                     ev.final_update_id == prev_event.final_update_id:
-                if (ev.bids, ev.asks) == (prev_event.bids, prev_event.asks):
+                # a duplicate is harmless only when ALL ids (incl. prev_final_update_id)
+                # AND the level payload match; same U/u with a different pu is conflicting
+                # update-ID metadata, not a re-capture (Codex round 7)
+                if ev.prev_final_update_id == prev_event.prev_final_update_id and \
+                        (ev.bids, ev.asks) == (prev_event.bids, prev_event.asks):
                     counters["duplicate_events_dropped"] += 1
                     counters["event_time_regressions"] += int(regresses)
                     continue

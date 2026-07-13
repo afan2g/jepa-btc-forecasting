@@ -651,6 +651,7 @@ def cmd_decide(args) -> int:
 
     chd_reports = [_read_json(p) for p in (args.chd_replay or [])]
     chd_frame_hashes = set()
+    chd_hash_exchange: dict[str, str] = {}
     for path, rep in zip(args.chd_replay or [], chd_reports):
         if rep.get("step") != "chd-replay":
             raise ValueError(f"{path} is not a chd-replay report")
@@ -663,6 +664,7 @@ def cmd_decide(args) -> int:
         h = (rep.get("meta") or {}).get("frame_replay_hash")
         if h:
             chd_frame_hashes.add(h)
+            chd_hash_exchange[h] = rep["exchange"]
     if not chd_reports:
         chd_verdict = "inconclusive"    # never approved/downloaded — fail closed
     elif any(r.get("chd_verdict") != "certified" for r in chd_reports):
@@ -700,6 +702,7 @@ def cmd_decide(args) -> int:
                 "that none of the supplied chd-replay reports produced — align the "
                 "comparison window with the replay evidence")
         lake_hashes = set()
+        lake_hash_instrument: dict[str, str] = {}
         for path in (args.lake_replay_report or []):
             rep = _read_json(path)
             if rep.get("step") != "replay-conformance":
@@ -709,6 +712,7 @@ def cmd_decide(args) -> int:
                                  f"{rep.get('day')!r}, not {fixture_day}")
             if rep.get("frame_replay_hash"):
                 lake_hashes.add(rep["frame_replay_hash"])
+                lake_hash_instrument[rep["frame_replay_hash"]] = rep.get("instrument")
         comp_lake_hash = comp.get("lake_frame_full_replay_hash")
         if not comp_lake_hash:
             raise ValueError(f"{args.comparison} carries no lake_frame_full_replay_hash — "
@@ -722,6 +726,18 @@ def cmd_decide(args) -> int:
                 f"{args.comparison} compared a Lake frame (hash {comp_lake_hash[:16]}...) "
                 "that the supplied replay-conformance evidence did not produce — the "
                 "comparison does not cover the certified Lake output")
+        # instrument binding (Codex round 7): the two compared frames must be the SAME
+        # instrument — a Lake spot frame vs a CHD futures frame is not a valid
+        # cross-source comparison even if the aggregate bars pass
+        exchange_instrument = {"binance_futures": "binance-perp",
+                               "binance_spot": "binance-spot"}
+        chd_side = exchange_instrument.get(chd_hash_exchange.get(comp_chd_hash))
+        lake_side = lake_hash_instrument.get(comp_lake_hash)
+        if chd_side != lake_side:
+            raise ValueError(
+                f"{args.comparison} compares mismatched instruments: Lake side is "
+                f"{lake_side!r} but the CHD side is {chd_side!r} — a same-instrument "
+                "comparison is required")
         comparison_pass = bool(comp.get("pass"))
 
     if lake_verdict == "certified":
@@ -987,13 +1003,17 @@ def cmd_fetch(args) -> int:
     prereg = bsg.load_preregistration(args.prereg)
     probe = prereg["fixture"]["cryptohftdata"]["probe"]
     allowed = {probe["object"]}
-    for exchange in ("binance_futures", "binance_spot"):
-        for hour in range(24):
-            allowed.add(f"{exchange}/{probe['date']}/{hour:02d}/"
-                        f"{probe['symbol']}_{probe['data_type']}.parquet.zst")
+    # request_bounds.expansion is a SEPARATE approval: the probe approval alone never
+    # unlocks the 48 expansion objects (Codex round 7)
+    if args.expansion_approved_by and args.expansion_approved_by.strip():
+        for exchange in ("binance_futures", "binance_spot"):
+            for hour in range(24):
+                allowed.add(f"{exchange}/{probe['date']}/{hour:02d}/"
+                            f"{probe['symbol']}_{probe['data_type']}.parquet.zst")
     if args.object not in allowed:
-        print(f"REFUSING fetch: object {args.object!r} is not in the preregistered "
-              "probe/expansion set (see preregistration request_bounds).", file=sys.stderr)
+        print(f"REFUSING fetch: object {args.object!r} is not preregistered for the "
+              "granted approval (probe object only, unless --expansion-approved-by "
+              "records an explicit expansion approval).", file=sys.stderr)
         return SETUP_ERROR_EXIT
     # the preregistered request caps are CEILINGS — operator overrides above them refuse
     # before any network code runs (Codex round 6)
@@ -1058,6 +1078,8 @@ def cmd_fetch(args) -> int:
         sha = _sha256_file(args.dest)
     report = {"step": "fetch", "prereg_commit": _prereg_commit(), "object": args.object,
               "url": url, "dest": args.dest, "approved_by": args.approved_by.strip(),
+              "expansion_approved_by": (args.expansion_approved_by.strip()
+                                        if args.expansion_approved_by else None),
               "attempts": attempts, "bytes": got_bytes, "secs": secs, "sha256": sha,
               "byte_cap": args.byte_cap, "timeout_s": args.timeout,
               "failure": failure, "pass": bool(ok)}
@@ -1158,6 +1180,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--dest", required=True)
     p.add_argument("--approved-by", default=None,
                    help="REQUIRED: explicit user-approval provenance string")
+    p.add_argument("--expansion-approved-by", default=None,
+                   help="explicit EXPANSION approval provenance; without it only the "
+                        "preregistered probe object may be fetched")
     p.add_argument("--byte-cap", type=int, default=FETCH_BYTE_CAP)
     p.add_argument("--max-attempts", type=int, default=FETCH_MAX_ATTEMPTS)
     p.add_argument("--timeout", type=int, default=FETCH_TIMEOUT_S)
