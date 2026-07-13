@@ -547,6 +547,17 @@ class TestChdReplayFailClosed:
             with pytest.raises(bsg.ChdValidationError, match="malformed_decimal"):
                 replay(df)
 
+    def test_non_positive_update_price_refuses(self):
+        """A zero/negative price in an update level must never mutate the book, even deep
+        outside the top-K (Codex round 18)."""
+        for bad_price in (0.0, -100.1):
+            df = valid_hour()
+            rows = df.to_dict("records")
+            rows += update_rows(1007, 1008, 1006, HOUR0 + 4 * SEC,
+                                [("bid", bad_price, 5.0)])
+            with pytest.raises(bsg.ChdValidationError, match="malformed_price"):
+                replay(chd_frame(rows))
+
     def test_duplicate_level_in_one_event_refuses(self):
         bids, asks = five_levels()
         rows = snapshot_rows(1000, HOUR0 + SEC, bids, asks)
@@ -1203,18 +1214,21 @@ class TestNetworkIsolation:
         assert dest.read_bytes() == b"do-not-overwrite"
 
     def _probe_evidence(self, tmp_path, *, validate_pass=True, replay_verdict="certified",
-                        k=10, tick_report_day="2026-04-01"):
+                        k=10, tick_report_day="2026-04-01", replay_sha="probesha"):
         val = tmp_path / "probe_validate.json"
         val.write_text(json.dumps({
             "step": "chd-validate", "pass": validate_pass,
             "identity": {"exchange": "binance_futures", "symbol": "BTCUSDT",
-                         "date": "2026-04-01", "hour": 12}}))
+                         "date": "2026-04-01", "hour": 12,
+                         "provenance": {"parquet_sha256": "probesha"}}}))
         rep = tmp_path / "probe_replay.json"
         rep.write_text(json.dumps({
             "step": "chd-replay", "chd_verdict": replay_verdict,
             "pass": replay_verdict == "certified", "exchange": "binance_futures",
             "symbol": "BTCUSDT", "date": "2026-04-01", "hours": [12],
-            "tick_report_day": tick_report_day, "meta": {"k": k}}))
+            "tick_report_day": tick_report_day,
+            "identities": [{"hour": 12, "provenance": {"parquet_sha256": replay_sha}}],
+            "meta": {"k": k}}))
         return str(val), str(rep)
 
     def test_fetch_expansion_needs_separate_approval_and_probe_evidence(self, tmp_path):
@@ -1260,6 +1274,13 @@ class TestNetworkIsolation:
         rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
                        "--approved-by", "user", "--expansion-approved-by", "user-exp",
                        "--probe-validate-report", val, "--probe-replay-report", stale_rep,
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        # replay of DIFFERENT bytes than the validated probe object (round 18)
+        val, wrong_bytes = self._probe_evidence(tmp_path, replay_sha="oldsha")
+        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
+                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
+                       "--probe-validate-report", val, "--probe-replay-report", wrong_bytes,
                        "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
         # full evidence: clears the allowlist, stopped by the dest guard (no network)

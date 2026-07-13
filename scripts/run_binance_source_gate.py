@@ -1120,6 +1120,17 @@ def cmd_fetch(args) -> int:
                   f"{rep.get('tick_report_day')!r}, not the probe date {probe['date']}.",
                   file=sys.stderr)
             return SETUP_ERROR_EXIT
+        # the replay must have replayed the SAME BYTES the validation validated — a stale
+        # certified replay of a previous download of the same partition must not unlock
+        # expansion spend (Codex round 18)
+        val_sha = (ident.get("provenance") or {}).get("parquet_sha256")
+        rep_shas = {(i.get("provenance") or {}).get("parquet_sha256")
+                    for i in (rep.get("identities") or []) if i.get("hour") == probe["hour_utc"]}
+        if not val_sha or val_sha not in rep_shas:
+            print("REFUSING fetch: --probe-replay-report did not replay the exact bytes "
+                  f"the validation validated (validate parquet_sha256 {val_sha!r} not in "
+                  f"replay identities {sorted(x for x in rep_shas if x)}).", file=sys.stderr)
+            return SETUP_ERROR_EXIT
         for exchange in ("binance_futures", "binance_spot"):
             for hour in range(24):
                 allowed.add(f"{exchange}/{probe['date']}/{hour:02d}/"

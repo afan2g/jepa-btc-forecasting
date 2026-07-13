@@ -441,6 +441,12 @@ def _group_events(df: pd.DataFrame, *, price_scale: int) -> list[ChdEvent]:
         asks: dict[int, float] = {}
         for i in rows:
             ticks = to_ticks(price[i], price_scale)
+            if ticks <= 0:
+                # a zero/negative price is malformed vendor data in ANY event kind —
+                # update levels must never mutate the book with it (snapshots already
+                # refuse p <= 0 downstream via classify_chd_snapshot)
+                raise ChdValidationError("malformed_price",
+                                         f"non-positive price {price[i]!r} in event row")
             size = float(parse_decimal(qty[i], field="quantity"))
             book = bids if side[i] == "bid" else asks
             if ticks in book:
