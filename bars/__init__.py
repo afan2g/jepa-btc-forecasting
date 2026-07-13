@@ -8,5 +8,8 @@ T2 ships `bars.snapshot` (the source-neutral dual-cut target-book reads: observa
 feature/cost read vs true label anchor, plus the staleness gate). T3 ships
 `bars.features` (the causal stationarized single-venue per-bar feature vector over
 T1 members + T2 observable reads, with the top-K ladder exposed on the observable
-read). Labels, costs, and the orchestrator are T4-T10 and do NOT live here yet.
+read). T7 ships `bars.cost` (per-row `cost_bps`/`half_spread_bps` from the dual
+reads + the explicit versioned venue fee/slippage assumption contract). Labels
+live in `data/` (T5/T6); the cross-venue increment, manifest writer, and
+orchestrator are T4/T8-T10 and do NOT live here yet.
 """
