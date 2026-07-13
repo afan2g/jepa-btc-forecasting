@@ -9,19 +9,11 @@ import datetime as _dt
 import numpy as np
 import pandas as pd
 
+from data.uniqueness import concurrency_uniqueness
 from eval.manifest import MANIFEST_VERSION
 from eval.matrix import RESERVED
 
 FEATURES = ["ofi_integrated", "microprice_dev", "queue_imb", "spread_tick", "cvd"]
-
-
-def _concurrency_uniqueness(t0: np.ndarray, t1: np.ndarray) -> np.ndarray:
-    """uniqueness_i = 1 / (# label spans covering t_event_i)."""
-    t0s = np.sort(t0); t1s = np.sort(t1)
-    started = np.searchsorted(t0s, t0, side="right")
-    ended = np.searchsorted(t1s, t0, side="right")
-    conc = np.maximum(started - ended, 1)
-    return 1.0 / conc
 
 
 def make_matrix(n: int = 8000, *, signal_strength: float, seed: int,
@@ -46,7 +38,7 @@ def make_matrix(n: int = 8000, *, signal_strength: float, seed: int,
     df["t_available"] = t_event  # synchronous baseline: latency handled upstream by lagging features
     df["cost_bps"] = np.where(regime == "wide", 4.0, 1.5)
     df["half_spread_bps"] = np.where(regime == "wide", 2.0, 0.6)
-    df["uniqueness"] = _concurrency_uniqueness(t_event, t_barrier)
+    df["uniqueness"] = concurrency_uniqueness(t_event, t_barrier)
     df["regime"] = regime
     df["horizon"] = "10s"
     return df, list(FEATURES), int(lookback)
@@ -131,7 +123,7 @@ def _g0_partition_rows(rng, *, lo_ns: int, boundary_ns: int, n_bars: int, horizo
         df["t_available"] = te
         df["cost_bps"] = np.where(regime[keep] == "wide", 4.0, 1.5)
         df["half_spread_bps"] = np.where(regime[keep] == "wide", 2.0, 0.6)
-        df["uniqueness"] = _concurrency_uniqueness(te, te + h_ns)
+        df["uniqueness"] = concurrency_uniqueness(te, te + h_ns)
         df["regime"] = regime[keep]
         df["horizon"] = tag
         frames.append(df)
