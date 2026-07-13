@@ -666,8 +666,9 @@ def cmd_decide(args) -> int:
                 f"{path} is about {rep.get('exchange')}/{rep.get('symbol')}/"
                 f"{rep.get('date')} — not a preregistered April window "
                 f"({sorted(allowed_exchanges)}/{probe['symbol']}/{fixture_day})")
-        # a COMPLETING replay's verdict is only preregistered at replay_contract.k — a
-        # stale report generated at another depth must never aggregate (Codex round 10)
+        # a COMPLETING replay's verdict is only preregistered at replay_contract.k and at
+        # the fixture-day measured tick scale — a stale report generated at another depth
+        # or scale binding must never aggregate (Codex rounds 10/17)
         if rep.get("chd_verdict") != "inconclusive":
             rep_k = (rep.get("meta") or {}).get("k")
             prereg_k = int(prereg["replay_contract"]["k"])
@@ -675,6 +676,10 @@ def cmd_decide(args) -> int:
                 raise ValueError(
                     f"{path} records a replay at k={rep_k}, not the preregistered "
                     f"replay_contract.k={prereg_k} — its chd_verdict is off-contract")
+            if rep.get("tick_report_day") != fixture_day:
+                raise ValueError(
+                    f"{path} was scaled by a tick report for "
+                    f"{rep.get('tick_report_day')!r}, not the fixture day {fixture_day}")
         h = (rep.get("meta") or {}).get("frame_replay_hash")
         if h:
             chd_frame_hashes.add(h)
@@ -906,6 +911,25 @@ def cmd_chd_replay(args) -> int:
               f"{prereg_k}; a chd_verdict is only defined at the registered depth",
               file=sys.stderr)
         return SETUP_ERROR_EXIT
+    # the replay tick grid is decision-bearing too: a finer --scale than the measured
+    # tick would make off-tick prices look integral (swallowing off_tick evidence), so
+    # the scale binds to the fixture-day tick report exactly as in compare (Codex r17)
+    tick = _read_json(args.tick_report)
+    if tick.get("step") != "tick-scale":
+        raise ValueError(f"{args.tick_report} is not a tick-scale report")
+    fixture_day = prereg["fixture"]["lake"]["day"]
+    if tick.get("day") != fixture_day:
+        print(f"ERROR: {args.tick_report} measures day {tick.get('day')!r}, not the "
+              f"fixture day {fixture_day}.", file=sys.stderr)
+        return SETUP_ERROR_EXIT
+    instrument = {"binance_futures": "binance-perp",
+                  "binance_spot": "binance-spot"}.get(args.exchange)
+    measured = ((tick.get("instruments") or {}).get(instrument) or {}) \
+        .get("conformance_scale")
+    if int(args.scale) != measured:
+        print(f"ERROR: --scale {args.scale} differs from the measured conformance scale "
+              f"{measured} for {instrument} ({args.tick_report}).", file=sys.stderr)
+        return SETUP_ERROR_EXIT
     hours = list(range(args.start_hour, args.start_hour + args.n_hours))
     if len(args.files) != len(hours):
         print(f"ERROR: {len(args.files)} files for {len(hours)} hours", file=sys.stderr)
@@ -959,6 +983,7 @@ def cmd_chd_replay(args) -> int:
               "meta": _slim_meta(meta), "bars": bars,
               "frozen": {**frozen, "frozen_fraction_max": frozen_cap,
                          "frozen_cap_fired": bool(frozen_fired)},
+              "tick_report_day": tick.get("day"),
               "chd_verdict": verdict, "pass": bool(quality_ok)}
     _write_report(args.out, f"{name}.json", report)
     print(f"chd-replay: {verdict.upper()} crossed={meta['crossed_rate']:.5f} "
@@ -1088,6 +1113,12 @@ def cmd_fetch(args) -> int:
             print("REFUSING fetch: --probe-replay-report was produced at "
                   f"k={(rep.get('meta') or {}).get('k')}, not the preregistered "
                   f"replay_contract.k={prereg['replay_contract']['k']}.", file=sys.stderr)
+            return SETUP_ERROR_EXIT
+        if rep.get("tick_report_day") != probe["date"]:
+            # same stale-scale vector as decide's pin (Codex round 17)
+            print("REFUSING fetch: --probe-replay-report was scaled by a tick report for "
+                  f"{rep.get('tick_report_day')!r}, not the probe date {probe['date']}.",
+                  file=sys.stderr)
             return SETUP_ERROR_EXIT
         for exchange in ("binance_futures", "binance_spot"):
             for hour in range(24):
@@ -1251,11 +1282,14 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     p = sub.add_parser("chd-replay"); common(p)
     p.add_argument("--files", nargs="+", required=True)
-    p.add_argument("--exchange", required=True)
+    p.add_argument("--exchange", required=True, choices=("binance_futures", "binance_spot"))
     p.add_argument("--symbol", default="BTCUSDT")
     p.add_argument("--date", required=True)
     p.add_argument("--start-hour", type=int, required=True)
     p.add_argument("--n-hours", type=int, required=True)
+    p.add_argument("--tick-report", required=True,
+                   help="tick-scale report binding --scale to the measured conformance "
+                        "scale for the exchange's instrument")
     p.add_argument("--scale", type=int, required=True)
     p.add_argument("--k", type=int, default=10)
     p.add_argument("--frame-out", default=None)

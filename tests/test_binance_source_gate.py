@@ -974,7 +974,7 @@ class TestDecideCli:
             p = tmp_path / f"chd_{i}.json"
             p.write_text(json.dumps({
                 "step": "chd-replay", "chd_verdict": v, "date": date, "symbol": symbol,
-                "exchange": exchange, "hours": [12],
+                "exchange": exchange, "hours": [12], "tick_report_day": "2026-04-01",
                 "meta": {"frame_replay_hash": f"hash{i}", "k": 10}}))
             paths.append(str(p))
         return paths
@@ -1043,7 +1043,22 @@ class TestDecideCli:
         p.write_text(json.dumps({
             "step": "chd-replay", "chd_verdict": "certified", "pass": True,
             "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
-            "hours": [12], "meta": {"frame_replay_hash": "hash0", "k": 1}}))
+            "hours": [12], "tick_report_day": "2026-04-01",
+            "meta": {"frame_replay_hash": "hash0", "k": 1}}))
+        cli = _cli()
+        rc = cli.main(["decide", "--lake-verdict", self._lake(tmp_path, "degraded"),
+                       "--chd-replay", str(p), "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
+
+    def test_stale_replay_tick_binding_hard_rejects(self, tmp_path):
+        """A completing chd-replay report scaled by a tick report from another day must
+        never aggregate (Codex round 17)."""
+        p = tmp_path / "chd_stale_tick.json"
+        p.write_text(json.dumps({
+            "step": "chd-replay", "chd_verdict": "certified", "pass": True,
+            "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
+            "hours": [12], "tick_report_day": "2026-03-31",
+            "meta": {"frame_replay_hash": "hash0", "k": 10}}))
         cli = _cli()
         rc = cli.main(["decide", "--lake-verdict", self._lake(tmp_path, "degraded"),
                        "--chd-replay", str(p), "--out", str(tmp_path)])
@@ -1188,7 +1203,7 @@ class TestNetworkIsolation:
         assert dest.read_bytes() == b"do-not-overwrite"
 
     def _probe_evidence(self, tmp_path, *, validate_pass=True, replay_verdict="certified",
-                        k=10):
+                        k=10, tick_report_day="2026-04-01"):
         val = tmp_path / "probe_validate.json"
         val.write_text(json.dumps({
             "step": "chd-validate", "pass": validate_pass,
@@ -1198,7 +1213,8 @@ class TestNetworkIsolation:
         rep.write_text(json.dumps({
             "step": "chd-replay", "chd_verdict": replay_verdict,
             "pass": replay_verdict == "certified", "exchange": "binance_futures",
-            "symbol": "BTCUSDT", "date": "2026-04-01", "hours": [12], "meta": {"k": k}}))
+            "symbol": "BTCUSDT", "date": "2026-04-01", "hours": [12],
+            "tick_report_day": tick_report_day, "meta": {"k": k}}))
         return str(val), str(rep)
 
     def test_fetch_expansion_needs_separate_approval_and_probe_evidence(self, tmp_path):
@@ -1237,6 +1253,13 @@ class TestNetworkIsolation:
         rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
                        "--approved-by", "user", "--expansion-approved-by", "user-exp",
                        "--probe-validate-report", val, "--probe-replay-report", k1_rep,
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        # stale tick binding behind the probe evidence (round 17)
+        val, stale_rep = self._probe_evidence(tmp_path, tick_report_day="2026-03-31")
+        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
+                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
+                       "--probe-validate-report", val, "--probe-replay-report", stale_rep,
                        "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
         # full evidence: clears the allowlist, stopped by the dest guard (no network)
@@ -1387,6 +1410,14 @@ class TestCliWithFixtures:
                          .read_text())
         assert not rep["pass"] and rep["refusal"] == "wrong_partition_window"
 
+    def _tick_report(self, tmp_path):
+        p = tmp_path / "tick_scale.json"
+        p.write_text(json.dumps({
+            "step": "tick-scale", "day": "2026-04-01", "pass": True,
+            "instruments": {"binance-perp": {"conformance_scale": 10},
+                            "binance-spot": {"conformance_scale": 100}}}))
+        return str(p)
+
     def test_chd_replay_cli_certified_and_frame_out(self, tmp_path):
         import pyarrow.parquet as pq
         cli = _cli()
@@ -1404,6 +1435,7 @@ class TestCliWithFixtures:
         frame_out = tmp_path / "chd_frame.parquet"
         rc = cli.main(["chd-replay", "--files", path, "--exchange", "binance_futures",
                        "--date", "2026-04-01", "--start-hour", "12", "--n-hours", "1",
+                       "--tick-report", self._tick_report(tmp_path),
                        "--scale", "10", "--out", str(tmp_path),
                        "--frame-out", str(frame_out)])
         assert rc == 0
@@ -1421,6 +1453,7 @@ class TestCliWithFixtures:
         path = self._write_hour(tmp_path, valid_hour())
         rc = cli.main(["chd-replay", "--files", path, "--exchange", "binance_futures",
                        "--date", "2026-04-01", "--start-hour", "12", "--n-hours", "1",
+                       "--tick-report", self._tick_report(tmp_path),
                        "--scale", "10", "--k", "1", "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT
         assert not (tmp_path / "chd_replay_binance_futures_2026-04-01_12_1h.json").exists()
@@ -1431,6 +1464,7 @@ class TestCliWithFixtures:
         path = self._write_hour(tmp_path, chd_frame(rows))
         rc = cli.main(["chd-replay", "--files", path, "--exchange", "binance_futures",
                        "--date", "2026-04-01", "--start-hour", "12", "--n-hours", "1",
+                       "--tick-report", self._tick_report(tmp_path),
                        "--scale", "10", "--out", str(tmp_path)])
         assert rc == cli.FAIL_EXIT
         rep = json.loads((tmp_path / "chd_replay_binance_futures_2026-04-01_12_1h.json")
@@ -1451,6 +1485,7 @@ class TestCliWithFixtures:
         path = self._write_hour(tmp_path, chd_frame(rows))
         rc = cli.main(["chd-replay", "--files", path, "--exchange", "binance_futures",
                        "--date", "2026-04-01", "--start-hour", "12", "--n-hours", "1",
+                       "--tick-report", self._tick_report(tmp_path),
                        "--scale", "10", "--out", str(tmp_path)])
         assert rc == cli.FAIL_EXIT
         rep = json.loads((tmp_path / "chd_replay_binance_futures_2026-04-01_12_1h.json")
