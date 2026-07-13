@@ -752,6 +752,13 @@ def cmd_decide(args) -> int:
                 f"{args.comparison} compares mismatched instruments: Lake side is "
                 f"{lake_side!r} but the CHD side is {chd_side!r} — a same-instrument "
                 "comparison is required")
+        # the comparison's recorded instrument (bound to the measured tick scale at
+        # generation) must agree with the hash-derived instrument (Codex round 14)
+        if comp.get("instrument") != lake_side:
+            raise ValueError(
+                f"{args.comparison} records instrument {comp.get('instrument')!r} but the "
+                f"bound frames are {lake_side!r} — regenerate the comparison with the "
+                "matching --instrument/--tick-report")
         comparison_pass = bool(comp.get("pass"))
 
     if lake_verdict == "certified":
@@ -960,6 +967,19 @@ def cmd_compare(args) -> int:
     import pandas as pd
     import pyarrow.parquet as pq
 
+    # the comparison is decision-bearing and preregistered "in tick space at the shared
+    # conformance scale" — the scale must come from the measured tick evidence, never a
+    # bare operator value (Codex round 14)
+    tick = _read_json(args.tick_report)
+    if tick.get("step") != "tick-scale":
+        raise ValueError(f"{args.tick_report} is not a tick-scale report")
+    measured = ((tick.get("instruments") or {}).get(args.instrument) or {}) \
+        .get("conformance_scale")
+    if int(args.scale) != measured:
+        print(f"ERROR: --scale {args.scale} differs from the measured conformance scale "
+              f"{measured} for {args.instrument} ({args.tick_report}).", file=sys.stderr)
+        return SETUP_ERROR_EXIT
+
     frames = {}
     full_hashes = {}
     for label, path in (("lake", args.lake_frame), ("chd", args.chd_frame)):
@@ -987,6 +1007,7 @@ def cmd_compare(args) -> int:
     evaluation = bsg.evaluate_comparison(metrics)
     report = {"step": "compare", "prereg_commit": _prereg_commit(),
               "lake_frame": args.lake_frame, "chd_frame": args.chd_frame,
+              "instrument": args.instrument, "tick_report_day": tick.get("day"),
               "window": [args.window_start, args.window_end], "price_scale": int(args.scale),
               # content binding for `decide`: pre-slice hashes tie the comparison to the
               # replay evidence that produced each frame; as-used hashes document the
@@ -1232,6 +1253,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = sub.add_parser("compare"); common(p)
     p.add_argument("--lake-frame", required=True)
     p.add_argument("--chd-frame", required=True)
+    p.add_argument("--instrument", required=True, choices=("binance-perp", "binance-spot"))
+    p.add_argument("--tick-report", required=True,
+                   help="tick-scale report binding --scale to the measured conformance "
+                        "scale for --instrument")
     p.add_argument("--scale", type=int, required=True)
     p.add_argument("--k", type=int, default=10)
     p.add_argument("--window-start", default=None)

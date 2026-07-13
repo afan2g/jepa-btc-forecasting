@@ -956,9 +956,10 @@ class TestDecideCli:
         return paths
 
     def _comp(self, tmp_path, ok, *, window=("2026-04-01T12:00:00", "2026-04-01T13:00:00"),
-              chd_hash="hash0", lake_hash="lakehash"):
+              chd_hash="hash0", lake_hash="lakehash", instrument="binance-perp"):
         p = tmp_path / "comparison.json"
         p.write_text(json.dumps({"step": "compare", "pass": ok, "window": list(window),
+                                 "instrument": instrument,
                                  "chd_frame_full_replay_hash": chd_hash,
                                  "lake_frame_full_replay_hash": lake_hash}))
         return str(p)
@@ -1061,6 +1062,9 @@ class TestDecideCli:
         # instrument binding (round 7): Lake spot frame vs CHD futures frame
         assert run(lake_replay=self._lake_replay(
             tmp_path, instrument="binance-spot")) == cli.SETUP_ERROR_EXIT
+        # recorded-instrument binding (round 14): comparison generated for another
+        # instrument than the bound frames
+        assert run({"instrument": "binance-spot"}) == cli.SETUP_ERROR_EXIT
 
     def test_wrong_day_lake_verdict_hard_rejects(self, tmp_path):
         cli = _cli()
@@ -1485,12 +1489,24 @@ class TestCliWithFixtures:
         for name in ("lake.parquet", "chd.parquet"):
             pq.write_table(pa.Table.from_pandas(f, preserve_index=False),
                            str(tmp_path / name))
-        rc = cli.main(["compare", "--lake-frame", str(tmp_path / "lake.parquet"),
-                       "--chd-frame", str(tmp_path / "chd.parquet"), "--scale", "10",
-                       "--out", str(tmp_path)])
+        tick = tmp_path / "tick_scale.json"
+        tick.write_text(json.dumps({
+            "step": "tick-scale", "day": "2026-04-01", "pass": True,
+            "instruments": {"binance-perp": {"conformance_scale": 10},
+                            "binance-spot": {"conformance_scale": 100}}}))
+        base = ["compare", "--lake-frame", str(tmp_path / "lake.parquet"),
+                "--chd-frame", str(tmp_path / "chd.parquet"),
+                "--instrument", "binance-perp", "--tick-report", str(tick),
+                "--out", str(tmp_path)]
+        # off-measured scale refuses before any comparison (Codex round 14)
+        rc = cli.main(base + ["--scale", "100"])
+        assert rc == cli.SETUP_ERROR_EXIT
+        rc = cli.main(base + ["--scale", "10"])
         assert rc == 0
         rep = json.loads((tmp_path / "comparison.json").read_text())
         assert rep["pass"] and rep["evaluation"]["pass"]
+        assert rep["instrument"] == "binance-perp"
+        assert rep["lake_frame_full_replay_hash"] == rep["chd_frame_full_replay_hash"]
 
     def test_frame_replay_hash_pins_to_snapshot_seed_implementation(self):
         from experiments.snapshot_seed import frame_replay_hash as h54
