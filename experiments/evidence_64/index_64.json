@@ -2,16 +2,16 @@
   "issue": 64,
   "generated_utc": "2026-07-13",
   "preregistration_first_commit": "633d4e4f771574a2b8b207edf1947e87fbc987b8",
-  "preregistration_last_amended_commit": "c80ad2935aa360790f2179da92a0c3cf0ed8e3a4",
-  "reports_generated_at_commit": "6aa9b8ae593b24e72ef46974f27049390d21db6c",
-  "provenance_note": "Local Crypto Lake 2026-04-01 Stage-2 integrity evidence for issue #64. Inputs are the nine Stage-1 raw units pinned (sha256/fingerprint/rows/bytes) inside the preregistration fixture and re-verified by verify_inputs.json. Run 1 = production scripts/run_binance_recon.py --engine auto (Python oracle; perp replay 84,153 s). Run 2 = stage2-native-run (production process_unit path, explicit native override, perp+spot scales 10/100; perp replay ~29 s). stage2_cross_engine_determinism pins run1==run2 on every semantic manifest field incl. published parquet sha256 (full-day cross-engine conformance, 2026-07-12 amendment). No vendor I/O of any kind was performed; no raw market rows appear in any tracked file. Regenerated 2026-07-13 under the amendment-4 preregistration (Codex-hardening enforcement: evidence binding, provenance, request-bounds, k-pin): every harness report re-ran with identical results \u2014 all PASS, cross-engine EQUAL (7 units), verdict CERTIFIED; each report's embedded prereg_commit now matches the last-amended preregistration commit recorded here.",
+  "preregistration_last_amended_commit": "4b66c7232511b8e7abdc2e24364e5e2bea1e0388",
+  "reports_generated_at_commit": "4b66c7232511b8e7abdc2e24364e5e2bea1e0388",
+  "provenance_note": "Local Crypto Lake 2026-04-01 Stage-2 integrity evidence for issue #64. Inputs are the nine Stage-1 raw units pinned (sha256/fingerprint/rows/bytes) inside the preregistration fixture and re-verified by verify_inputs.json. Run 1 = production scripts/run_binance_recon.py --engine auto (Python oracle; perp replay 84,153 s). Run 2 = stage2-native-run (production process_unit path, explicit native override, perp+spot scales 10/100; perp replay ~29 s). stage2_cross_engine_determinism pins run1==run2 on every semantic manifest field incl. published parquet sha256 (full-day cross-engine conformance, 2026-07-12 amendment). No vendor I/O of any kind was performed; no raw market rows appear in any tracked file. Regenerated 2026-07-13 under amendment 5 (widened tick measurement): liquidations gated by the universal d<=4 integrality cap (perp liquidation prices measured d=2, 36/1092 off the $0.10 grid - average-fill values, excluded from the replay conformance scale per the registered delta+book+trades clause), funding mark/index prices recorded descriptively. Verdict remains CERTIFIED; conformance scales 10/100 unchanged.",
   "tracked_files": {
     "lake_verdict_2026-04-01.json": "efc70e03ee3146904f9fe837d39ee0a31d01e4a6982b527c317a4aba72d0909f",
     "stage2_cross_engine_determinism.json": "09e141c470b0db1c689ebc3a38d3c32d1ba3509b0c09800e7bb58628d6da4a93"
   },
   "ignored_reports_sha256": {
     "verify_inputs.json": "4fb5ecec636539f09c21100ec04e1856c6f67c70dcb441ed5ddda4961f109f02",
-    "tick_scale.json": "1f9fa9aca2ed7a22a81e5faf188f3b51fead47a8581c7cf9ef59fa94d047caf0",
+    "tick_scale.json": "16b6472502503d790895285d268a3917dc5b379e1847b78bc99d0cb264f8875d",
     "silence.json": "490b5cc4cc97472e0d50db1e66a5c2d4ae96031c0dfded13f11f79bacf09edfd",
     "replay_conformance_binance-perp.json": "204c48e1812f91b2490bc2f0027647f80d27a976a7c3726881187a2c8be5f1ee",
     "replay_conformance_binance-spot.json": "8ba179e40e1a0db5cb0b95c66ebc8676f496d715b0915a0652f70bd625051a38",
