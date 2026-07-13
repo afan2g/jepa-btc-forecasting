@@ -661,6 +661,15 @@ def cmd_decide(args) -> int:
                 f"{path} is about {rep.get('exchange')}/{rep.get('symbol')}/"
                 f"{rep.get('date')} — not a preregistered April window "
                 f"({sorted(allowed_exchanges)}/{probe['symbol']}/{fixture_day})")
+        # a COMPLETING replay's verdict is only preregistered at replay_contract.k — a
+        # stale report generated at another depth must never aggregate (Codex round 10)
+        if rep.get("chd_verdict") != "inconclusive":
+            rep_k = (rep.get("meta") or {}).get("k")
+            prereg_k = int(prereg["replay_contract"]["k"])
+            if rep_k != prereg_k:
+                raise ValueError(
+                    f"{path} records a replay at k={rep_k}, not the preregistered "
+                    f"replay_contract.k={prereg_k} — its chd_verdict is off-contract")
         h = (rep.get("meta") or {}).get("frame_replay_hash")
         if h:
             chd_frame_hashes.add(h)

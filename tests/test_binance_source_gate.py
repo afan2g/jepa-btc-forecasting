@@ -951,7 +951,7 @@ class TestDecideCli:
             p.write_text(json.dumps({
                 "step": "chd-replay", "chd_verdict": v, "date": date, "symbol": symbol,
                 "exchange": exchange, "hours": [12],
-                "meta": {"frame_replay_hash": f"hash{i}"}}))
+                "meta": {"frame_replay_hash": f"hash{i}", "k": 10}}))
             paths.append(str(p))
         return paths
 
@@ -1008,6 +1008,19 @@ class TestDecideCli:
     def test_ambiguous_combination_escalates_fail_closed(self, tmp_path):
         rep = self._decide(tmp_path, "certified", chd=["degraded"])
         assert rep["decision"] == "escalate"
+
+    def test_off_contract_replay_depth_hard_rejects(self, tmp_path):
+        """A completing chd-replay report recorded at a depth other than the
+        preregistered replay_contract.k must never aggregate (Codex round 10)."""
+        p = tmp_path / "chd_k1.json"
+        p.write_text(json.dumps({
+            "step": "chd-replay", "chd_verdict": "certified", "pass": True,
+            "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
+            "hours": [12], "meta": {"frame_replay_hash": "hash0", "k": 1}}))
+        cli = _cli()
+        rc = cli.main(["decide", "--lake-verdict", self._lake(tmp_path, "degraded"),
+                       "--chd-replay", str(p), "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
 
     def test_wrong_window_chd_report_hard_rejects(self, tmp_path):
         """A certified CHD replay from an unrelated window must never drive the decision
