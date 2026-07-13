@@ -43,7 +43,8 @@ def assumption(**kw) -> CostAssumption:
     """Synthetic assumption fixture. The values are EXPLICIT test constants —
     T10 selects and freezes the real Binance tier (plan Q1), never this file."""
     base = dict(venue="binance", product=PRODUCT, source=SOURCE,
-                version="test-v1", taker_fee_bps=1.75, base_slippage_bps=0.25)
+                version="test-v1", taker_fee_bps=1.75, base_slippage_bps=0.25,
+                drift_policy=DRIFT_POLICY)
     base.update(kw)
     return CostAssumption(**base)
 
@@ -288,6 +289,16 @@ def test_as_dict_validates_before_serializing():
         assumption(venue="okx").as_dict()
     with pytest.raises(ValueError, match="taker_fee_bps"):
         assumption(taker_fee_bps=-1.0).as_dict()
+
+
+def test_manifest_dict_missing_drift_policy_fails_closed():
+    # Codex P2 (PR #84): a persisted cost block that omits drift_policy must
+    # NOT silently adopt whatever policy this code currently implements —
+    # reconstruction must fail closed like any other missing identity field
+    d = assumption().as_dict()
+    d.pop("drift_policy")
+    with pytest.raises(TypeError):
+        CostAssumption(**d)
 
 
 def test_no_production_fee_tier_is_baked_in():

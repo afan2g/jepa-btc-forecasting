@@ -69,7 +69,9 @@ class CostAssumption(NamedTuple):
     version: str            # assumption version tag (frozen by T10 for prod)
     taker_fee_bps: float    # one-way taker fee; charged twice per round trip
     base_slippage_bps: float  # slippage floor added on top of latency drift
-    drift_policy: str = DRIFT_POLICY
+    # No default (Codex P2, PR #84): a persisted cost block missing the policy
+    # must fail closed at reconstruction, never silently adopt the current one.
+    drift_policy: str
 
     def as_dict(self) -> dict:
         """Manifest-ready (JSON-primitive) copy of every field, validated."""
