@@ -862,10 +862,16 @@ def cmd_chd_replay(args) -> int:
         print(f"chd-replay: REFUSED ({e.code}) -> inconclusive")
         return FAIL_EXIT
 
+    # the preregistered frozen/stale-book cap applies to CHD windows exactly as to Lake
+    # (thresholds.anomaly_caps.frozen_fraction_max; Codex round 5)
+    frozen = bsg.frozen_metrics(frame)
+    frozen_cap = float(prereg["thresholds"]["anomaly_caps"]["frozen_fraction_max"])
+    frozen_fired = frozen["frozen_fraction"] > frozen_cap
     quality_ok = (meta["crossed_rate"] <= bars["crossed_usable_max"]
                   and meta["missing_book_fraction"] <= bars["missing_usable_max"]
                   and meta["thin_depth_fraction"] <= bars["thin_usable_max"]
-                  and meta["seed_source_crossed_frac"] <= bars["seed_crossed_frac_max"])
+                  and meta["seed_source_crossed_frac"] <= bars["seed_crossed_frac_max"]
+                  and not frozen_fired)
     verdict = "certified" if quality_ok else "degraded"
     if args.frame_out:
         import pyarrow as pa
@@ -879,6 +885,8 @@ def cmd_chd_replay(args) -> int:
                                          else "spot"),
               "identities": [i for i, _ in loaded],
               "meta": _slim_meta(meta), "bars": bars,
+              "frozen": {**frozen, "frozen_fraction_max": frozen_cap,
+                         "frozen_cap_fired": bool(frozen_fired)},
               "chd_verdict": verdict, "pass": bool(quality_ok)}
     _write_report(args.out, f"{name}.json", report)
     print(f"chd-replay: {verdict.upper()} crossed={meta['crossed_rate']:.5f} "
@@ -941,6 +949,20 @@ def cmd_fetch(args) -> int:
     if not args.approved_by or not args.approved_by.strip():
         print("REFUSING fetch: --approved-by is required (explicit user approval provenance; "
               "AGENTS.md vendor gate).", file=sys.stderr)
+        return SETUP_ERROR_EXIT
+    # Only PREREGISTERED objects may ever be fetched (request_bounds; Codex round 5): the
+    # probe object plus the 48 approved-expansion hourly objects — a typo or misconfigured
+    # approval must never cause vendor I/O for an unregistered exchange/date/hour.
+    prereg = bsg.load_preregistration(args.prereg)
+    probe = prereg["fixture"]["cryptohftdata"]["probe"]
+    allowed = {probe["object"]}
+    for exchange in ("binance_futures", "binance_spot"):
+        for hour in range(24):
+            allowed.add(f"{exchange}/{probe['date']}/{hour:02d}/"
+                        f"{probe['symbol']}_{probe['data_type']}.parquet.zst")
+    if args.object not in allowed:
+        print(f"REFUSING fetch: object {args.object!r} is not in the preregistered "
+              "probe/expansion set (see preregistration request_bounds).", file=sys.stderr)
         return SETUP_ERROR_EXIT
     if os.path.exists(args.dest):
         print(f"REFUSING fetch: dest {args.dest} already exists (never overwrite raw vendor "

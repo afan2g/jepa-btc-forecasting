@@ -1093,10 +1093,26 @@ class TestNetworkIsolation:
         cli = _cli()
         dest = tmp_path / "x.zst"
         dest.write_bytes(b"do-not-overwrite")
-        rc = cli.main(["fetch", "--object", "o", "--dest", str(dest),
-                       "--approved-by", "user", "--out", str(tmp_path)])
+        rc = cli.main(["fetch", "--object",
+                       "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
+                       "--dest", str(dest), "--approved-by", "user",
+                       "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"do-not-overwrite"
+
+    def test_fetch_refuses_unregistered_objects(self, tmp_path):
+        """Even with approval provenance, only the preregistered probe/expansion objects
+        may ever be fetched (Codex round 5): a typo or misconfigured approval must never
+        cause vendor I/O for an unregistered exchange/date/hour."""
+        cli = _cli()
+        for obj in ("binance_futures/2026-04-02/12/BTCUSDT_orderbook.parquet.zst",
+                    "bybit/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
+                    "binance_futures/2026-04-01/12/ETHUSDT_orderbook.parquet.zst",
+                    "binance_futures/2026-04-01/12/BTCUSDT_trades.parquet.zst"):
+            rc = cli.main(["fetch", "--object", obj, "--dest", str(tmp_path / "y.zst"),
+                           "--approved-by", "user", "--out", str(tmp_path)])
+            assert rc == cli.SETUP_ERROR_EXIT, obj
+            assert not (tmp_path / "y.zst").exists()
 
 
 # ----------------------------------------------------------------------------- fixture-file CLI
@@ -1173,6 +1189,24 @@ class TestCliWithFixtures:
         # the refusal report carries the full window identity so `decide` can consume it
         assert rep["symbol"] == "BTCUSDT" and rep["exchange"] == "binance_futures"
         assert not (tmp_path / "chd_frame.parquet").exists()
+
+    def test_chd_replay_frozen_window_is_degraded(self, tmp_path):
+        """A stale/frozen CHD window (book unchanged for long runs) must not certify —
+        the preregistered frozen cap applies to CHD exactly as to Lake (Codex round 5)."""
+        cli = _cli()
+        bids = [(round(100.0 - i * 0.1, 2), 1.0) for i in range(10)]
+        asks = [(round(100.1 + i * 0.1, 2), 1.0) for i in range(10)]
+        rows = snapshot_rows(1000, HOUR0 + SEC, bids, asks)   # then silence for the hour
+        path = self._write_hour(tmp_path, chd_frame(rows))
+        rc = cli.main(["chd-replay", "--files", path, "--exchange", "binance_futures",
+                       "--date", "2026-04-01", "--start-hour", "12", "--n-hours", "1",
+                       "--scale", "10", "--out", str(tmp_path)])
+        assert rc == cli.FAIL_EXIT
+        rep = json.loads((tmp_path / "chd_replay_binance_futures_2026-04-01_12_1h.json")
+                         .read_text())
+        assert rep["chd_verdict"] == "degraded"
+        assert rep["frozen"]["frozen_cap_fired"]
+        assert rep["meta"]["crossed_rate"] == 0.0             # frozen alone drove degraded
 
     def test_corrupt_objects_refuse_instead_of_crashing(self, tmp_path):
         """Truncated/corrupt vendor bytes must produce the fail-closed refusal report
