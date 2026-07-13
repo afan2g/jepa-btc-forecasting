@@ -5,6 +5,8 @@ T1 ships the causal Coinbase dollar-notional clock and its timing contract:
 threshold schedule, hybrid time cap, monotone decision watermark, backlog-tie
 coalescing), and `bars.modes` (the coinbase_only / cross_venue source-mode contract).
 T2 ships `bars.snapshot` (the source-neutral dual-cut target-book reads: observable
-feature/cost read vs true label anchor, plus the staleness gate). Features, labels,
-costs, and the orchestrator are T3-T10 and do NOT live here yet.
+feature/cost read vs true label anchor, plus the staleness gate). T3 ships
+`bars.features` (the causal stationarized single-venue per-bar feature vector over
+T1 members + T2 observable reads, with the top-K ladder exposed on the observable
+read). Labels, costs, and the orchestrator are T4-T10 and do NOT live here yet.
 """
