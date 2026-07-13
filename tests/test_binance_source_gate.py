@@ -169,6 +169,14 @@ class TestTimestampNormalization:
             out = bsg.normalize_epoch_ns(arr, fieldname="event_time")
             assert out[0] == (t_ns // div) * div
 
+    def test_malformed_timestamp_values_refuse_with_gate_code(self):
+        """Null/object/non-numeric vendor timestamps must refuse with a stable code,
+        never escape as a raw numpy error (Codex round 15)."""
+        for bad in (np.array([None, HOUR0], dtype=object),
+                    np.array(["abc"], dtype=object)):
+            with pytest.raises(bsg.ChdValidationError, match="malformed_timestamp"):
+                bsg.normalize_epoch_ns(bad, fieldname="event_time")
+
     def test_out_of_range_epoch_refuses(self):
         with pytest.raises(bsg.ChdValidationError, match="timescale_undetectable"):
             bsg.normalize_epoch_ns(np.array([42], dtype="int64"), fieldname="event_time")
@@ -956,10 +964,12 @@ class TestDecideCli:
         return paths
 
     def _comp(self, tmp_path, ok, *, window=("2026-04-01T12:00:00", "2026-04-01T13:00:00"),
-              chd_hash="hash0", lake_hash="lakehash", instrument="binance-perp"):
+              chd_hash="hash0", lake_hash="lakehash", instrument="binance-perp",
+              tick_report_day="2026-04-01"):
         p = tmp_path / "comparison.json"
         p.write_text(json.dumps({"step": "compare", "pass": ok, "window": list(window),
                                  "instrument": instrument,
+                                 "tick_report_day": tick_report_day,
                                  "chd_frame_full_replay_hash": chd_hash,
                                  "lake_frame_full_replay_hash": lake_hash}))
         return str(p)
@@ -1065,6 +1075,8 @@ class TestDecideCli:
         # recorded-instrument binding (round 14): comparison generated for another
         # instrument than the bound frames
         assert run({"instrument": "binance-spot"}) == cli.SETUP_ERROR_EXIT
+        # stale tick-report day behind the comparison scale (round 15)
+        assert run({"tick_report_day": "2026-03-31"}) == cli.SETUP_ERROR_EXIT
 
     def test_wrong_day_lake_verdict_hard_rejects(self, tmp_path):
         cli = _cli()

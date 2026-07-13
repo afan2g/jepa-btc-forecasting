@@ -216,7 +216,14 @@ def normalize_epoch_ns(values: np.ndarray, *, fieldname: str) -> np.ndarray:
     Deterministic magnitude rule (preregistered): the UNIQUE multiplier in {1, 1e3, 1e6, 1e9}
     that lands the median positive value inside [2020-01-01, 2030-01-01) ns. The candidate
     ranges are ~1e6 apart so at most one multiplier can fit; none fitting refuses the file."""
-    v = np.asarray(values, dtype="int64")
+    try:
+        v = np.asarray(values, dtype="int64")
+    except (ValueError, TypeError, OverflowError) as e:
+        # null/object/non-numeric vendor timestamps must REFUSE with a stable code, never
+        # escape as a raw numpy error past the SourceGateError-only refusal path
+        raise ChdValidationError(
+            "malformed_timestamp",
+            f"{fieldname}: non-integer values ({type(e).__name__}: {e})"[:300]) from e
     pos = v[v > 0]
     if len(pos) == 0:
         raise ChdValidationError("timescale_undetectable", f"{fieldname}: no positive values")

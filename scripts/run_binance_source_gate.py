@@ -759,6 +759,10 @@ def cmd_decide(args) -> int:
                 f"{args.comparison} records instrument {comp.get('instrument')!r} but the "
                 f"bound frames are {lake_side!r} — regenerate the comparison with the "
                 "matching --instrument/--tick-report")
+        if comp.get("tick_report_day") != fixture_day:
+            raise ValueError(
+                f"{args.comparison} was scaled by a tick report for "
+                f"{comp.get('tick_report_day')!r}, not the fixture day {fixture_day}")
         comparison_pass = bool(comp.get("pass"))
 
     if lake_verdict == "certified":
@@ -973,6 +977,12 @@ def cmd_compare(args) -> int:
     tick = _read_json(args.tick_report)
     if tick.get("step") != "tick-scale":
         raise ValueError(f"{args.tick_report} is not a tick-scale report")
+    fixture_day = bsg.load_preregistration(args.prereg)["fixture"]["lake"]["day"]
+    if tick.get("day") != fixture_day:
+        # a stale tick report from another day authorizes an UNMEASURED scale (round 15)
+        print(f"ERROR: {args.tick_report} measures day {tick.get('day')!r}, not the "
+              f"fixture day {fixture_day}.", file=sys.stderr)
+        return SETUP_ERROR_EXIT
     measured = ((tick.get("instruments") or {}).get(args.instrument) or {}) \
         .get("conformance_scale")
     if int(args.scale) != measured:
