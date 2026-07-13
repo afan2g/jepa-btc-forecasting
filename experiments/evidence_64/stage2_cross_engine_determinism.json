@@ -1,0 +1,84 @@
+{
+  "step": "stage2-compare",
+  "prereg_commit": "4b66c7232511b8e7abdc2e24364e5e2bea1e0388",
+  "run1": "data/reports/binance_source_quality/stage2/run1/_manifest.jsonl",
+  "run2": "data/reports/binance_source_quality/stage2/run2_native/_manifest.jsonl",
+  "equal": true,
+  "n_units": 7,
+  "diffs": [],
+  "units": [
+    [
+      "funding",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ],
+    [
+      "liquidations",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ],
+    [
+      "open_interest",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ],
+    [
+      "topk_l2",
+      "BINANCE",
+      "BTC-USDT",
+      "2026-04-01"
+    ],
+    [
+      "topk_l2",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ],
+    [
+      "trades",
+      "BINANCE",
+      "BTC-USDT",
+      "2026-04-01"
+    ],
+    [
+      "trades",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ]
+  ],
+  "run1_semantic_fingerprint": "5a3b6bfad74fa695cef6563e8e1f0acc0c4a83b045b9a6fc744cfdf727e6b0f0",
+  "run2_semantic_fingerprint": "5a3b6bfad74fa695cef6563e8e1f0acc0c4a83b045b9a6fc744cfdf727e6b0f0",
+  "run1_topk_engines": {
+    "topk_l2|BINANCE_FUTURES|BTC-USDT-PERP|2026-04-01": [
+      "python",
+      null
+    ],
+    "topk_l2|BINANCE|BTC-USDT|2026-04-01": [
+      "python",
+      null
+    ]
+  },
+  "run2_topk_engines": {
+    "topk_l2|BINANCE_FUTURES|BTC-USDT-PERP|2026-04-01": [
+      "native",
+      10
+    ],
+    "topk_l2|BINANCE|BTC-USDT|2026-04-01": [
+      "native",
+      100
+    ]
+  },
+  "excluded_keys": [
+    "secs",
+    "ts",
+    "engine",
+    "price_scale"
+  ],
+  "pass": true,
+  "prereg_sha256": "208e365fa15f1df9fdf5562bf2df76701e3b3ae1b256d31730acac035ac39c26",
+  "report_hash": "0f0e049c84b2f722ef3158c8f1c7d370487827fbf92b827c8da10019251308d4"
+}

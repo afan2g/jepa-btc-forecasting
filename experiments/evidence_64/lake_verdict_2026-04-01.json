@@ -1,0 +1,91 @@
+{
+  "step": "verdict",
+  "prereg_commit": "4b66c7232511b8e7abdc2e24364e5e2bea1e0388",
+  "day": "2026-04-01",
+  "unit_checks": [
+    {
+      "exchange": "BINANCE_FUTURES",
+      "symbol": "BTC-USDT-PERP",
+      "output": "topk_l2",
+      "required": "certified",
+      "status": "ok",
+      "classification": "certified",
+      "ok": true
+    },
+    {
+      "exchange": "BINANCE_FUTURES",
+      "symbol": "BTC-USDT-PERP",
+      "output": "trades",
+      "required": "ok",
+      "status": "ok",
+      "classification": null,
+      "ok": true
+    },
+    {
+      "exchange": "BINANCE_FUTURES",
+      "symbol": "BTC-USDT-PERP",
+      "output": "funding",
+      "required": "ok",
+      "status": "ok",
+      "classification": null,
+      "ok": true
+    },
+    {
+      "exchange": "BINANCE_FUTURES",
+      "symbol": "BTC-USDT-PERP",
+      "output": "open_interest",
+      "required": "ok",
+      "status": "ok",
+      "classification": null,
+      "ok": true
+    },
+    {
+      "exchange": "BINANCE_FUTURES",
+      "symbol": "BTC-USDT-PERP",
+      "output": "liquidations",
+      "required": "ok_or_missing_sparse",
+      "status": "ok",
+      "classification": null,
+      "ok": true
+    },
+    {
+      "exchange": "BINANCE",
+      "symbol": "BTC-USDT",
+      "output": "topk_l2",
+      "required": "certified",
+      "status": "ok",
+      "classification": "certified",
+      "ok": true
+    },
+    {
+      "exchange": "BINANCE",
+      "symbol": "BTC-USDT",
+      "output": "trades",
+      "required": "ok",
+      "status": "ok",
+      "classification": null,
+      "ok": true
+    }
+  ],
+  "inputs": {
+    "verify": true,
+    "tick": true,
+    "silence": true,
+    "stage2_determinism": true,
+    "replays": {
+      "binance-perp": true,
+      "binance-spot": true
+    }
+  },
+  "lake_verdict": "certified",
+  "reasons": [
+    "all unit requirements met; no caps; no invalidators; determinism and conformance passed"
+  ],
+  "decision_logic": {
+    "certified": "every unit meets lake_unit_requirements AND no anomaly cap fired AND no hard invalidator fired AND determinism passed AND schema/tick conformance passed",
+    "degraded": "units complete but any topk_l2 classifies degraded, or any anomaly cap fired (off-tick / silence / frozen), with no hard invalidator",
+    "inconclusive": "any hard invalidator fired, any required unit missing or errored, any topk_l2 classifies inconclusive (seed gate), or the run cannot complete"
+  },
+  "prereg_sha256": "208e365fa15f1df9fdf5562bf2df76701e3b3ae1b256d31730acac035ac39c26",
+  "report_hash": "2f194540ad5c2c510fab13762ca92a0de12ae1ebd246ddbd01a5da70ff456e62"
+}
