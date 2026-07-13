@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from experiments import binance_source_gate as bsg                             # noqa: E402
 
+PREREG_SHA = bsg.preregistration_content_hash()
 HAS_PYARROW = importlib.util.find_spec("pyarrow") is not None
 needs_pyarrow = pytest.mark.skipif(not HAS_PYARROW, reason="pyarrow not installed "
                                    "(lightweight CI tier)")
@@ -824,12 +825,13 @@ class TestVerdictCli:
         det = dict(bsg.compare_stage2_manifests(m1, m2))
         paths = {}
         for name, payload in {
-            "verify": {"step": "verify-inputs", "pass": True},
+            "verify": {"step": "verify-inputs", "prereg_sha256": PREREG_SHA, "pass": True},
             "tick": {"step": "tick-scale", "day": "2026-04-01", "pass": tick_pass,
+                     "prereg_sha256": PREREG_SHA,
                      "instruments": {"binance-perp": {"conformance_scale": 10},
                                      "binance-spot": {"conformance_scale": 100}}},
-            "silence": {"step": "silence", "day": "2026-04-01", "pass": True},
-            "det": {"step": "stage2-compare", "pass": determinism_pass, **det},
+            "silence": {"step": "silence", "day": "2026-04-01", "prereg_sha256": PREREG_SHA, "pass": True},
+            "det": {"step": "stage2-compare", "prereg_sha256": PREREG_SHA, "pass": determinism_pass, **det},
         }.items():
             p = tmp_path / f"{name}.json"
             p.write_text(json.dumps(payload))
@@ -838,6 +840,7 @@ class TestVerdictCli:
             p = tmp_path / f"replay_{inst}.json"
             p.write_text(json.dumps({
                 "step": "replay-conformance", "day": "2026-04-01", "instrument": inst,
+                "prereg_sha256": PREREG_SHA,
                 "pass": True, "harness_determinism_ok": True, "conformance_ok": True,
                 "conformance": {"ran": True},
                 "frozen": {"frozen_cap_fired": False, "frozen_fraction": 0.0}}))
@@ -970,6 +973,19 @@ class TestVerdictCli:
                         self._step_reports(tmp_path, m, det_manifest2=twin))
         assert rep["lake_verdict"] == "inconclusive"
 
+    def test_stale_preregistration_report_is_inconclusive(self, tmp_path):
+        """A PASS report generated under different preregistration content (e.g. before
+        an amendment widened a measurement's scope) must never vouch (Codex round 21)."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m)
+        paths = self._step_reports(tmp_path, m)
+        tick = json.loads(pathlib.Path(paths["tick"]).read_text())
+        tick["prereg_sha256"] = "0" * 64
+        pathlib.Path(paths["tick"]).write_text(json.dumps(tick))
+        rep = self._run(tmp_path, m, paths)
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("preregistration content" in r for r in rep["reasons"])
+
     def test_determinism_report_must_cover_all_required_units(self, tmp_path):
         """A comparison that never covered a required fixture-day unit must not certify."""
         m = tmp_path / "m.jsonl"
@@ -986,7 +1002,8 @@ class TestVerdictCli:
 class TestDecideCli:
     def _lake(self, tmp_path, verdict, *, day="2026-04-01"):
         p = tmp_path / "lake_verdict.json"
-        p.write_text(json.dumps({"step": "verdict", "day": day, "lake_verdict": verdict}))
+        p.write_text(json.dumps({"step": "verdict", "day": day, "prereg_sha256": PREREG_SHA,
+                                 "lake_verdict": verdict}))
         return str(p)
 
     def _chd(self, tmp_path, verdicts, *, date="2026-04-01", symbol="BTCUSDT",
@@ -995,7 +1012,8 @@ class TestDecideCli:
         for i, v in enumerate(verdicts):
             p = tmp_path / f"chd_{i}.json"
             p.write_text(json.dumps({
-                "step": "chd-replay", "chd_verdict": v, "date": date, "symbol": symbol,
+                "step": "chd-replay", "prereg_sha256": PREREG_SHA, "chd_verdict": v,
+                "date": date, "symbol": symbol,
                 "exchange": exchange, "hours": [12], "tick_report_day": "2026-04-01",
                 "meta": {"frame_replay_hash": f"hash{i}", "k": 10}}))
             paths.append(str(p))
@@ -1005,7 +1023,8 @@ class TestDecideCli:
               chd_hash="hash0", lake_hash="lakehash", instrument="binance-perp",
               tick_report_day="2026-04-01"):
         p = tmp_path / "comparison.json"
-        p.write_text(json.dumps({"step": "compare", "pass": ok, "window": list(window),
+        p.write_text(json.dumps({"step": "compare", "prereg_sha256": PREREG_SHA,
+                                 "pass": ok, "window": list(window),
                                  "instrument": instrument,
                                  "tick_report_day": tick_report_day,
                                  "chd_frame_full_replay_hash": chd_hash,
@@ -1016,6 +1035,7 @@ class TestDecideCli:
                      instrument="binance-perp"):
         p = tmp_path / "lake_replay.json"
         p.write_text(json.dumps({"step": "replay-conformance", "day": day,
+                                 "prereg_sha256": PREREG_SHA,
                                  "instrument": instrument,
                                  "frame_replay_hash": frame_hash}))
         return str(p)
@@ -1063,7 +1083,7 @@ class TestDecideCli:
         preregistered replay_contract.k must never aggregate (Codex round 10)."""
         p = tmp_path / "chd_k1.json"
         p.write_text(json.dumps({
-            "step": "chd-replay", "chd_verdict": "certified", "pass": True,
+            "step": "chd-replay", "prereg_sha256": PREREG_SHA, "chd_verdict": "certified", "pass": True,
             "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
             "hours": [12], "tick_report_day": "2026-04-01",
             "meta": {"frame_replay_hash": "hash0", "k": 1}}))
@@ -1077,7 +1097,7 @@ class TestDecideCli:
         never aggregate (Codex round 17)."""
         p = tmp_path / "chd_stale_tick.json"
         p.write_text(json.dumps({
-            "step": "chd-replay", "chd_verdict": "certified", "pass": True,
+            "step": "chd-replay", "prereg_sha256": PREREG_SHA, "chd_verdict": "certified", "pass": True,
             "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
             "hours": [12], "tick_report_day": "2026-03-31",
             "meta": {"frame_replay_hash": "hash0", "k": 10}}))
@@ -1131,6 +1151,15 @@ class TestDecideCli:
         # stale tick-report day behind the comparison scale (round 15)
         assert run({"tick_report_day": "2026-03-31"}) == cli.SETUP_ERROR_EXIT
 
+    def test_stale_prereg_lake_verdict_hard_rejects(self, tmp_path):
+        p = tmp_path / "stale_verdict.json"
+        p.write_text(json.dumps({"step": "verdict", "day": "2026-04-01",
+                                 "prereg_sha256": "0" * 64,
+                                 "lake_verdict": "certified"}))
+        cli = _cli()
+        rc = cli.main(["decide", "--lake-verdict", str(p), "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
+
     def test_wrong_day_lake_verdict_hard_rejects(self, tmp_path):
         cli = _cli()
         rc = cli.main(["decide", "--lake-verdict",
@@ -1143,7 +1172,7 @@ class TestDecideCli:
         frame) must route the decision (Codex round 3), not hard-reject."""
         p = tmp_path / "chd_refused.json"
         p.write_text(json.dumps({
-            "step": "chd-replay", "chd_verdict": "inconclusive", "pass": False,
+            "step": "chd-replay", "prereg_sha256": PREREG_SHA, "chd_verdict": "inconclusive", "pass": False,
             "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
             "hours": [12], "refusal": "missing_initial_snapshot"}))
         cli = _cli()
@@ -1171,7 +1200,7 @@ class TestDecideCli:
         # comparison supplied but the only replay evidence is a frameless refusal
         refused = tmp_path / "chd_refused.json"
         refused.write_text(json.dumps({
-            "step": "chd-replay", "chd_verdict": "inconclusive", "pass": False,
+            "step": "chd-replay", "prereg_sha256": PREREG_SHA, "chd_verdict": "inconclusive", "pass": False,
             "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
             "hours": [12], "refusal": "sequence_gap"}))
         argv = ["decide", "--lake-verdict", self._lake(tmp_path, "certified"),
@@ -1231,14 +1260,15 @@ class TestNetworkIsolation:
                         validate_obj_sha="objsha"):
         val = tmp_path / "probe_validate.json"
         val.write_text(json.dumps({
-            "step": "chd-validate", "pass": validate_pass,
+            "step": "chd-validate", "prereg_sha256": PREREG_SHA, "pass": validate_pass,
             "identity": {"exchange": "binance_futures", "symbol": "BTCUSDT",
                          "date": "2026-04-01", "hour": 12,
                          "provenance": {"object_sha256": validate_obj_sha,
                                         "parquet_sha256": "probesha"}}}))
         rep = tmp_path / "probe_replay.json"
         rep.write_text(json.dumps({
-            "step": "chd-replay", "chd_verdict": replay_verdict,
+            "step": "chd-replay", "prereg_sha256": PREREG_SHA,
+            "chd_verdict": replay_verdict,
             "pass": replay_verdict == "certified", "exchange": "binance_futures",
             "symbol": "BTCUSDT", "date": "2026-04-01", "hours": [12],
             "tick_report_day": tick_report_day,
@@ -1248,7 +1278,7 @@ class TestNetworkIsolation:
 
     def _probe_fetch(self, tmp_path, *, obj=None, sha="objsha", ok=True):
         p = tmp_path / "probe_fetch.json"
-        p.write_text(json.dumps({"step": "fetch", "pass": ok,
+        p.write_text(json.dumps({"step": "fetch", "prereg_sha256": PREREG_SHA, "pass": ok,
                                  "object": obj or self.PROBE_OBJECT, "sha256": sha}))
         return str(p)
 
@@ -1274,6 +1304,13 @@ class TestNetworkIsolation:
             return cli.main(argv)
 
         good_fetch = self._probe_fetch(tmp_path)
+        # stale-prereg fetch evidence: refused (round 21)
+        stale_fetch = tmp_path / "stale_fetch.json"
+        stale_fetch.write_text(json.dumps({
+            "step": "fetch", "prereg_sha256": "0" * 64, "pass": True,
+            "object": self.PROBE_OBJECT, "sha256": "objsha"}))
+        val0, rep0 = self._probe_evidence(tmp_path)
+        assert attempt(val0, rep0, str(stale_fetch)) == cli.SETUP_ERROR_EXIT
         # probe approval alone: refused
         assert attempt(expansion=False) == cli.SETUP_ERROR_EXIT and not dest.exists()
         # expansion approval without full probe evidence: refused

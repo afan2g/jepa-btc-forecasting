@@ -68,8 +68,12 @@ def _prereg_commit() -> str | None:
         return None
 
 
-def _write_report(out_dir: str, name: str, report: dict) -> str:
+def _write_report(args, name: str, report: dict) -> str:
+    out_dir = args.out
     os.makedirs(out_dir, exist_ok=True)
+    # provenance binding (Codex round 21): every report records the CONTENT hash of the
+    # preregistration it was generated under; consumers require it to match theirs
+    report.setdefault("prereg_sha256", bsg.preregistration_content_hash(args.prereg))
     report = bsg.finalize_report(report)                 # April guard + report_hash
     path = os.path.join(out_dir, name)
     with open(path, "w") as f:
@@ -152,7 +156,7 @@ def cmd_verify_inputs(args) -> int:
     ok = all(e["ok"] for e in results) and len(results) == 9
     report = {"step": "verify-inputs", "prereg_commit": _prereg_commit(), "raw_root": args.raw,
               "n_units": len(results), "units": results, "pass": ok}
-    _write_report(args.out, "verify_inputs.json", report)
+    _write_report(args, "verify_inputs.json", report)
     print(f"verify-inputs: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else FAIL_EXIT
 
@@ -219,7 +223,7 @@ def cmd_tick_scale(args) -> int:
                     "conformance_scale": conf_scale, "ok": feed_ok}
     report = {"step": "tick-scale", "prereg_commit": _prereg_commit(), "day": day,
               "instruments": out, "pass": overall_ok}
-    _write_report(args.out, "tick_scale.json", report)
+    _write_report(args, "tick_scale.json", report)
     print(f"tick-scale: {'PASS' if overall_ok else 'FAIL'}")
     return 0 if overall_ok else FAIL_EXIT
 
@@ -246,7 +250,7 @@ def cmd_silence(args) -> int:
                     "silence_cap_fired": bool(capped), "silence_gap_s_cap": cap}
     report = {"step": "silence", "prereg_commit": _prereg_commit(), "day": day,
               "instruments": out, "pass": ok}
-    _write_report(args.out, "silence.json", report)
+    _write_report(args, "silence.json", report)
     print(f"silence: {'PASS' if ok else 'FAIL (cap fired)'}")
     return 0 if ok else FAIL_EXIT
 
@@ -370,7 +374,7 @@ def cmd_replay_conformance(args) -> int:
         "conformance": conformance, "conformance_ok": bool(conformance_ok),
         "pass": bool(ok),
     }
-    _write_report(args.out, f"replay_conformance_{args.instrument}.json", report)
+    _write_report(args, f"replay_conformance_{args.instrument}.json", report)
     print(f"replay-conformance[{args.instrument}]: classification={cls} "
           f"determinism={'OK' if determinism_ok else 'FAIL'} "
           f"conformance={'OK' if conformance_ok else ('SKIP' if not conformance['ran'] else 'FAIL')} "
@@ -438,7 +442,7 @@ def cmd_stage2_native_run(args) -> int:
               "per_unit": per_unit,
               "note": "production process_unit path, explicit native override; validity "
                       "gated by stage2-compare cross-engine equality"}
-    _write_report(args.out, "stage2_native_run.json", report)
+    _write_report(args, "stage2_native_run.json", report)
     if counts["error"] or counts["missing_required"]:
         return FAIL_EXIT
     return 0
@@ -450,7 +454,7 @@ def cmd_stage2_compare(args) -> int:
     report = {"step": "stage2-compare", "prereg_commit": _prereg_commit(),
               "run1": args.run1, "run2": args.run2, **result,
               "excluded_keys": list(bsg.DETERMINISM_EXCLUDED_KEYS), "pass": result["equal"]}
-    _write_report(args.out, "stage2_determinism.json", report)
+    _write_report(args, "stage2_determinism.json", report)
     print(f"stage2-compare: {'EQUAL' if result['equal'] else 'DIFFERS'} "
           f"({result['n_units']} units)")
     return 0 if result["equal"] else FAIL_EXIT
@@ -541,6 +545,8 @@ def cmd_verdict(args) -> int:
                                 "required": want, "status": got_status,
                                 "classification": got_cls, "ok": bool(ok)})
 
+    prereg_hash = bsg.preregistration_content_hash(args.prereg)
+
     def _load_step(path: str, step: str, *, day_scoped: bool = False) -> dict:
         rep = _read_json(path)
         if rep.get("step") != step:
@@ -552,6 +558,13 @@ def cmd_verdict(args) -> int:
             inconclusive_reasons.append(
                 f"hard invalidator: {step} report is for day {rep.get('day')!r}, "
                 f"not the fixture day {day}")
+        # Contract binding (Codex round 21): a report generated under a DIFFERENT
+        # preregistration content (e.g. before an amendment changed a measurement's
+        # scope) must never vouch under this one.
+        if rep.get("prereg_sha256") != prereg_hash:
+            inconclusive_reasons.append(
+                f"hard invalidator: {step} report was generated under preregistration "
+                f"content {str(rep.get('prereg_sha256'))[:16]!r}, not the current one")
         return rep
 
     verify = _load_step(args.verify_report, "verify-inputs")
@@ -653,7 +666,7 @@ def cmd_verdict(args) -> int:
                                      for rep in replays.values()}},
               "lake_verdict": verdict, "reasons": reasons,
               "decision_logic": bsg.PREREGISTERED["decision_logic"]["lake_verdict"]}
-    _write_report(args.out, "lake_verdict.json", report)
+    _write_report(args, "lake_verdict.json", report)
     print(f"LAKE VERDICT ({day}): {verdict.upper()}")
     for r in reasons:
         print(f"  - {r}")
@@ -672,9 +685,19 @@ def cmd_decide(args) -> int:
     probe = prereg["fixture"]["cryptohftdata"]["probe"]
     allowed_exchanges = {"binance_futures", "binance_spot"}
 
+    prereg_hash = bsg.preregistration_content_hash(args.prereg)
+
+    def _require_current_prereg(path: str, rep: dict) -> None:
+        if rep.get("prereg_sha256") != prereg_hash:
+            raise ValueError(
+                f"{path} was generated under preregistration content "
+                f"{str(rep.get('prereg_sha256'))[:16]!r}, not the current one — "
+                "regenerate it under the amended contract")
+
     lake = _read_json(args.lake_verdict)
     if lake.get("step") != "verdict":
         raise ValueError(f"{args.lake_verdict} is not a verdict report")
+    _require_current_prereg(args.lake_verdict, lake)
     if lake.get("day") != fixture_day:
         raise ValueError(f"{args.lake_verdict} is a verdict for day {lake.get('day')!r}, "
                          f"not the preregistered fixture day {fixture_day}")
@@ -686,6 +709,7 @@ def cmd_decide(args) -> int:
     for path, rep in zip(args.chd_replay or [], chd_reports):
         if rep.get("step") != "chd-replay":
             raise ValueError(f"{path} is not a chd-replay report")
+        _require_current_prereg(path, rep)
         if rep.get("date") != fixture_day or rep.get("symbol") != probe["symbol"] or \
                 rep.get("exchange") not in allowed_exchanges:
             raise ValueError(
@@ -723,6 +747,7 @@ def cmd_decide(args) -> int:
         comp = _read_json(args.comparison)
         if comp.get("step") != "compare":
             raise ValueError(f"{args.comparison} is not a compare report")
+        _require_current_prereg(args.comparison, comp)
         # window binding: any stated window bound must lie inside the fixture day
         for bound in (comp.get("window") or []):
             if bound is not None and not str(bound).startswith(fixture_day):
@@ -752,6 +777,7 @@ def cmd_decide(args) -> int:
             rep = _read_json(path)
             if rep.get("step") != "replay-conformance":
                 raise ValueError(f"{path} is not a replay-conformance report")
+            _require_current_prereg(path, rep)
             if rep.get("day") != fixture_day:
                 raise ValueError(f"{path} is a replay-conformance report for "
                                  f"{rep.get('day')!r}, not {fixture_day}")
@@ -832,7 +858,7 @@ def cmd_decide(args) -> int:
                          "n_chd_reports": len(chd_reports)},
               "decision": decision, "detail": detail,
               "decision_logic": bsg.PREREGISTERED["decision_logic"]["final_source_decision"]}
-    _write_report(args.out, "final_source_decision.json", report)
+    _write_report(args, "final_source_decision.json", report)
     print(f"FINAL SOURCE DECISION: {decision.upper()}")
     print(f"  {detail}")
     return 0
@@ -911,13 +937,13 @@ def cmd_chd_validate(args) -> int:
     except bsg.SourceGateError as e:
         report = {"step": "chd-validate", "prereg_commit": _prereg_commit(),
                   "file": args.file, "pass": False, "refusal": e.code, "detail": str(e)[:500]}
-        _write_report(args.out, f"chd_validate_{args.exchange}_{args.date}_"
+        _write_report(args, f"chd_validate_{args.exchange}_{args.date}_"
                                 f"{args.hour:02d}.json", report)
         print(f"chd-validate: REFUSED ({e.code})")
         return FAIL_EXIT
     report = {"step": "chd-validate", "prereg_commit": _prereg_commit(), "file": args.file,
               "identity": identity, "pass": True}
-    _write_report(args.out, f"chd_validate_{args.exchange}_{args.date}_{args.hour:02d}.json",
+    _write_report(args, f"chd_validate_{args.exchange}_{args.date}_{args.hour:02d}.json",
                   report)
     print(f"chd-validate: PASS ({identity['rows']} rows, axis={identity['partition_axis']})")
     return 0
@@ -980,7 +1006,7 @@ def cmd_chd_replay(args) -> int:
                   "exchange": args.exchange, "symbol": args.symbol, "date": args.date,
                   "hours": hours, "pass": False, "chd_verdict": "inconclusive",
                   "refusal": e.code, "detail": str(e)[:500]}
-        _write_report(args.out, f"{name}.json", report)
+        _write_report(args, f"{name}.json", report)
         print(f"chd-replay: REFUSED ({e.code}) -> inconclusive")
         return FAIL_EXIT
 
@@ -1011,7 +1037,7 @@ def cmd_chd_replay(args) -> int:
                          "frozen_cap_fired": bool(frozen_fired)},
               "tick_report_day": tick.get("day"),
               "chd_verdict": verdict, "pass": bool(quality_ok)}
-    _write_report(args.out, f"{name}.json", report)
+    _write_report(args, f"{name}.json", report)
     print(f"chd-replay: {verdict.upper()} crossed={meta['crossed_rate']:.5f} "
           f"missing={meta['missing_book_fraction']:.5f} thin={meta['thin_depth_fraction']:.5f}")
     return 0 if quality_ok else FAIL_EXIT
@@ -1062,7 +1088,7 @@ def cmd_compare(args) -> int:
     except bsg.SourceGateError as e:
         report = {"step": "compare", "prereg_commit": _prereg_commit(), "pass": False,
                   "refusal": e.code, "detail": str(e)[:500]}
-        _write_report(args.out, "comparison.json", report)
+        _write_report(args, "comparison.json", report)
         print(f"compare: REFUSED ({e.code})")
         return FAIL_EXIT
     evaluation = bsg.evaluate_comparison(metrics)
@@ -1078,7 +1104,7 @@ def cmd_compare(args) -> int:
               "lake_frame_replay_hash": bsg.frame_replay_hash(frames["lake"]),
               "chd_frame_replay_hash": bsg.frame_replay_hash(frames["chd"]),
               "metrics": metrics, "evaluation": evaluation, "pass": evaluation["pass"]}
-    _write_report(args.out, "comparison.json", report)
+    _write_report(args, "comparison.json", report)
     print(f"compare: {'PASS' if evaluation['pass'] else 'FAIL'} "
           f"joint_valid={metrics.get('joint_valid_fraction'):.4f}")
     return 0 if evaluation["pass"] else FAIL_EXIT
@@ -1121,7 +1147,12 @@ def cmd_fetch(args) -> int:
         # the evidence chain starts at the vendor: the validated bytes must be the bytes
         # the approved probe fetch actually downloaded (Codex round 19) — a synthetic
         # local parquet claiming the probe identity can never unlock expansion
+        prereg_hash = bsg.preregistration_content_hash(args.prereg)
         fetch_rep = _read_json(args.probe_fetch_report)
+        if fetch_rep.get("prereg_sha256") != prereg_hash:
+            print("REFUSING fetch: --probe-fetch-report was generated under a different "
+                  "preregistration content.", file=sys.stderr)
+            return SETUP_ERROR_EXIT
         if fetch_rep.get("step") != "fetch" or not fetch_rep.get("pass") or \
                 fetch_rep.get("object") != probe["object"] or not fetch_rep.get("sha256"):
             print("REFUSING fetch: --probe-fetch-report is not a PASSING fetch report "
@@ -1129,6 +1160,10 @@ def cmd_fetch(args) -> int:
                   file=sys.stderr)
             return SETUP_ERROR_EXIT
         val = _read_json(args.probe_validate_report)
+        if val.get("prereg_sha256") != prereg_hash:
+            print("REFUSING fetch: --probe-validate-report was generated under a "
+                  "different preregistration content.", file=sys.stderr)
+            return SETUP_ERROR_EXIT
         ident = val.get("identity") or {}
         if ((ident.get("provenance") or {}).get("object_sha256")
                 != fetch_rep.get("sha256")):
@@ -1145,6 +1180,10 @@ def cmd_fetch(args) -> int:
                   "report for the preregistered probe object.", file=sys.stderr)
             return SETUP_ERROR_EXIT
         rep = _read_json(args.probe_replay_report)
+        if rep.get("prereg_sha256") != prereg_hash:
+            print("REFUSING fetch: --probe-replay-report was generated under a different "
+                  "preregistration content.", file=sys.stderr)
+            return SETUP_ERROR_EXIT
         if rep.get("step") != "chd-replay" or rep.get("chd_verdict") != "certified" or \
                 not rep.get("pass") or rep.get("exchange") != probe["exchange"] or \
                 rep.get("symbol") != probe["symbol"] or rep.get("date") != probe["date"] \
@@ -1262,7 +1301,7 @@ def cmd_fetch(args) -> int:
               "secs": secs, "sha256": sha,
               "byte_cap": args.byte_cap, "timeout_s": args.timeout,
               "failure": failure, "pass": bool(ok)}
-    _write_report(args.out, f"fetch_{args.object.replace('/', '_')}.json", report)
+    _write_report(args, f"fetch_{args.object.replace('/', '_')}.json", report)
     print(f"fetch: {'OK' if ok else f'FAILED ({failure})'} bytes={got_bytes} "
           f"attempts={attempts}")
     return 0 if ok else FAIL_EXIT

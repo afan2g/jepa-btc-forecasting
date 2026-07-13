@@ -157,6 +157,15 @@ def load_preregistration(path: str = PREREG_ARTIFACT_PATH) -> dict:
         return json.load(f)
 
 
+def preregistration_content_hash(path: str = PREREG_ARTIFACT_PATH) -> str:
+    """Canonical content hash of the preregistration artifact. Every report records it,
+    and every consumer (verdict/decide/fetch-expansion) requires it to equal the hash of
+    the preregistration it is running under — a stale PASS report generated before an
+    amendment can never vouch under the amended contract (Codex round 21). A content
+    hash, not a git commit, so uncommitted-amendment windows cannot desync provenance."""
+    return hash_obj(load_preregistration(path))
+
+
 # ----------------------------------------------------------------------------- error taxonomy
 class SourceGateError(RuntimeError):
     """Fail-closed refusal. `code` is the stable reason code recorded in reports."""
