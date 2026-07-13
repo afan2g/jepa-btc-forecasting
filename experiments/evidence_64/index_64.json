@@ -3,11 +3,11 @@
   "generated_utc": "2026-07-13",
   "preregistration_first_commit": "633d4e4f771574a2b8b207edf1947e87fbc987b8",
   "preregistration_last_amended_commit": "af197519f3c492e35c7105da6eb221d861d2928b",
-  "reports_generated_at_commit": "d7060648e45daca43a9345411e3426eae609804d",
+  "reports_generated_at_commit": "bcbd7d43a6022c37c91d305ca18abc89a55dce63",
   "provenance_note": "Local Crypto Lake 2026-04-01 Stage-2 integrity evidence for issue #64. Inputs are the nine Stage-1 raw units pinned (sha256/fingerprint/rows/bytes) inside the preregistration fixture and re-verified by verify_inputs.json. Run 1 = production scripts/run_binance_recon.py --engine auto (Python oracle; perp replay 84,153 s). Run 2 = stage2-native-run (production process_unit path, explicit native override, perp+spot scales 10/100; perp replay ~29 s). stage2_cross_engine_determinism pins run1==run2 on every semantic manifest field incl. published parquet sha256 (full-day cross-engine conformance, 2026-07-12 amendment). No vendor I/O of any kind was performed; no raw market rows appear in any tracked file. Regenerated 2026-07-13 after Codex P1: stage2-compare now records semantic manifest fingerprints + compared units, and the verdict binds the determinism evidence to the exact manifest content and required fixture-day unit coverage.",
   "tracked_files": {
     "lake_verdict_2026-04-01.json": "0f0becca293b3d649046c1cab11ce59567a6caae457bcdf27fadd8ac5c064ec4",
-    "stage2_cross_engine_determinism.json": "846e8b7b6570b2b50de9131d5e7b8b4611305eae22d69134bc00424bd80754b2"
+    "stage2_cross_engine_determinism.json": "d2f743ef7b0bcb01949237302a4f72e51843595c1a6f8bc614bc9e2f3d7ba736"
   },
   "ignored_reports_sha256": {
     "verify_inputs.json": "33ac25823c061894b89f13ae896ec0aa7e885e738e68e2384193fbe46dc9a7eb",
@@ -16,7 +16,7 @@
     "replay_conformance_binance-perp.json": "d128121cbe324d154f6a3f6e8488fc42b8a85fade28eb2cf712de090d2906676",
     "replay_conformance_binance-spot.json": "10356f23054887ff126a226aa05c2f1ccc7ccbbcdd939db956aacb12a1519347",
     "stage2_native_run.json": "a912a790b3cfb227361c8e1ca9cfc414aa58acf7e38f5d289569a2e351906a03",
-    "stage2_determinism.json": "846e8b7b6570b2b50de9131d5e7b8b4611305eae22d69134bc00424bd80754b2",
+    "stage2_determinism.json": "d2f743ef7b0bcb01949237302a4f72e51843595c1a6f8bc614bc9e2f3d7ba736",
     "lake_verdict.json": "0f0becca293b3d649046c1cab11ce59567a6caae457bcdf27fadd8ac5c064ec4",
     "stage2/run1/_manifest.jsonl": "1a424a134a0591a63936987a1690d8c0c0d82dae497f555fcbb2b3b12a93957d",
     "stage2/run2_native/_manifest.jsonl": "2623b62a639e644400280913f55e8e81878547100b900461f97f2eede6ef5f28",

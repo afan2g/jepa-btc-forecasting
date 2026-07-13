@@ -52,6 +52,26 @@
   ],
   "run1_semantic_fingerprint": "5a3b6bfad74fa695cef6563e8e1f0acc0c4a83b045b9a6fc744cfdf727e6b0f0",
   "run2_semantic_fingerprint": "5a3b6bfad74fa695cef6563e8e1f0acc0c4a83b045b9a6fc744cfdf727e6b0f0",
+  "run1_topk_engines": {
+    "topk_l2|BINANCE_FUTURES|BTC-USDT-PERP|2026-04-01": [
+      "python",
+      null
+    ],
+    "topk_l2|BINANCE|BTC-USDT|2026-04-01": [
+      "python",
+      null
+    ]
+  },
+  "run2_topk_engines": {
+    "topk_l2|BINANCE_FUTURES|BTC-USDT-PERP|2026-04-01": [
+      "native",
+      10
+    ],
+    "topk_l2|BINANCE|BTC-USDT|2026-04-01": [
+      "native",
+      100
+    ]
+  },
   "excluded_keys": [
     "secs",
     "ts",
@@ -59,5 +79,5 @@
     "price_scale"
   ],
   "pass": true,
-  "report_hash": "63e15febb3753d041f14937c3c348aff38d33682d68088fad9351723f9a0e145"
+  "report_hash": "d4a81aa802a531d4c4588f2a9621bea406b28b5a18c2a7f164ab05b0b88e44b2"
 }
