@@ -506,11 +506,34 @@ def cmd_verdict(args) -> int:
     unit_checks = []
     inconclusive_reasons: list[str] = []
     degraded_reasons: list[str] = []
+    fixture_units = prereg["fixture"]["lake"]["units"]
+
+    def _check_raw_inputs(exchange, symbol, output, rec) -> None:
+        # bind the manifest row to the VERIFIED inputs: verify-inputs proves the
+        # preregistered files exist now with the pinned sha256/bytes, and this check
+        # proves the manifest was generated from inputs of exactly those byte sizes —
+        # a stale manifest from another raw root cannot certify verified-looking
+        # evidence (Codex round 27)
+        raw_in = rec.get("raw_inputs") or {}
+        feeds = [rec.get("feed")] + (["book"] if output == "topk_l2" else [])
+        for feed in feeds:
+            pinned = fixture_units.get(f"{exchange}/{symbol}/{feed}")
+            ident = raw_in.get(feed)
+            size = ident[0] if isinstance(ident, (list, tuple)) and ident else None
+            if not pinned or size != pinned["out_bytes"]:
+                inconclusive_reasons.append(
+                    f"hard invalidator: manifest raw_inputs for {exchange}/{symbol}/"
+                    f"{feed} record size {size!r}, not the preregistered "
+                    f"{(pinned or {}).get('out_bytes')!r} — the manifest was not "
+                    "generated from the verified inputs")
+
     for (exchange, symbol), reqs in REQUIRED_UNITS.items():
         for output, want in reqs.items():
             r = recs.get((exchange, symbol, output))
             got_status = r.get("status") if r else None
             got_cls = r.get("classification") if r else None
+            if r is not None:
+                _check_raw_inputs(exchange, symbol, output, r)
             if r is None:
                 ok = False
                 inconclusive_reasons.append(f"{exchange}/{symbol}/{output}: no manifest "
@@ -1137,10 +1160,20 @@ def cmd_compare(args) -> int:
     if args.window_start and args.window_end:
         lo = int(pd.Timestamp(args.window_start, tz="UTC").value)
         hi = int(pd.Timestamp(args.window_end, tz="UTC").value)
+        if hi <= lo:
+            print(f"ERROR: reversed/empty window [{args.window_start}, "
+                  f"{args.window_end}).", file=sys.stderr)
+            return SETUP_ERROR_EXIT
         for label in frames:
             f = frames[label]
             frames[label] = f[(f["sample_ts"] >= lo) & (f["sample_ts"] < hi)] \
                 .reset_index(drop=True)
+        if any(len(f) == 0 for f in frames.values()):
+            # an empty slice is a non-executable comparison, not evidence of source
+            # disagreement (Codex round 27)
+            print("ERROR: the window slices to zero rows on at least one frame — "
+                  "align the window with the replayed data.", file=sys.stderr)
+            return SETUP_ERROR_EXIT
     try:
         metrics = bsg.compare_topk_frames(frames["lake"], frames["chd"],
                                           price_scale=int(args.scale), k=args.k)

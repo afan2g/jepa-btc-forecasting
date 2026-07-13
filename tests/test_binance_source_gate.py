@@ -787,12 +787,24 @@ class TestVerdictCli:
     NATIVE_SCALE = {"BINANCE_FUTURES": 10, "BINANCE": 100}
 
     def _stage2_manifest(self, path, *, perp_topk_cls="certified", dt="2026-04-01",
-                         contract=None, mode="w", engine="python"):
+                         contract=None, mode="w", engine="python", raw_sizes=None):
+        fixture = bsg.load_preregistration()["fixture"]["lake"]["units"]
+
+        def pinned(exchange, symbol, feed):
+            if raw_sizes is not None:
+                return raw_sizes
+            return fixture[f"{exchange}/{symbol}/{feed}"]["out_bytes"]
+
         with open(path, mode) as f:
             for (exchange, symbol), outputs in self.UNITS.items():
                 for output in outputs:
+                    feed = output if output != "topk_l2" else "book_delta_v2"
+                    raw_inputs = {feed: [pinned(exchange, symbol, feed), 1]}
+                    if output == "topk_l2":
+                        raw_inputs["book"] = [pinned(exchange, symbol, "book"), 1]
                     rec = {"output": output, "exchange": exchange, "symbol": symbol,
-                           "dt": dt, "status": "ok", "rows": 1, "sha256": "c" * 64}
+                           "dt": dt, "status": "ok", "rows": 1, "sha256": "c" * 64,
+                           "feed": feed, "raw_inputs": raw_inputs}
                     if output == "topk_l2":
                         rec.update(contract or self.TOPK_CONTRACT)
                         rec["engine"] = engine
@@ -921,6 +933,15 @@ class TestVerdictCli:
         self._stage2_manifest(m, perp_topk_cls="certified", dt="2026-04-02", mode="a")
         rep = self._run(tmp_path, m, self._step_reports(tmp_path, m))
         assert rep["lake_verdict"] == "degraded"     # 04-02's certified must not win
+
+    def test_manifest_from_unverified_inputs_is_inconclusive(self, tmp_path):
+        """A manifest generated from inputs whose sizes differ from the verified
+        preregistered fixture bytes must never certify (Codex round 27)."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m, raw_sizes=12345)
+        rep = self._run(tmp_path, m, self._step_reports(tmp_path, m))
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("not generated from the verified inputs" in r for r in rep["reasons"])
 
     def test_stale_determinism_report_is_inconclusive(self, tmp_path):
         """A passing stage2-compare report about a DIFFERENT manifest must never vouch
@@ -1708,6 +1729,15 @@ class TestCliWithFixtures:
         assert rc == cli.SETUP_ERROR_EXIT
         # half-specified window refuses (Codex round 25)
         rc = cli.main(base + ["--scale", "10", "--window-start", "2026-04-01T12:00:00"])
+        assert rc == cli.SETUP_ERROR_EXIT
+        # reversed and empty-slice windows refuse (Codex round 27)
+        rc = cli.main(base + ["--scale", "10",
+                              "--window-start", "2026-04-01T13:00:00",
+                              "--window-end", "2026-04-01T12:00:00"])
+        assert rc == cli.SETUP_ERROR_EXIT
+        rc = cli.main(base + ["--scale", "10",
+                              "--window-start", "2026-04-01T23:58:00",
+                              "--window-end", "2026-04-01T23:59:00"])
         assert rc == cli.SETUP_ERROR_EXIT
         rc = cli.main(base + ["--scale", "10"])
         assert rc == 0
