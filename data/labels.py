@@ -33,7 +33,8 @@ deterministic label row per `(t_event, horizon)`:
 Emission order is deterministic: anchors in their (strictly increasing) input
 order, horizons ascending by duration. Streaming/day-partitioned: one forward
 pass over the path with memory bounded by the largest horizon window, never the
-full day.
+full day — pre-anchor history (however long the warm-up prefix) is folded into
+the trailing EWMA point by point and discarded, never buffered.
 """
 from __future__ import annotations
 
@@ -221,6 +222,19 @@ def _label_iter(path_iter, anchor_iter, ladder, params, coverage_end):
     last: tuple[int, float] | None = None     # last EWMA-consumed (ts, mid)
     prev_t: int | None = None
 
+    def fold(ts: int, mid: float) -> None:
+        """Consume one coalesced point into the trailing EWMA; `last` becomes
+        the as-of state. Callers only ever fold in strictly increasing ts
+        order (buffered window points first, then freshly pulled ones)."""
+        nonlocal ewma_s, ewma_w, n_returns, last
+        if last is not None:
+            r = (mid - last[1]) / last[1] * 1e4
+            d = 0.5 ** ((ts - last[0]) / halflife)
+            ewma_s = d * ewma_s + r * r
+            ewma_w = d * ewma_w + 1.0
+            n_returns += 1
+        last = (ts, mid)
+
     for anchor in anchor_iter:
         try:
             t_raw, p_raw = anchor
@@ -249,7 +263,15 @@ def _label_iter(path_iter, anchor_iter, ladder, params, coverage_end):
                 f"{coverage_end}; the partition prefilter must drop or re-batch "
                 "boundary rows per horizon (never open the next partition here)")
 
-        # pull every coalesced path point with ts <= t_event + max horizon
+        # fold buffered window points that this anchor has moved past (they
+        # were pulled for an earlier anchor's scan and now end <= t_event)
+        while pts and pts[0][0] <= t_event:
+            fold(*pts.popleft())
+
+        # pull every coalesced path point with ts <= t_event + max horizon.
+        # Pre-anchor points fold into the EWMA immediately and are DISCARDED
+        # (Codex P2: a long warm-up/filtered prefix must never be enqueued
+        # wholesale); only in-window points are buffered for the barrier scans.
         bound = t_event + max_h
         while nxt is not None:
             ts, mid = _validated_point(nxt, prev_raw_ts)
@@ -263,27 +285,10 @@ def _label_iter(path_iter, anchor_iter, ladder, params, coverage_end):
                     break
                 mid = mid2
                 nxt = next(path_iter, None)
-            pts.append((ts, mid))
-
-        # advance the trailing EWMA over returns ending at or before t_event
-        for ts, mid in pts:
-            if ts > t_event:
-                break
-            if last is not None and ts <= last[0]:
-                continue                       # already consumed
-            if last is None:
-                last = (ts, mid)               # first point: no return yet
-                continue
-            r = (mid - last[1]) / last[1] * 1e4
-            d = 0.5 ** ((ts - last[0]) / halflife)
-            ewma_s = d * ewma_s + r * r
-            ewma_w = d * ewma_w + 1.0
-            n_returns += 1
-            last = (ts, mid)
-
-        # drop points no longer needed: keep the as-of point at t_event
-        while len(pts) >= 2 and pts[1][0] <= t_event:
-            pts.popleft()
+            if ts <= t_event:
+                fold(ts, mid)
+            else:
+                pts.append((ts, mid))
 
         # P0 discipline: the anchor must BE the true path state at t_event
         if last is None:
@@ -317,9 +322,7 @@ def _label_iter(path_iter, anchor_iter, ladder, params, coverage_end):
             end = t_event + h
             asof_mid = p0
             hit = None
-            for ts, mid in pts:
-                if ts <= t_event:
-                    continue
+            for ts, mid in pts:                # invariant: every ts > t_event
                 if ts > end:
                     break
                 ret = (mid - p0) / p0 * 1e4

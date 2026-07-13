@@ -481,6 +481,32 @@ def test_rebuilds_are_deterministic_across_input_forms():
         assert len(set(keys)) == len(keys)         # one row per decision key
 
 
+def test_long_pre_anchor_prefix_is_folded_not_buffered():
+    # Codex P2: a long warm-up/filtered prefix (T9 can pass a full-day path
+    # whose anchors start late) must be folded into the trailing EWMA point by
+    # point and discarded — never enqueued wholesale before the anchor. 200k
+    # prefix points buffered as deque entries would allocate tens of MB; the
+    # streaming fold stays within a small constant.
+    import tracemalloc
+
+    n = 200_000
+    t_event = n + 60
+
+    def path():
+        for i in range(n):                     # varying mids: real returns
+            yield (i, 100.0 + (i % 7) * 0.01)
+        yield (t_event, 100.0)                 # the as-of anchor state
+
+    p = params(horizons={"10ns": 10}, min_returns=2)
+    tracemalloc.start()
+    rows = list(triple_barrier_labels(path(), [(t_event, 100.0)], params=p,
+                                      coverage_end_ns=t_event + 10))
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert len(rows) == 1 and isinstance(rows[0], LabelRow)
+    assert peak < 4_000_000                    # bytes; buffering would be ~25MB
+
+
 def test_generator_is_lazy_and_consumes_only_the_needed_prefix():
     consumed = []
 
