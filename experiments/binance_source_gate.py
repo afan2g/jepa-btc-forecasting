@@ -800,9 +800,8 @@ def frozen_metrics(frame: pd.DataFrame, *, min_run_samples: int = 60) -> dict:
 DETERMINISM_EXCLUDED_KEYS = ("secs", "ts", "engine", "price_scale")
 
 
-def _load_semantic_manifest(path: str) -> dict:
-    """(output, exchange, symbol, dt) -> semantic record view (last record wins,
-    DETERMINISM_EXCLUDED_KEYS removed)."""
+def _load_raw_manifest(path: str) -> dict:
+    """(output, exchange, symbol, dt) -> FULL last-wins record."""
     recs = {}
     with open(path) as f:
         for line in f:
@@ -810,9 +809,24 @@ def _load_semantic_manifest(path: str) -> dict:
             if not line:
                 continue
             r = json.loads(line)
-            key = (r["output"], r["exchange"], r["symbol"], r["dt"])
-            recs[key] = {k: v for k, v in r.items() if k not in DETERMINISM_EXCLUDED_KEYS}
+            recs[(r["output"], r["exchange"], r["symbol"], r["dt"])] = r
     return recs
+
+
+def _load_semantic_manifest(path: str) -> dict:
+    """(output, exchange, symbol, dt) -> semantic record view (last record wins,
+    DETERMINISM_EXCLUDED_KEYS removed)."""
+    return {key: {k: v for k, v in r.items() if k not in DETERMINISM_EXCLUDED_KEYS}
+            for key, r in _load_raw_manifest(path).items()}
+
+
+def _topk_engine_provenance(path: str) -> dict:
+    """'output|exchange|symbol|dt' -> [engine, price_scale] for every topk_l2 record.
+    Reported by compare_stage2_manifests so the verdict can require GENUINE cross-engine
+    coverage (run1 python oracle, run2 native at the measured scales) — the excluded-key
+    equality alone would also pass a python-vs-python self-compare."""
+    return {"|".join(key): [r.get("engine"), r.get("price_scale")]
+            for key, r in _load_raw_manifest(path).items() if key[0] == "topk_l2"}
 
 
 def semantic_manifest_fingerprint(path: str) -> str:
@@ -842,7 +856,9 @@ def compare_stage2_manifests(path_a: str, path_b: str) -> dict:
     return {"equal": not diffs, "n_units": len(set(a) | set(b)), "diffs": diffs,
             "units": sorted([list(k) for k in set(a) | set(b)]),
             "run1_semantic_fingerprint": semantic_manifest_fingerprint(path_a),
-            "run2_semantic_fingerprint": semantic_manifest_fingerprint(path_b)}
+            "run2_semantic_fingerprint": semantic_manifest_fingerprint(path_b),
+            "run1_topk_engines": _topk_engine_provenance(path_a),
+            "run2_topk_engines": _topk_engine_provenance(path_b)}
 
 
 # ----------------------------------------------------------------------------- fixed comparison

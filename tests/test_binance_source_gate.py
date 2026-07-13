@@ -713,8 +713,10 @@ class TestVerdictCli:
                        "thin_usable_max": 0.10, "seed_crossed_frac_max": 0.05},
     }
 
+    NATIVE_SCALE = {"BINANCE_FUTURES": 10, "BINANCE": 100}
+
     def _stage2_manifest(self, path, *, perp_topk_cls="certified", dt="2026-04-01",
-                         contract=None, mode="w"):
+                         contract=None, mode="w", engine="python"):
         with open(path, mode) as f:
             for (exchange, symbol), outputs in self.UNITS.items():
                 for output in outputs:
@@ -722,6 +724,9 @@ class TestVerdictCli:
                            "dt": dt, "status": "ok", "rows": 1, "sha256": "c" * 64}
                     if output == "topk_l2":
                         rec.update(contract or self.TOPK_CONTRACT)
+                        rec["engine"] = engine
+                        rec["price_scale"] = (self.NATIVE_SCALE[exchange]
+                                              if engine == "native" else None)
                         cls = perp_topk_cls if exchange == "BINANCE_FUTURES" \
                             else "certified"
                         rec["classification"] = cls
@@ -730,14 +735,29 @@ class TestVerdictCli:
                             rec["rows"] = 0
                     f.write(json.dumps(rec) + "\n")
 
+    def _native_twin(self, manifest):
+        """The same manifest content with topk records re-stamped as the native arm."""
+        twin = pathlib.Path(str(manifest) + ".native.jsonl")
+        with open(manifest) as src, open(twin, "w") as out:
+            for line in src:
+                rec = json.loads(line)
+                if rec["output"] == "topk_l2":
+                    rec["engine"] = "native"
+                    rec["price_scale"] = self.NATIVE_SCALE[rec["exchange"]]
+                out.write(json.dumps(rec) + "\n")
+        return twin
+
     def _step_reports(self, tmp_path, manifest, *, determinism_pass=True, tick_pass=True,
-                      det_manifest=None):
-        det = dict(bsg.compare_stage2_manifests(str(det_manifest or manifest),
-                                                str(det_manifest or manifest)))
+                      det_manifest=None, det_manifest2=None):
+        m1 = str(det_manifest or manifest)
+        m2 = str(det_manifest2 or self._native_twin(det_manifest or manifest))
+        det = dict(bsg.compare_stage2_manifests(m1, m2))
         paths = {}
         for name, payload in {
             "verify": {"step": "verify-inputs", "pass": True},
-            "tick": {"step": "tick-scale", "day": "2026-04-01", "pass": tick_pass},
+            "tick": {"step": "tick-scale", "day": "2026-04-01", "pass": tick_pass,
+                     "instruments": {"binance-perp": {"conformance_scale": 10},
+                                     "binance-spot": {"conformance_scale": 100}}},
             "silence": {"step": "silence", "day": "2026-04-01", "pass": True},
             "det": {"step": "stage2-compare", "pass": determinism_pass, **det},
         }.items():
@@ -853,6 +873,32 @@ class TestVerdictCli:
         rep = self._run(tmp_path, m, paths)
         assert rep["lake_verdict"] == "inconclusive"
         assert any("not the fixture day" in r for r in rep["reasons"])
+
+    def test_python_self_compare_lacks_native_provenance(self, tmp_path):
+        """A python-vs-python self-compare (or a copied python manifest as run2) must not
+        satisfy the cross-engine conformance invalidator (Codex round 4)."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m)
+        rep = self._run(tmp_path, m,
+                        self._step_reports(tmp_path, m, det_manifest=m, det_manifest2=m))
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("not native at the measured conformance scale" in r
+                   for r in rep["reasons"])
+
+    def test_wrong_native_scale_is_inconclusive(self, tmp_path):
+        """run2 native at a scale other than the tick report's conformance scale must not
+        certify."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m)
+        twin = self._native_twin(m)
+        recs = [json.loads(l) for l in open(twin)]
+        for rec in recs:
+            if rec["output"] == "topk_l2":
+                rec["price_scale"] = 1000
+        twin.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        rep = self._run(tmp_path, m,
+                        self._step_reports(tmp_path, m, det_manifest2=twin))
+        assert rep["lake_verdict"] == "inconclusive"
 
     def test_determinism_report_must_cover_all_required_units(self, tmp_path):
         """A comparison that never covered a required fixture-day unit must not certify."""
@@ -1127,6 +1173,29 @@ class TestCliWithFixtures:
         # the refusal report carries the full window identity so `decide` can consume it
         assert rep["symbol"] == "BTCUSDT" and rep["exchange"] == "binance_futures"
         assert not (tmp_path / "chd_frame.parquet").exists()
+
+    def test_corrupt_objects_refuse_instead_of_crashing(self, tmp_path):
+        """Truncated/corrupt vendor bytes must produce the fail-closed refusal report
+        (SourceGateError), never a raw pyarrow crash (Codex round 4)."""
+        cli = _cli()
+        bad_zst = tmp_path / "corrupt.parquet.zst"
+        bad_zst.write_bytes(b"\x28\xb5\x2f\xfd" + b"garbage-not-a-zstd-frame")
+        rc = cli.main(["chd-validate", "--file", str(bad_zst), "--exchange",
+                       "binance_futures", "--date", "2026-04-01", "--hour", "12",
+                       "--out", str(tmp_path)])
+        assert rc == cli.FAIL_EXIT
+        rep = json.loads((tmp_path / "chd_validate_binance_futures_2026-04-01_12.json")
+                         .read_text())
+        assert not rep["pass"] and rep["refusal"] == "corrupt_object"
+        bad_parquet = tmp_path / "corrupt.parquet"
+        bad_parquet.write_bytes(b"PAR1" + b"\x00" * 64)
+        rc = cli.main(["chd-validate", "--file", str(bad_parquet), "--exchange",
+                       "binance_futures", "--date", "2026-04-01", "--hour", "12",
+                       "--out", str(tmp_path)])
+        assert rc == cli.FAIL_EXIT
+        rep = json.loads((tmp_path / "chd_validate_binance_futures_2026-04-01_12.json")
+                         .read_text())
+        assert not rep["pass"] and rep["refusal"] == "corrupt_parquet"
 
     def test_stale_decompression_cache_is_rebuilt(self, tmp_path):
         """Replacing the .zst object must rebuild the derived parquet cache — never

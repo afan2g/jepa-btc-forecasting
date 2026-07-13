@@ -559,6 +559,25 @@ def cmd_verdict(args) -> int:
                 inconclusive_reasons.append(
                     "hard invalidator: determinism report does not cover "
                     f"{exchange}/{symbol}/{output} for {day}")
+    # GENUINE cross-engine coverage (Codex round 4): the excluded-key equality would also
+    # pass a python-vs-python self-compare, so require run1's topk records to be the
+    # python oracle and run2's to be native at the tick report's conformance scales.
+    instrument_of = {"BINANCE_FUTURES": "binance-perp", "BINANCE": "binance-spot"}
+    for (exchange, symbol) in REQUIRED_UNITS:
+        unit_key = "|".join(("topk_l2", exchange, symbol, day))
+        run1_prov = (determinism.get("run1_topk_engines") or {}).get(unit_key)
+        run2_prov = (determinism.get("run2_topk_engines") or {}).get(unit_key)
+        expected_scale = ((tick.get("instruments") or {})
+                          .get(instrument_of[exchange], {}) or {}).get("conformance_scale")
+        if not run1_prov or run1_prov[0] != "python":
+            inconclusive_reasons.append(
+                f"hard invalidator: determinism run1 topk record for {exchange}/{symbol} "
+                f"is not the python oracle (saw {run1_prov})")
+        if not run2_prov or run2_prov[0] != "native" or run2_prov[1] != expected_scale:
+            inconclusive_reasons.append(
+                f"hard invalidator: determinism run2 topk record for {exchange}/{symbol} "
+                f"is not native at the measured conformance scale {expected_scale} "
+                f"(saw {run2_prov})")
     for path, rep in replays.items():
         if not rep["harness_determinism_ok"]:
             inconclusive_reasons.append(f"hard invalidator: harness determinism failed "
@@ -754,12 +773,19 @@ def _decompress_if_zstd(path: str) -> tuple[str, dict]:
             cached_src = f.read().strip()
     if not os.path.exists(dest) or cached_src != prov["object_sha256"]:
         tmp = dest + ".tmp"
-        with pa.input_stream(path, compression="zstd") as src, open(tmp, "wb") as out:
-            while True:
-                chunk = src.read(1 << 20)
-                if not chunk:
-                    break
-                out.write(chunk)
+        try:
+            with pa.input_stream(path, compression="zstd") as src, open(tmp, "wb") as out:
+                while True:
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        except Exception as e:      # noqa: BLE001 — corrupt vendor bytes must REFUSE, not crash
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise bsg.ChdValidationError(
+                "corrupt_object", f"{path}: zstd decompression failed "
+                f"({type(e).__name__}: {e})"[:400]) from e
         os.replace(tmp, dest)
         with open(sidecar, "w") as f:
             f.write(prov["object_sha256"] + "\n")
@@ -770,8 +796,13 @@ def _decompress_if_zstd(path: str) -> tuple[str, dict]:
 def _load_chd_hour(path: str, *, exchange: str, symbol: str, date_iso: str, hour: int):
     import pyarrow.parquet as pq
     parquet_path, prov = _decompress_if_zstd(path)
-    with pq.ParquetFile(parquet_path) as pf:
-        df = pf.read().to_pandas()
+    try:
+        with pq.ParquetFile(parquet_path) as pf:
+            df = pf.read().to_pandas()
+    except Exception as e:          # noqa: BLE001 — corrupt vendor bytes must REFUSE, not crash
+        raise bsg.ChdValidationError(
+            "corrupt_parquet", f"{parquet_path}: parquet read failed "
+            f"({type(e).__name__}: {e})"[:400]) from e
     identity = bsg.validate_chd_frame(df, exchange=exchange, symbol=symbol,
                                       date_iso=date_iso, hour=hour)
     identity["provenance"] = prov
