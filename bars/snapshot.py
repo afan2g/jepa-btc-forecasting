@@ -80,8 +80,12 @@ class ObservableBookRead(NamedTuple):
 
     Carries the top of book alongside mid/microprice because this read is what
     feeds `half_spread_bps` (§G, T7) and top-level book-shape features (T3) —
-    the spread is not recoverable from mid + microprice alone. Deeper top-K
-    exposure is deferred to T3, which owns the feature list that pins `k`."""
+    the spread is not recoverable from mid + microprice alone. The depth tuples
+    (T3 extension, issue #78) expose the observable top-K ladder: bids descending
+    and asks ascending from the best, level 0 == the best_* fields, truncated to
+    the levels that actually exist (never padded — the feature layer owns the
+    fail-closed insufficient-depth policy). The label read stays a bare price
+    anchor: depth is a FEATURE input and must never grow a label-role twin."""
     target_read_ts: int  # origin time of the LAST observable target-book event
     mid: float
     microprice: float
@@ -89,6 +93,10 @@ class ObservableBookRead(NamedTuple):
     best_ask: float
     best_bid_size: float
     best_ask_size: float
+    bid_prices: tuple[float, ...] = ()
+    bid_sizes: tuple[float, ...] = ()
+    ask_prices: tuple[float, ...] = ()
+    ask_sizes: tuple[float, ...] = ()
 
 
 class LabelBookRead(NamedTuple):
@@ -170,7 +178,8 @@ def _validate_event(e: BookDelta) -> None:
 
 
 def dual_book_reads(events: Iterable[BookDelta], t_events: Iterable[int], *,
-                    staleness_cap_ns: int) -> Iterator[BarBookReads | SnapshotRejection]:
+                    staleness_cap_ns: int,
+                    top_k: int = 1) -> Iterator[BarBookReads | SnapshotRejection]:
     """Stream the dual target-book reads for a day: one `BarBookReads` or
     `SnapshotRejection` per entry of `t_events`, in order.
 
@@ -182,6 +191,9 @@ def dual_book_reads(events: Iterable[BookDelta], t_events: Iterable[int], *,
         means the caller skipped `bars.clock.coalesce_decision_bars`.
       * `staleness_cap_ns >= 0`; a bar whose observable book is older than the cap
         (`t_event - target_read_ts > staleness_cap_ns`) is rejected as stale.
+      * `top_k >= 1` pins how many observable ladder levels each side exposes on
+        the read's depth tuples (T3's feature config owns the required depth; the
+        tuples truncate to the levels that exist).
 
     The observable book is maintained incrementally: a straggler that becomes
     observable after later-origin events were already folded applies to a price
@@ -190,6 +202,8 @@ def dual_book_reads(events: Iterable[BookDelta], t_events: Iterable[int], *,
     order, without re-replaying the day per bar (bounded memory)."""
     if staleness_cap_ns < 0:
         raise ValueError(f"staleness_cap_ns must be >= 0, got {staleness_cap_ns}")
+    if top_k < 1:
+        raise ValueError(f"top_k must be >= 1, got {top_k}")
 
     ev_iter = iter(events)
     label_book = OrderBook()
@@ -262,6 +276,10 @@ def dual_book_reads(events: Iterable[BookDelta], t_events: Iterable[int], *,
             continue
 
         bb, ba = obs_book.best_bid(), obs_book.best_ask()
+        # top-K ladder read off the observable book only (heapq mirrors
+        # OrderBook.snapshot: O(N log k), byte-identical to sorted()[:k])
+        bid_px = heapq.nlargest(top_k, obs_book.bids)
+        ask_px = heapq.nsmallest(top_k, obs_book.asks)
         yield BarBookReads(
             t_event=t_event,
             observable=ObservableBookRead(target_read_ts=target_read_ts,
@@ -269,7 +287,11 @@ def dual_book_reads(events: Iterable[BookDelta], t_events: Iterable[int], *,
                                           microprice=obs_book.microprice(),
                                           best_bid=bb, best_ask=ba,
                                           best_bid_size=obs_book.bids[bb],
-                                          best_ask_size=obs_book.asks[ba]),
+                                          best_ask_size=obs_book.asks[ba],
+                                          bid_prices=tuple(bid_px),
+                                          bid_sizes=tuple(obs_book.bids[p] for p in bid_px),
+                                          ask_prices=tuple(ask_px),
+                                          ask_sizes=tuple(obs_book.asks[p] for p in ask_px)),
             label=LabelBookRead(label_cut_ts=t_event,
                                 mid=label_book.mid(),
                                 microprice=label_book.microprice()),
