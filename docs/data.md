@@ -1345,8 +1345,12 @@ Other open items:
       publishing, resumable processed manifest; the Binance tick scales were measured by the
       preregistered #64 tick-scale step (zero off-tick prices across `book_delta_v2`/`trades`/
       `book`, 2026-04-01) and registered in `_TICK_SCALE` (issue #71) — `--engine auto` selects native
-      when the extension is built, Python stays the correctness oracle, and real-data
-      native/Python conformance is still pending. Still open in the amended order: #64 bounded
+      when the extension is built and Python stays the correctness oracle. *Real-data
+      native/Python conformance RECORDED 2026-07-12 (PR #72, from the #64 Stage-2 runs on
+      `2026-04-01`): byte-identical certified top-K parquet per instrument (equal sha256,
+      identical quality/seed/classification blocks and raw-input identities) — perp 109.3M
+      deltas, python 84,153 s (23.4 h) vs native 19.7 s at scale 10; spot 33.9M deltas,
+      python 13,731 s (3.8 h) vs native 7.9 s at scale 100.* Still open in the amended order: #64 bounded
       source certification; #68 minimal 92-day futures L2+trades acquisition; #67
       Binance-only producer/evaluator mode; #69 G0-BN; only after PASS, the
       deferred spot/state/Coinbase/cross-venue and remaining-archive stages.
