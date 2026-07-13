@@ -351,6 +351,20 @@ def test_invalid_path_mids_fail_closed():
             run(flat_warmup()[:-1] + [(T0, bad)], [(T0, 100.0)])
 
 
+def test_malformed_lookahead_past_the_needed_window_is_not_validated():
+    # deep-review P2 (round 2): a malformed or next-partition row just past the
+    # last anchor's window (e.g. a NaN mid at t_event + 60s + 1) must not kill
+    # the supported rows — its value is outside every requested horizon and
+    # outside the declared support, so only its position may be peeked
+    path = flat_warmup() + [(T0 + 5 * G, 100.2),
+                            (T0 + 60 * G + 1, float("nan"))]
+    rows = run(path, [(T0, 100.0)])          # coverage_end = T0 + 60s
+    assert [type(r) for r in rows] == [LabelRow] * 3
+    # ...while the same malformed row INSIDE a needed window still fails closed
+    with pytest.raises(ValueError, match="mid"):
+        run(flat_warmup() + [(T0 + 5 * G, float("nan"))], [(T0, 100.0)])
+
+
 def test_malformed_path_points_fail_closed():
     with pytest.raises(ValueError, match="path point"):
         run([(T0 - G,)], [(T0, 100.0)])

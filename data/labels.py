@@ -163,6 +163,19 @@ def anchor_from_bar_reads(reads) -> LabelAnchor:
     return LabelAnchor(t_event=int(reads.t_event), p0=float(reads.label.mid))
 
 
+def _point_ts(raw) -> int:
+    """Peek ONLY the timestamp of a raw path point. A lookahead row past every
+    needed window must be positionable without validating its mid (deep-review
+    P2: a malformed or next-partition value just past the last supported
+    window must not kill the supported labels — it is never consumed)."""
+    try:
+        ts_raw, _mid = raw
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"path points must be (ts, mid) pairs; got {raw!r}") from None
+    return _int_param("path point ts", ts_raw)
+
+
 def _validated_point(raw, prev_ts) -> tuple[int, float]:
     try:
         ts_raw, mid_raw = raw
@@ -191,7 +204,9 @@ def triple_barrier_labels(path: Iterable, anchors: Iterable, *,
         `ts` order (equal `ts` allowed: the last point at an instant is the
         state, earlier ones are coalesced away). Mids must be finite and
         positive. Only the prefix needed by the anchors is consumed/validated
-        (streaming; the tail past the last anchor's window stays untouched).
+        (streaming; the tail past the last anchor's window stays untouched,
+        and a lookahead row past every needed window is only position-peeked —
+        its value is never validated).
       * `anchors` are `(t_event, p0)` with strictly increasing `t_event` — a
         duplicate decision key means the caller skipped backlog coalescing —
         and `p0` equal to the true path mid at `t_event` (T2's label-anchor
@@ -282,16 +297,15 @@ def _label_iter(path_iter, anchor_iter, ladder, params, coverage_end):
             nxt = next(path_iter, None)
         bound = t_event + max_h
         while nxt is not None:
+            if _point_ts(nxt) > bound:        # peek position only: an out-of-
+                break                         # window value is never validated
             ts, mid = _validated_point(nxt, prev_raw_ts)
-            if ts > bound:
-                break
             prev_raw_ts = ts
             nxt = next(path_iter, None)
             while nxt is not None:                       # same-ts: last wins
-                ts2, mid2 = _validated_point(nxt, prev_raw_ts)
-                if ts2 != ts:
+                if _point_ts(nxt) != ts:
                     break
-                mid = mid2
+                _, mid = _validated_point(nxt, prev_raw_ts)
                 nxt = next(path_iter, None)
             if ts <= t_event:
                 fold(ts, mid)
