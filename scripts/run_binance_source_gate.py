@@ -873,6 +873,14 @@ def cmd_chd_replay(args) -> int:
 
     prereg = bsg.load_preregistration(args.prereg)
     bars = bsg.PREREGISTERED["thresholds"]["chd_window_quality"]
+    # the chd_verdict is decision-bearing and its thin bar is defined AT the preregistered
+    # top-K depth — an off-contract --k must never certify (Codex round 9)
+    prereg_k = int(prereg["replay_contract"]["k"])
+    if args.k != prereg_k:
+        print(f"ERROR: --k {args.k} differs from the preregistered replay_contract.k "
+              f"{prereg_k}; a chd_verdict is only defined at the registered depth",
+              file=sys.stderr)
+        return SETUP_ERROR_EXIT
     hours = list(range(args.start_hour, args.start_hour + args.n_hours))
     if len(args.files) != len(hours):
         print(f"ERROR: {len(args.files)} files for {len(hours)} hours", file=sys.stderr)

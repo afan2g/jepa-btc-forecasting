@@ -1282,6 +1282,17 @@ class TestCliWithFixtures:
         with pq.ParquetFile(str(frame_out)) as pf:
             assert pf.metadata.num_rows == 3600
 
+    def test_chd_replay_refuses_off_contract_k(self, tmp_path):
+        """The chd_verdict is only defined at the preregistered k=10 — an operator --k
+        override must never certify (Codex round 9)."""
+        cli = _cli()
+        path = self._write_hour(tmp_path, valid_hour())
+        rc = cli.main(["chd-replay", "--files", path, "--exchange", "binance_futures",
+                       "--date", "2026-04-01", "--start-hour", "12", "--n-hours", "1",
+                       "--scale", "10", "--k", "1", "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
+        assert not (tmp_path / "chd_replay_binance_futures_2026-04-01_12_1h.json").exists()
+
     def test_chd_replay_cli_fail_closed_writes_refusal_report(self, tmp_path):
         cli = _cli()
         rows = update_rows(1001, 1002, 1000, HOUR0 + SEC, [("bid", 100.0, 1.0)])
