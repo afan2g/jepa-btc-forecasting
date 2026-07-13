@@ -510,17 +510,25 @@ def cmd_verdict(args) -> int:
                                 "required": want, "status": got_status,
                                 "classification": got_cls, "ok": bool(ok)})
 
-    def _load_step(path: str, step: str) -> dict:
+    def _load_step(path: str, step: str, *, day_scoped: bool = False) -> dict:
         rep = _read_json(path)
         if rep.get("step") != step:
             raise ValueError(f"{path} is not a {step} report")
+        # Day-scoped evidence must be about the fixture day — a stale passing report from
+        # another day must never vouch for this one (Codex round 2): recorded as a hard
+        # invalidator so the verdict can only be inconclusive.
+        if day_scoped and rep.get("day") != day:
+            inconclusive_reasons.append(
+                f"hard invalidator: {step} report is for day {rep.get('day')!r}, "
+                f"not the fixture day {day}")
         return rep
 
     verify = _load_step(args.verify_report, "verify-inputs")
-    tick = _load_step(args.tick_report, "tick-scale")
-    silence = _load_step(args.silence_report, "silence")
+    tick = _load_step(args.tick_report, "tick-scale", day_scoped=True)
+    silence = _load_step(args.silence_report, "silence", day_scoped=True)
     determinism = _load_step(args.determinism_report, "stage2-compare")
-    replays = {p: _load_step(p, "replay-conformance") for p in args.replay_report}
+    replays = {p: _load_step(p, "replay-conformance", day_scoped=True)
+               for p in args.replay_report}
 
     # every required instrument must have a replay-conformance report — a missing one means
     # harness determinism / native conformance / frozen caps were never checked for it
@@ -605,16 +613,37 @@ def cmd_verdict(args) -> int:
 # ----------------------------------------------------------------------------- decide
 def cmd_decide(args) -> int:
     """Machine-enforced final_source_decision routing (preregistration decision_logic).
-    Fail-closed: a missing/withheld input never improves the outcome."""
+    Fail-closed: a missing/withheld input never improves the outcome, and every supplied
+    piece of evidence must be BOUND to the preregistered April windows (Codex round 2) —
+    a report about another window/date/symbol is an operator error and hard-rejects
+    (exit 2, no decision emitted) rather than silently steering the routing."""
+    prereg = bsg.load_preregistration(args.prereg)
+    fixture_day = prereg["fixture"]["lake"]["day"]
+    probe = prereg["fixture"]["cryptohftdata"]["probe"]
+    allowed_exchanges = {"binance_futures", "binance_spot"}
+
     lake = _read_json(args.lake_verdict)
     if lake.get("step") != "verdict":
         raise ValueError(f"{args.lake_verdict} is not a verdict report")
+    if lake.get("day") != fixture_day:
+        raise ValueError(f"{args.lake_verdict} is a verdict for day {lake.get('day')!r}, "
+                         f"not the preregistered fixture day {fixture_day}")
     lake_verdict = lake["lake_verdict"]
 
     chd_reports = [_read_json(p) for p in (args.chd_replay or [])]
+    chd_frame_hashes = set()
     for path, rep in zip(args.chd_replay or [], chd_reports):
         if rep.get("step") != "chd-replay":
             raise ValueError(f"{path} is not a chd-replay report")
+        if rep.get("date") != fixture_day or rep.get("symbol") != probe["symbol"] or \
+                rep.get("exchange") not in allowed_exchanges:
+            raise ValueError(
+                f"{path} is about {rep.get('exchange')}/{rep.get('symbol')}/"
+                f"{rep.get('date')} — not a preregistered April window "
+                f"({sorted(allowed_exchanges)}/{probe['symbol']}/{fixture_day})")
+        h = (rep.get("meta") or {}).get("frame_replay_hash")
+        if h:
+            chd_frame_hashes.add(h)
     if not chd_reports:
         chd_verdict = "inconclusive"    # never approved/downloaded — fail closed
     elif any(r.get("chd_verdict") != "certified" for r in chd_reports):
@@ -628,6 +657,20 @@ def cmd_decide(args) -> int:
         comp = _read_json(args.comparison)
         if comp.get("step") != "compare":
             raise ValueError(f"{args.comparison} is not a compare report")
+        # window binding: any stated window bound must lie inside the fixture day
+        for bound in (comp.get("window") or []):
+            if bound is not None and not str(bound).startswith(fixture_day):
+                raise ValueError(f"{args.comparison} window bound {bound!r} is outside "
+                                 f"the fixture day {fixture_day}")
+        # content binding: the compared CHD frame must be one the replay evidence
+        # produced (identical windows are preregistered, so the as-used frame hash must
+        # match a replay report's frame hash)
+        comp_chd_hash = comp.get("chd_frame_replay_hash")
+        if chd_reports and comp_chd_hash and comp_chd_hash not in chd_frame_hashes:
+            raise ValueError(
+                f"{args.comparison} compared a CHD frame (hash {comp_chd_hash[:16]}...) "
+                "that none of the supplied chd-replay reports produced — align the "
+                "comparison window with the replay evidence")
         comparison_pass = bool(comp.get("pass"))
 
     if lake_verdict == "certified":
@@ -818,6 +861,9 @@ def cmd_compare(args) -> int:
     report = {"step": "compare", "prereg_commit": _prereg_commit(),
               "lake_frame": args.lake_frame, "chd_frame": args.chd_frame,
               "window": [args.window_start, args.window_end], "price_scale": int(args.scale),
+              # content binding for `decide`: hashes of the frames AS COMPARED (post-slice)
+              "lake_frame_replay_hash": bsg.frame_replay_hash(frames["lake"]),
+              "chd_frame_replay_hash": bsg.frame_replay_hash(frames["chd"]),
               "metrics": metrics, "evaluation": evaluation, "pass": evaluation["pass"]}
     _write_report(args.out, "comparison.json", report)
     print(f"compare: {'PASS' if evaluation['pass'] else 'FAIL'} "

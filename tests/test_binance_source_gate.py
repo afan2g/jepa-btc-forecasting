@@ -737,8 +737,8 @@ class TestVerdictCli:
         paths = {}
         for name, payload in {
             "verify": {"step": "verify-inputs", "pass": True},
-            "tick": {"step": "tick-scale", "pass": tick_pass},
-            "silence": {"step": "silence", "pass": True},
+            "tick": {"step": "tick-scale", "day": "2026-04-01", "pass": tick_pass},
+            "silence": {"step": "silence", "day": "2026-04-01", "pass": True},
             "det": {"step": "stage2-compare", "pass": determinism_pass, **det},
         }.items():
             p = tmp_path / f"{name}.json"
@@ -747,8 +747,8 @@ class TestVerdictCli:
         for inst in ("binance-perp", "binance-spot"):
             p = tmp_path / f"replay_{inst}.json"
             p.write_text(json.dumps({
-                "step": "replay-conformance", "instrument": inst, "pass": True,
-                "harness_determinism_ok": True, "conformance_ok": True,
+                "step": "replay-conformance", "day": "2026-04-01", "instrument": inst,
+                "pass": True, "harness_determinism_ok": True, "conformance_ok": True,
                 "conformance": {"ran": True},
                 "frozen": {"frozen_cap_fired": False, "frozen_fraction": 0.0}}))
             paths[inst] = str(p)
@@ -841,6 +841,19 @@ class TestVerdictCli:
         assert rep["lake_verdict"] == "inconclusive"
         assert any("not about this manifest" in r for r in rep["reasons"])
 
+    def test_wrong_day_scoped_report_is_inconclusive(self, tmp_path):
+        """A stale passing tick/silence/replay report from another day must never vouch
+        for the fixture day (Codex round 2)."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m)
+        paths = self._step_reports(tmp_path, m)
+        tick = json.loads(pathlib.Path(paths["tick"]).read_text())
+        tick["day"] = "2026-03-31"
+        pathlib.Path(paths["tick"]).write_text(json.dumps(tick))
+        rep = self._run(tmp_path, m, paths)
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("not the fixture day" in r for r in rep["reasons"])
+
     def test_determinism_report_must_cover_all_required_units(self, tmp_path):
         """A comparison that never covered a required fixture-day unit must not certify."""
         m = tmp_path / "m.jsonl"
@@ -855,22 +868,28 @@ class TestVerdictCli:
 
 
 class TestDecideCli:
-    def _lake(self, tmp_path, verdict):
+    def _lake(self, tmp_path, verdict, *, day="2026-04-01"):
         p = tmp_path / "lake_verdict.json"
-        p.write_text(json.dumps({"step": "verdict", "lake_verdict": verdict}))
+        p.write_text(json.dumps({"step": "verdict", "day": day, "lake_verdict": verdict}))
         return str(p)
 
-    def _chd(self, tmp_path, verdicts):
+    def _chd(self, tmp_path, verdicts, *, date="2026-04-01", symbol="BTCUSDT",
+             exchange="binance_futures"):
         paths = []
         for i, v in enumerate(verdicts):
             p = tmp_path / f"chd_{i}.json"
-            p.write_text(json.dumps({"step": "chd-replay", "chd_verdict": v}))
+            p.write_text(json.dumps({
+                "step": "chd-replay", "chd_verdict": v, "date": date, "symbol": symbol,
+                "exchange": exchange, "hours": [12],
+                "meta": {"frame_replay_hash": f"hash{i}"}}))
             paths.append(str(p))
         return paths
 
-    def _comp(self, tmp_path, ok):
+    def _comp(self, tmp_path, ok, *, window=("2026-04-01T12:00:00", "2026-04-01T13:00:00"),
+              chd_hash="hash0"):
         p = tmp_path / "comparison.json"
-        p.write_text(json.dumps({"step": "compare", "pass": ok}))
+        p.write_text(json.dumps({"step": "compare", "pass": ok, "window": list(window),
+                                 "chd_frame_replay_hash": chd_hash}))
         return str(p)
 
     def _decide(self, tmp_path, lake, chd=None, comparison=None):
@@ -909,6 +928,45 @@ class TestDecideCli:
     def test_ambiguous_combination_escalates_fail_closed(self, tmp_path):
         rep = self._decide(tmp_path, "certified", chd=["degraded"])
         assert rep["decision"] == "escalate"
+
+    def test_wrong_window_chd_report_hard_rejects(self, tmp_path):
+        """A certified CHD replay from an unrelated window must never drive the decision
+        (Codex round 2): the decide command rejects it outright."""
+        cli = _cli()
+        for kwargs in ({"date": "2026-03-15"}, {"symbol": "ETHUSDT"},
+                       {"exchange": "bybit"}):
+            argv = ["decide", "--lake-verdict", self._lake(tmp_path, "degraded"),
+                    "--out", str(tmp_path)]
+            for p in self._chd(tmp_path, ["certified"], **kwargs):
+                argv += ["--chd-replay", p]
+            assert cli.main(argv) == cli.SETUP_ERROR_EXIT
+
+    def test_unbound_comparison_hard_rejects(self, tmp_path):
+        """A comparison about frames/windows the replay evidence never produced must not
+        mark Lake independently validated (Codex round 2)."""
+        cli = _cli()
+        base = ["decide", "--lake-verdict", self._lake(tmp_path, "certified"),
+                "--out", str(tmp_path)]
+        chd = self._chd(tmp_path, ["certified"])
+        argv = list(base)
+        for p in chd:
+            argv += ["--chd-replay", p]
+        argv += ["--comparison", self._comp(tmp_path, True, chd_hash="other-frame")]
+        assert cli.main(argv) == cli.SETUP_ERROR_EXIT
+        argv = list(base)
+        for p in chd:
+            argv += ["--chd-replay", p]
+        argv += ["--comparison",
+                 self._comp(tmp_path, True,
+                            window=("2026-03-15T12:00:00", "2026-03-15T13:00:00"))]
+        assert cli.main(argv) == cli.SETUP_ERROR_EXIT
+
+    def test_wrong_day_lake_verdict_hard_rejects(self, tmp_path):
+        cli = _cli()
+        rc = cli.main(["decide", "--lake-verdict",
+                       self._lake(tmp_path, "certified", day="2026-04-02"),
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
 
 
 # ----------------------------------------------------------------------------- network isolation
