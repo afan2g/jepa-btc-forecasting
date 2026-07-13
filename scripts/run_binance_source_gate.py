@@ -681,13 +681,13 @@ def cmd_decide(args) -> int:
             if bound is not None and not str(bound).startswith(fixture_day):
                 raise ValueError(f"{args.comparison} window bound {bound!r} is outside "
                                  f"the fixture day {fixture_day}")
-        # content binding is MANDATORY: a comparison is only evidence when the replay
-        # evidence that produced its CHD frame is supplied alongside it and the as-used
-        # frame hash matches — a legacy/hand-built comparison with no bindable hash, or
-        # one supplied without any completing replay report, is rejected outright
-        comp_chd_hash = comp.get("chd_frame_replay_hash")
+        # content binding is MANDATORY on BOTH sides: a comparison is only evidence when
+        # the replay evidence that produced each frame is supplied alongside it and the
+        # pre-slice frame hashes match — a legacy/hand-built comparison, or one against a
+        # stale/wrong frame, is rejected outright
+        comp_chd_hash = comp.get("chd_frame_full_replay_hash")
         if not comp_chd_hash:
-            raise ValueError(f"{args.comparison} carries no chd_frame_replay_hash — "
+            raise ValueError(f"{args.comparison} carries no chd_frame_full_replay_hash — "
                              "regenerate it with the current compare command")
         if not chd_frame_hashes:
             raise ValueError(
@@ -699,6 +699,29 @@ def cmd_decide(args) -> int:
                 f"{args.comparison} compared a CHD frame (hash {comp_chd_hash[:16]}...) "
                 "that none of the supplied chd-replay reports produced — align the "
                 "comparison window with the replay evidence")
+        lake_hashes = set()
+        for path in (args.lake_replay_report or []):
+            rep = _read_json(path)
+            if rep.get("step") != "replay-conformance":
+                raise ValueError(f"{path} is not a replay-conformance report")
+            if rep.get("day") != fixture_day:
+                raise ValueError(f"{path} is a replay-conformance report for "
+                                 f"{rep.get('day')!r}, not {fixture_day}")
+            if rep.get("frame_replay_hash"):
+                lake_hashes.add(rep["frame_replay_hash"])
+        comp_lake_hash = comp.get("lake_frame_full_replay_hash")
+        if not comp_lake_hash:
+            raise ValueError(f"{args.comparison} carries no lake_frame_full_replay_hash — "
+                             "regenerate it with the current compare command")
+        if not lake_hashes:
+            raise ValueError(
+                "a comparison was supplied without --lake-replay-report evidence pinning "
+                "the certified Lake frame — the comparison cannot be bound")
+        if comp_lake_hash not in lake_hashes:
+            raise ValueError(
+                f"{args.comparison} compared a Lake frame (hash {comp_lake_hash[:16]}...) "
+                "that the supplied replay-conformance evidence did not produce — the "
+                "comparison does not cover the certified Lake output")
         comparison_pass = bool(comp.get("pass"))
 
     if lake_verdict == "certified":
@@ -900,9 +923,13 @@ def cmd_compare(args) -> int:
     import pyarrow.parquet as pq
 
     frames = {}
+    full_hashes = {}
     for label, path in (("lake", args.lake_frame), ("chd", args.chd_frame)):
         with pq.ParquetFile(path) as pf:
             frames[label] = pf.read().to_pandas()
+        # pre-slice content hash: binds this comparison to the replay evidence that
+        # produced each frame (the replay reports carry the full-frame hash)
+        full_hashes[label] = bsg.frame_replay_hash(frames[label])
     if args.window_start and args.window_end:
         lo = int(pd.Timestamp(args.window_start, tz="UTC").value)
         hi = int(pd.Timestamp(args.window_end, tz="UTC").value)
@@ -923,7 +950,11 @@ def cmd_compare(args) -> int:
     report = {"step": "compare", "prereg_commit": _prereg_commit(),
               "lake_frame": args.lake_frame, "chd_frame": args.chd_frame,
               "window": [args.window_start, args.window_end], "price_scale": int(args.scale),
-              # content binding for `decide`: hashes of the frames AS COMPARED (post-slice)
+              # content binding for `decide`: pre-slice hashes tie the comparison to the
+              # replay evidence that produced each frame; as-used hashes document the
+              # exact compared content
+              "lake_frame_full_replay_hash": full_hashes["lake"],
+              "chd_frame_full_replay_hash": full_hashes["chd"],
               "lake_frame_replay_hash": bsg.frame_replay_hash(frames["lake"]),
               "chd_frame_replay_hash": bsg.frame_replay_hash(frames["chd"]),
               "metrics": metrics, "evaluation": evaluation, "pass": evaluation["pass"]}
@@ -964,6 +995,18 @@ def cmd_fetch(args) -> int:
         print(f"REFUSING fetch: object {args.object!r} is not in the preregistered "
               "probe/expansion set (see preregistration request_bounds).", file=sys.stderr)
         return SETUP_ERROR_EXIT
+    # the preregistered request caps are CEILINGS — operator overrides above them refuse
+    # before any network code runs (Codex round 6)
+    bounds = prereg["request_bounds"]["probe"]
+    for name, value, cap in (("--max-attempts", args.max_attempts,
+                              int(bounds["max_attempts_per_object"])),
+                             ("--byte-cap", args.byte_cap,
+                              int(bounds["byte_cap_per_object"])),
+                             ("--timeout", args.timeout, int(bounds["timeout_s"]))):
+        if value > cap:
+            print(f"REFUSING fetch: {name} {value} exceeds the preregistered cap {cap} "
+                  "(request_bounds.probe).", file=sys.stderr)
+            return SETUP_ERROR_EXIT
     if os.path.exists(args.dest):
         print(f"REFUSING fetch: dest {args.dest} already exists (never overwrite raw vendor "
               "data).", file=sys.stderr)
@@ -1080,6 +1123,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="chd-replay report path(s); omit when never approved/downloaded")
     p.add_argument("--comparison", default=None,
                    help="compare report path; omit when the comparison was not executable")
+    p.add_argument("--lake-replay-report", action="append", default=None,
+                   help="replay-conformance report(s) pinning the certified Lake frame "
+                        "hash; REQUIRED whenever --comparison is supplied")
 
     p = sub.add_parser("chd-validate"); common(p)
     p.add_argument("--file", required=True)

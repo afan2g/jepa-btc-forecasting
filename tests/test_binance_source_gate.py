@@ -488,6 +488,15 @@ class TestChdReplayFailClosed:
         _, meta = replay(chd_frame(rows))
         assert meta["counters"]["delete_absent_levels"] == 1
 
+    def test_backwards_update_id_range_refuses(self):
+        """An update with first_update_id > final_update_id is malformed regardless of
+        how it chains — it must never mutate the book (Codex round 6)."""
+        df = valid_hour()
+        rows = df.to_dict("records")
+        rows += update_rows(1010, 1008, 1006, HOUR0 + 4 * SEC, [("bid", 55.5, 1.0)])
+        with pytest.raises(bsg.ChdValidationError, match="backwards_update_ids"):
+            replay(chd_frame(rows))
+
     def test_malformed_vendor_decimals_refuse_with_gate_code(self):
         """A malformed/non-finite price or quantity must surface as a SourceGateError
         (stable code), never a raw decimal.InvalidOperation that would bypass the CLI's
@@ -932,10 +941,18 @@ class TestDecideCli:
         return paths
 
     def _comp(self, tmp_path, ok, *, window=("2026-04-01T12:00:00", "2026-04-01T13:00:00"),
-              chd_hash="hash0"):
+              chd_hash="hash0", lake_hash="lakehash"):
         p = tmp_path / "comparison.json"
         p.write_text(json.dumps({"step": "compare", "pass": ok, "window": list(window),
-                                 "chd_frame_replay_hash": chd_hash}))
+                                 "chd_frame_full_replay_hash": chd_hash,
+                                 "lake_frame_full_replay_hash": lake_hash}))
+        return str(p)
+
+    def _lake_replay(self, tmp_path, *, frame_hash="lakehash", day="2026-04-01"):
+        p = tmp_path / "lake_replay.json"
+        p.write_text(json.dumps({"step": "replay-conformance", "day": day,
+                                 "instrument": "binance-perp",
+                                 "frame_replay_hash": frame_hash}))
         return str(p)
 
     def _decide(self, tmp_path, lake, chd=None, comparison=None):
@@ -945,7 +962,8 @@ class TestDecideCli:
         for p in self._chd(tmp_path, chd or []):
             argv += ["--chd-replay", p]
         if comparison is not None:
-            argv += ["--comparison", self._comp(tmp_path, comparison)]
+            argv += ["--comparison", self._comp(tmp_path, comparison),
+                     "--lake-replay-report", self._lake_replay(tmp_path)]
         assert cli.main(argv) == 0
         return json.loads((tmp_path / "final_source_decision.json").read_text())
 
@@ -989,23 +1007,28 @@ class TestDecideCli:
 
     def test_unbound_comparison_hard_rejects(self, tmp_path):
         """A comparison about frames/windows the replay evidence never produced must not
-        mark Lake independently validated (Codex round 2)."""
+        mark Lake independently validated (Codex rounds 2 and 6)."""
         cli = _cli()
         base = ["decide", "--lake-verdict", self._lake(tmp_path, "certified"),
                 "--out", str(tmp_path)]
         chd = self._chd(tmp_path, ["certified"])
-        argv = list(base)
-        for p in chd:
-            argv += ["--chd-replay", p]
-        argv += ["--comparison", self._comp(tmp_path, True, chd_hash="other-frame")]
-        assert cli.main(argv) == cli.SETUP_ERROR_EXIT
-        argv = list(base)
-        for p in chd:
-            argv += ["--chd-replay", p]
-        argv += ["--comparison",
-                 self._comp(tmp_path, True,
-                            window=("2026-03-15T12:00:00", "2026-03-15T13:00:00"))]
-        assert cli.main(argv) == cli.SETUP_ERROR_EXIT
+        lake_rep = self._lake_replay(tmp_path)
+
+        def run(comp_kwargs=None, lake_replay=lake_rep):
+            argv = list(base)
+            for p in chd:
+                argv += ["--chd-replay", p]
+            argv += ["--comparison", self._comp(tmp_path, True, **(comp_kwargs or {}))]
+            if lake_replay:
+                argv += ["--lake-replay-report", lake_replay]
+            return cli.main(argv)
+
+        assert run({"chd_hash": "other-frame"}) == cli.SETUP_ERROR_EXIT
+        assert run({"window": ("2026-03-15T12:00:00",
+                               "2026-03-15T13:00:00")}) == cli.SETUP_ERROR_EXIT
+        # lake-side binding (round 6): stale/wrong lake frame, or no pinning evidence
+        assert run({"lake_hash": "stale-lake-frame"}) == cli.SETUP_ERROR_EXIT
+        assert run(lake_replay=None) == cli.SETUP_ERROR_EXIT
 
     def test_wrong_day_lake_verdict_hard_rejects(self, tmp_path):
         cli = _cli()
@@ -1099,6 +1122,18 @@ class TestNetworkIsolation:
                        "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"do-not-overwrite"
+
+    def test_fetch_refuses_cap_overrides(self, tmp_path):
+        """The preregistered request caps are ceilings — operator overrides above them
+        refuse before any network code runs (Codex round 6)."""
+        cli = _cli()
+        obj = "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst"
+        for extra in (["--max-attempts", "100"], ["--byte-cap", str(2 << 30)],
+                      ["--timeout", "999"]):
+            rc = cli.main(["fetch", "--object", obj, "--dest", str(tmp_path / "z.zst"),
+                           "--approved-by", "user", "--out", str(tmp_path)] + extra)
+            assert rc == cli.SETUP_ERROR_EXIT, extra
+            assert not (tmp_path / "z.zst").exists()
 
     def test_fetch_refuses_unregistered_objects(self, tmp_path):
         """Even with approval provenance, only the preregistered probe/expansion objects

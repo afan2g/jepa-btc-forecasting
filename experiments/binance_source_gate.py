@@ -394,6 +394,13 @@ def _group_events(df: pd.DataFrame, *, price_scale: int) -> list[ChdEvent]:
             if final_u[i] < 0 or first_u[i] < 0:
                 raise ChdValidationError("update_missing_ids",
                                          f"update row {i} lacks first/final_update_id")
+            if first_u[i] > final_u[i]:
+                # a backwards ID range is malformed regardless of how it chains — it must
+                # never mutate the book (fail-closed update-ID contract)
+                raise ChdValidationError(
+                    "backwards_update_ids",
+                    f"update row {i} has first_update_id {first_u[i]} > final_update_id "
+                    f"{final_u[i]}")
             gk = ("update", int(first_u[i]), int(final_u[i]), int(prev_u[i]))
         else:
             if last_u[i] < 0:
