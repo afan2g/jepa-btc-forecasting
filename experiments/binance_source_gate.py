@@ -349,6 +349,19 @@ def validate_chd_frame(df: pd.DataFrame, *, exchange: str, symbol: str, date_iso
     for axis in ("received_time", "event_time"):
         t = normalize_epoch_ns(df[axis].to_numpy(), fieldname=axis)
         axis_frac[axis] = float(np.mean((t >= hour_start) & (t < hour_end)))
+    # transaction_time is nullable but part of the preregistered timestamp contract:
+    # non-null values must be integer epochs at a detectable timescale — replay never
+    # reads this column, so validation is the only fail-closed check it gets
+    try:
+        tx = pd.array(df["transaction_time"], dtype="Int64")
+    except (ValueError, TypeError) as e:
+        raise ChdValidationError(
+            "malformed_timestamp",
+            f"transaction_time: non-integer values ({type(e).__name__}: {e})"[:300]) from e
+    tx_non_null = tx.dropna()
+    if len(tx_non_null):
+        normalize_epoch_ns(tx_non_null.to_numpy(dtype="int64"),
+                           fieldname="transaction_time")
     matched = [a for a, frac in axis_frac.items() if frac >= IDENTITY_IN_HOUR_MIN_FRAC]
     if not matched:
         raise ChdValidationError(
@@ -360,6 +373,7 @@ def validate_chd_frame(df: pd.DataFrame, *, exchange: str, symbol: str, date_iso
             "rows": int(len(df)), "extra_columns": extras,
             "partition_axis": matched[0], "in_hour_fraction": axis_frac,
             "has_order_count": "order_count" in df.columns,
+            "transaction_time_non_null": int(len(tx_non_null)),
             "event_type_rows": {k: int((df["event_type"] == k).sum()) for k in sorted(kinds)}}
 
 

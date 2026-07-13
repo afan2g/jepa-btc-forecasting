@@ -252,6 +252,22 @@ class TestChdValidate:
         with pytest.raises(bsg.ChdValidationError, match="wrong_partition_window"):
             _identity(df)
 
+    def test_malformed_transaction_time_refuses(self):
+        """transaction_time is nullable but its non-null values are contract timestamps —
+        malformed or off-epoch values must refuse (Codex round 16)."""
+        df = valid_hour()
+        df["transaction_time"] = ["abc"] * len(df)       # object garbage
+        with pytest.raises(bsg.ChdValidationError, match="malformed_timestamp"):
+            _identity(df)
+        df = valid_hour()
+        df["transaction_time"] = pd.array([42] * len(df), dtype="Int64")   # off-epoch
+        with pytest.raises(bsg.ChdValidationError, match="timescale_undetectable"):
+            _identity(df)
+        df = valid_hour()
+        df.loc[0, "transaction_time"] = (HOUR0 + SEC) // MS   # valid ms epoch, rest null
+        ident = _identity(df)
+        assert ident["transaction_time_non_null"] == 1
+
     def test_empty_partition_refuses(self):
         df = valid_hour().iloc[0:0]
         with pytest.raises(bsg.ChdValidationError, match="empty_partition"):
