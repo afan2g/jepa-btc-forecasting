@@ -1660,6 +1660,9 @@ class TestCliWithFixtures:
         # off-measured scale refuses before any comparison (Codex round 14)
         rc = cli.main(base + ["--scale", "100"])
         assert rc == cli.SETUP_ERROR_EXIT
+        # off-contract depth refuses (Codex round 23)
+        rc = cli.main(base + ["--scale", "10", "--k", "1"])
+        assert rc == cli.SETUP_ERROR_EXIT
         rc = cli.main(base + ["--scale", "10"])
         assert rc == 0
         rep = json.loads((tmp_path / "comparison.json").read_text())

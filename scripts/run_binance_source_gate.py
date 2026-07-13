@@ -1064,11 +1064,19 @@ def cmd_compare(args) -> int:
         print(f"ERROR: {args.tick_report} was generated under a different "
               "preregistration content — regenerate it first.", file=sys.stderr)
         return SETUP_ERROR_EXIT
-    fixture_day = bsg.load_preregistration(args.prereg)["fixture"]["lake"]["day"]
+    prereg = bsg.load_preregistration(args.prereg)
+    fixture_day = prereg["fixture"]["lake"]["day"]
     if tick.get("day") != fixture_day:
         # a stale tick report from another day authorizes an UNMEASURED scale (round 15)
         print(f"ERROR: {args.tick_report} measures day {tick.get('day')!r}, not the "
               f"fixture day {fixture_day}.", file=sys.stderr)
+        return SETUP_ERROR_EXIT
+    prereg_k = int(prereg["replay_contract"]["k"])
+    if args.k != prereg_k:
+        # the comparison is fixed k=10 independent-source evidence (Codex round 23)
+        print(f"ERROR: --k {args.k} differs from the preregistered replay_contract.k "
+              f"{prereg_k}; the comparison is only defined at the registered depth",
+              file=sys.stderr)
         return SETUP_ERROR_EXIT
     measured = ((tick.get("instruments") or {}).get(args.instrument) or {}) \
         .get("conformance_scale")
@@ -1105,6 +1113,7 @@ def cmd_compare(args) -> int:
     report = {"step": "compare", "prereg_commit": _prereg_commit(),
               "lake_frame": args.lake_frame, "chd_frame": args.chd_frame,
               "instrument": args.instrument, "tick_report_day": tick.get("day"),
+              "k": args.k,
               "window": [args.window_start, args.window_end], "price_scale": int(args.scale),
               # content binding for `decide`: pre-slice hashes tie the comparison to the
               # replay evidence that produced each frame; as-used hashes document the
