@@ -1,0 +1,32 @@
+{
+  "issue": 64,
+  "generated_utc": "2026-07-13",
+  "preregistration_first_commit": "633d4e4f771574a2b8b207edf1947e87fbc987b8",
+  "preregistration_last_amended_commit": "af197519f3c492e35c7105da6eb221d861d2928b",
+  "reports_generated_at_commit": "af197519f3c492e35c7105da6eb221d861d2928b",
+  "provenance_note": "Local Crypto Lake 2026-04-01 Stage-2 integrity evidence for issue #64. Inputs are the nine Stage-1 raw units pinned (sha256/fingerprint/rows/bytes) inside the preregistration fixture and re-verified by verify_inputs.json. Run 1 = production scripts/run_binance_recon.py --engine auto (Python oracle; perp replay 84,153 s). Run 2 = stage2-native-run (production process_unit path, explicit native override, perp+spot scales 10/100; perp replay ~29 s). stage2_cross_engine_determinism pins run1==run2 on every semantic manifest field incl. published parquet sha256 (full-day cross-engine conformance, 2026-07-12 amendment). No vendor I/O of any kind was performed; no raw market rows appear in any tracked file.",
+  "tracked_files": {
+    "lake_verdict_2026-04-01.json": "0f0becca293b3d649046c1cab11ce59567a6caae457bcdf27fadd8ac5c064ec4",
+    "stage2_cross_engine_determinism.json": "7a9f880fa53353b508e711049754dc900cf7007325b288277f136a75746cac9f"
+  },
+  "ignored_reports_sha256": {
+    "verify_inputs.json": "33ac25823c061894b89f13ae896ec0aa7e885e738e68e2384193fbe46dc9a7eb",
+    "tick_scale.json": "13b70701dcd324eebccfa9c5a7b922f597197d4103763847caeb0168017c0e84",
+    "silence.json": "e322bac729d00a7eda7066d051e9e07f802f5ac9d7f01351aa3e1472b0841173",
+    "replay_conformance_binance-perp.json": "d128121cbe324d154f6a3f6e8488fc42b8a85fade28eb2cf712de090d2906676",
+    "replay_conformance_binance-spot.json": "10356f23054887ff126a226aa05c2f1ccc7ccbbcdd939db956aacb12a1519347",
+    "stage2_native_run.json": "a912a790b3cfb227361c8e1ca9cfc414aa58acf7e38f5d289569a2e351906a03",
+    "stage2_determinism.json": "7a9f880fa53353b508e711049754dc900cf7007325b288277f136a75746cac9f",
+    "lake_verdict.json": "0f0becca293b3d649046c1cab11ce59567a6caae457bcdf27fadd8ac5c064ec4",
+    "stage2/run1/_manifest.jsonl": "1a424a134a0591a63936987a1690d8c0c0d82dae497f555fcbb2b3b12a93957d",
+    "stage2/run2_native/_manifest.jsonl": "2623b62a639e644400280913f55e8e81878547100b900461f97f2eede6ef5f28",
+    "frames/lake_topk_perp_2026-04-01.parquet": "8358f8523cffc9703217de697dec36bfadb7082f0be0c50396f1f0cfa74c078a",
+    "frames/lake_topk_spot_2026-04-01.parquet": "98f5ac3a71e2287fc9ffc9e4ba7b9d2bfe465eeff0986a78d52bebae12a7955c"
+  },
+  "lake_verdict": "certified",
+  "vendor_calls": {
+    "requests": 0,
+    "bytes": 0,
+    "cost_usd": 0.0
+  }
+}

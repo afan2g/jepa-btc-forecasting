@@ -1,0 +1,17 @@
+{
+  "step": "stage2-compare",
+  "prereg_commit": "af197519f3c492e35c7105da6eb221d861d2928b",
+  "run1": "data/reports/binance_source_quality/stage2/run1/_manifest.jsonl",
+  "run2": "data/reports/binance_source_quality/stage2/run2_native/_manifest.jsonl",
+  "equal": true,
+  "n_units": 7,
+  "diffs": [],
+  "excluded_keys": [
+    "secs",
+    "ts",
+    "engine",
+    "price_scale"
+  ],
+  "pass": true,
+  "report_hash": "0a9fbe236e3391f8b74136f0a4e78727f148691bab1375b40d69781e41786083"
+}
