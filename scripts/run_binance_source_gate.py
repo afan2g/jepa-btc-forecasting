@@ -144,6 +144,8 @@ def cmd_verify_inputs(args) -> int:
         schema = pq.read_schema(path)
         with pq.ParquetFile(path) as pf:
             n_rows = pf.metadata.num_rows
+        st = os.stat(path)
+        entry["identity"] = [int(st.st_size), int(st.st_mtime_ns)]
         checks = {
             "sha256": _sha256_file(path) == u["sha256"],
             "schema_fingerprint": schema_fingerprint(schema) == u["schema_fingerprint"],
@@ -506,19 +508,46 @@ def cmd_verdict(args) -> int:
     unit_checks = []
     inconclusive_reasons: list[str] = []
     degraded_reasons: list[str] = []
+    prereg_hash = bsg.preregistration_content_hash(args.prereg)
+
+    def _load_step(path: str, step: str, *, day_scoped: bool = False) -> dict:
+        rep = _read_json(path)
+        if rep.get("step") != step:
+            raise ValueError(f"{path} is not a {step} report")
+        # Day-scoped evidence must be about the fixture day — a stale passing report from
+        # another day must never vouch for this one (Codex round 2): recorded as a hard
+        # invalidator so the verdict can only be inconclusive.
+        if day_scoped and rep.get("day") != day:
+            inconclusive_reasons.append(
+                f"hard invalidator: {step} report is for day {rep.get('day')!r}, "
+                f"not the fixture day {day}")
+        # Contract binding (Codex round 21): a report generated under a DIFFERENT
+        # preregistration content (e.g. before an amendment changed a measurement's
+        # scope) must never vouch under this one.
+        if rep.get("prereg_sha256") != prereg_hash:
+            inconclusive_reasons.append(
+                f"hard invalidator: {step} report was generated under preregistration "
+                f"content {str(rep.get('prereg_sha256'))[:16]!r}, not the current one")
+        return rep
+
+    verify = _load_step(args.verify_report, "verify-inputs")
+    verify_identity = {e.get("unit"): e.get("identity")
+                       for e in (verify.get("units") or []) if e.get("identity")}
     fixture_units = prereg["fixture"]["lake"]["units"]
 
     def _check_raw_inputs(exchange, symbol, output, rec) -> None:
-        # bind the manifest row to the VERIFIED inputs: verify-inputs proves the
-        # preregistered files exist now with the pinned sha256/bytes, and this check
-        # proves the manifest was generated from inputs of exactly those byte sizes —
-        # a stale manifest from another raw root cannot certify verified-looking
-        # evidence (Codex round 27)
+        # bind the manifest row to the VERIFIED inputs by full [size, mtime_ns] identity
+        # (the production resume-binding semantics): verify-inputs sha256-pins the
+        # current files and records their identities, and this check proves the manifest
+        # was generated from EXACTLY those filesystem objects — a same-size stale/
+        # swapped input can no longer certify under a fresh verify PASS (Codex rounds
+        # 27/28)
         raw_in = rec.get("raw_inputs") or {}
         feeds = [rec.get("feed")] + (["book"] if output == "topk_l2" else [])
         for feed in feeds:
             pinned = fixture_units.get(f"{exchange}/{symbol}/{feed}")
             ident = raw_in.get(feed)
+            expected = verify_identity.get(f"{exchange}/{symbol}/{feed}")
             size = ident[0] if isinstance(ident, (list, tuple)) and ident else None
             if not pinned or size != pinned["out_bytes"]:
                 inconclusive_reasons.append(
@@ -526,6 +555,12 @@ def cmd_verdict(args) -> int:
                     f"{feed} record size {size!r}, not the preregistered "
                     f"{(pinned or {}).get('out_bytes')!r} — the manifest was not "
                     "generated from the verified inputs")
+            elif expected is None or list(ident or []) != list(expected):
+                inconclusive_reasons.append(
+                    f"hard invalidator: manifest raw_inputs identity for {exchange}/"
+                    f"{symbol}/{feed} is {ident!r}, not the verified file identity "
+                    f"{expected!r} — the manifest was not generated from the exact "
+                    "sha256-verified inputs")
 
     for (exchange, symbol), reqs in REQUIRED_UNITS.items():
         for output, want in reqs.items():
@@ -573,29 +608,6 @@ def cmd_verdict(args) -> int:
                                 "required": want, "status": got_status,
                                 "classification": got_cls, "ok": bool(ok)})
 
-    prereg_hash = bsg.preregistration_content_hash(args.prereg)
-
-    def _load_step(path: str, step: str, *, day_scoped: bool = False) -> dict:
-        rep = _read_json(path)
-        if rep.get("step") != step:
-            raise ValueError(f"{path} is not a {step} report")
-        # Day-scoped evidence must be about the fixture day — a stale passing report from
-        # another day must never vouch for this one (Codex round 2): recorded as a hard
-        # invalidator so the verdict can only be inconclusive.
-        if day_scoped and rep.get("day") != day:
-            inconclusive_reasons.append(
-                f"hard invalidator: {step} report is for day {rep.get('day')!r}, "
-                f"not the fixture day {day}")
-        # Contract binding (Codex round 21): a report generated under a DIFFERENT
-        # preregistration content (e.g. before an amendment changed a measurement's
-        # scope) must never vouch under this one.
-        if rep.get("prereg_sha256") != prereg_hash:
-            inconclusive_reasons.append(
-                f"hard invalidator: {step} report was generated under preregistration "
-                f"content {str(rep.get('prereg_sha256'))[:16]!r}, not the current one")
-        return rep
-
-    verify = _load_step(args.verify_report, "verify-inputs")
     tick = _load_step(args.tick_report, "tick-scale", day_scoped=True)
     silence = _load_step(args.silence_report, "silence", day_scoped=True)
     determinism = _load_step(args.determinism_report, "stage2-compare")

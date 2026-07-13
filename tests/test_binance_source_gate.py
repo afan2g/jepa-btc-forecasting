@@ -835,9 +835,13 @@ class TestVerdictCli:
         m1 = str(det_manifest or manifest)
         m2 = str(det_manifest2 or self._native_twin(det_manifest or manifest))
         det = dict(bsg.compare_stage2_manifests(m1, m2))
+        fixture = bsg.load_preregistration()["fixture"]["lake"]["units"]
+        verify_units = [{"unit": key, "identity": [u["out_bytes"], 1]}
+                        for key, u in fixture.items()]
         paths = {}
         for name, payload in {
-            "verify": {"step": "verify-inputs", "prereg_sha256": PREREG_SHA, "pass": True},
+            "verify": {"step": "verify-inputs", "prereg_sha256": PREREG_SHA, "pass": True,
+                       "units": verify_units},
             "tick": {"step": "tick-scale", "day": "2026-04-01", "pass": tick_pass,
                      "prereg_sha256": PREREG_SHA,
                      "instruments": {"binance-perp": {"conformance_scale": 10},
@@ -942,6 +946,20 @@ class TestVerdictCli:
         rep = self._run(tmp_path, m, self._step_reports(tmp_path, m))
         assert rep["lake_verdict"] == "inconclusive"
         assert any("not generated from the verified inputs" in r for r in rep["reasons"])
+
+    def test_same_size_different_identity_is_inconclusive(self, tmp_path):
+        """A manifest whose inputs match the pinned SIZES but not the verified file
+        identities (mtime differs) must never certify (Codex round 28)."""
+        m = tmp_path / "m.jsonl"
+        self._stage2_manifest(m)                          # identities [size, 1]
+        paths = self._step_reports(tmp_path, m)
+        verify = json.loads(pathlib.Path(paths["verify"]).read_text())
+        for e in verify["units"]:
+            e["identity"] = [e["identity"][0], 2]         # same size, different mtime
+        pathlib.Path(paths["verify"]).write_text(json.dumps(verify))
+        rep = self._run(tmp_path, m, paths)
+        assert rep["lake_verdict"] == "inconclusive"
+        assert any("exact sha256-verified inputs" in r for r in rep["reasons"])
 
     def test_stale_determinism_report_is_inconclusive(self, tmp_path):
         """A passing stage2-compare report about a DIFFERENT manifest must never vouch
