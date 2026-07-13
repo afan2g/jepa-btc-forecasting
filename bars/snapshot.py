@@ -29,11 +29,16 @@ Timing discipline (load-bearing):
   missing / one-sided / invalid / crossed book fail closed as per-bar
   `SnapshotRejection` rows with stable reasons — timestamp presence is not gap
   absence (Codex #8). Contract violations (malformed events, out-of-order input,
-  a non-monotone `t_event` stream, receipt before origin) raise instead: they mean
-  the pipeline feeding this sampler is broken, not that one row is unusable.
+  a non-strictly-increasing `t_event` stream, receipt before origin) raise
+  instead: they mean the pipeline feeding this sampler is broken, not that one
+  row is unusable. Caveat: only the consumed event prefix can be validated —
+  an ordering violation hidden entirely behind the final decision's lookahead
+  barrier (every later event has `origin_time > max(t_events)`) is undetectable
+  in a lazy stream, so the T9 driver must either drive decisions to day end or
+  validate the day's stream order itself.
 
 Streaming/day-partitioned: one pass over the origin-ordered event stream, one pass
-over the non-decreasing `t_event` stream. Memory is bounded by book depth, the set
+over the strictly-increasing `t_event` stream. Memory is bounded by book depth, the set
 of price levels touched in the day, and the not-yet-observable straggler buffer —
 never the full day of events. Materializing helpers (`recon.reconstruct`) remain
 small fixture oracles only. Source-neutral: no venue, vendor, or source mode is
@@ -71,10 +76,19 @@ def book_order_key(e: BookDelta) -> tuple[int, int]:
 
 
 class ObservableBookRead(NamedTuple):
-    """The feature/cost role: the box-observable book at `t_event` (§B/§C.2)."""
+    """The feature/cost role: the box-observable book at `t_event` (§B/§C.2).
+
+    Carries the top of book alongside mid/microprice because this read is what
+    feeds `half_spread_bps` (§G, T7) and top-level book-shape features (T3) —
+    the spread is not recoverable from mid + microprice alone. Deeper top-K
+    exposure is deferred to T3, which owns the feature list that pins `k`."""
     target_read_ts: int  # origin time of the LAST observable target-book event
     mid: float
     microprice: float
+    best_bid: float
+    best_ask: float
+    best_bid_size: float
+    best_ask_size: float
 
 
 class LabelBookRead(NamedTuple):
@@ -247,11 +261,15 @@ def dual_book_reads(events: Iterable[BookDelta], t_events: Iterable[int], *,
             yield SnapshotRejection(t_event, ROLE_LABEL, bad[0], bad[1])
             continue
 
+        bb, ba = obs_book.best_bid(), obs_book.best_ask()
         yield BarBookReads(
             t_event=t_event,
             observable=ObservableBookRead(target_read_ts=target_read_ts,
                                           mid=obs_book.mid(),
-                                          microprice=obs_book.microprice()),
+                                          microprice=obs_book.microprice(),
+                                          best_bid=bb, best_ask=ba,
+                                          best_bid_size=obs_book.bids[bb],
+                                          best_ask_size=obs_book.asks[ba]),
             label=LabelBookRead(label_cut_ts=t_event,
                                 mid=label_book.mid(),
                                 microprice=label_book.microprice()),

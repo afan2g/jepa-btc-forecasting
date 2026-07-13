@@ -59,6 +59,8 @@ def test_dual_read_without_delays_matches_the_hand_computed_book():
     assert r0.observable.target_read_ts == 10
     assert r0.observable.mid == 100.5
     assert r0.observable.microprice == (3.0 * 100.0 + 2.0 * 101.0) / 5.0
+    assert (r0.observable.best_bid, r0.observable.best_bid_size) == (100.0, 2.0)
+    assert (r0.observable.best_ask, r0.observable.best_ask_size) == (101.0, 3.0)
     assert r0.label.label_cut_ts == 20
     # no delayed events: the observable and label-anchor reads coincide
     assert (r0.label.mid, r0.label.microprice) == (r0.observable.mid,
@@ -98,6 +100,11 @@ def test_observable_and_label_read_types_cannot_be_confused():
     assert "target_read_ts" not in LabelBookRead._fields
     assert "label_cut_ts" in LabelBookRead._fields
     assert "label_cut_ts" not in ObservableBookRead._fields
+    # the top-of-book (T7 half_spread_bps / T3 top-level shape) is emitted ONLY
+    # for the observable role; the label anchor stays a bare P0 price source
+    for f in ("best_bid", "best_ask", "best_bid_size", "best_ask_size"):
+        assert f in ObservableBookRead._fields
+        assert f not in LabelBookRead._fields
 
 
 # ------------------------------------------- delayed receipt / no-lookahead
@@ -176,6 +183,28 @@ def test_delayed_removal_is_invisible_until_received_then_empties_the_level():
     assert r2.observable.mid == 100.25    # removal received at 60: best bid 99.5
     assert r3.observable.mid == 100.25    # origin-12 straggler < origin-20 removal:
     assert r3.observable.target_read_ts == 20  # the level stays gone (tombstone)
+
+
+def test_observable_top_of_book_distinguishes_spreads_that_mid_cannot():
+    # two books with identical mid AND microprice but different spreads: the
+    # observable read must expose the top so T7's half_spread_bps is computable
+    tight = [delta(10, side="bid", price=99.0, size=2.0),
+             delta(10, side="ask", price=101.0, size=2.0)]
+    wide = [delta(10, side="bid", price=90.0, size=2.0),
+            delta(10, side="ask", price=110.0, size=2.0)]
+    (rt,) = reads(tight, [20])
+    (rw,) = reads(wide, [20])
+    assert rt.observable.mid == rw.observable.mid
+    assert rt.observable.microprice == rw.observable.microprice
+    assert rt.observable.best_ask - rt.observable.best_bid == 2.0
+    assert rw.observable.best_ask - rw.observable.best_bid == 20.0
+
+
+def test_observable_top_of_book_is_received_gated_like_the_prices():
+    # a delayed better bid must not surface in the observable top either
+    events = two_sided(10) + [delta(15, 90, side="bid", price=100.5, size=8.0)]
+    (r,) = reads(events, [20])
+    assert (r.observable.best_bid, r.observable.best_bid_size) == (100.0, 2.0)
 
 
 # ------------------------------------------------------------- staleness gate
@@ -262,12 +291,18 @@ def test_validate_book_top_rejects_invalid_tops_directly():
     ob.asks[101.0] = float("nan")           # defensive: a corrupted size
     reason, _ = validate_book_top(ob)
     assert reason == "invalid_book"
+    ob.asks[101.0] = 0.0                     # zero size: still invalid, not usable
+    reason, _ = validate_book_top(ob)
+    assert reason == "invalid_book"
     ob.asks[101.0] = 3.0
     assert validate_book_top(ob) is None
     ob.asks.pop(101.0)
     ob.asks[99.0] = 3.0                      # bid 100 >= ask 99
     reason, _ = validate_book_top(ob)
     assert reason == "crossed_book"
+    ob.asks[99.0] = float("nan")             # BOTH invalid and crossed at the top:
+    reason, _ = validate_book_top(ob)        # the documented order checks invalid
+    assert reason == "invalid_book"
 
 
 # ------------------------------------------------------ contract guard rails
