@@ -1021,11 +1021,11 @@ class TestDecideCli:
 
     def _comp(self, tmp_path, ok, *, window=("2026-04-01T12:00:00", "2026-04-01T13:00:00"),
               chd_hash="hash0", lake_hash="lakehash", instrument="binance-perp",
-              tick_report_day="2026-04-01"):
+              tick_report_day="2026-04-01", k=10):
         p = tmp_path / "comparison.json"
         p.write_text(json.dumps({"step": "compare", "prereg_sha256": PREREG_SHA,
                                  "pass": ok, "window": list(window),
-                                 "instrument": instrument,
+                                 "instrument": instrument, "k": k,
                                  "tick_report_day": tick_report_day,
                                  "chd_frame_full_replay_hash": chd_hash,
                                  "lake_frame_full_replay_hash": lake_hash}))
@@ -1150,6 +1150,8 @@ class TestDecideCli:
         assert run({"instrument": "binance-spot"}) == cli.SETUP_ERROR_EXIT
         # stale tick-report day behind the comparison scale (round 15)
         assert run({"tick_report_day": "2026-03-31"}) == cli.SETUP_ERROR_EXIT
+        # stale off-depth comparison (round 24)
+        assert run({"k": 1}) == cli.SETUP_ERROR_EXIT
 
     def test_stale_prereg_lake_verdict_hard_rejects(self, tmp_path):
         p = tmp_path / "stale_verdict.json"
@@ -1734,6 +1736,41 @@ class TestCrossEngineProtocol:
                                        "2026-04-01")
             pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
+
+    def test_tick_scale_survives_non_replay_feed_failure(self, tmp_path):
+        """A liquidation-only integrality failure fires the off-tick cap (report FAIL)
+        but must not null the replay conformance scale (Codex round 24)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from ingest import lake_binance as lb
+        raw = tmp_path / "raw"
+        self._write_raw_store(raw)
+        day_open = int(pd.Timestamp("2026-04-01").value)
+        bad_liq = pd.DataFrame({
+            "timestamp": [day_open + 10**12],
+            "receipt_timestamp": [day_open + 10**12],
+            "price": [1.0 / 3.0],                        # no d<=4 integral scale
+            "quantity": [1.0], "side": ["sell"], "id": [1], "status": ["filled"]})
+        path = lb.raw_parquet_path(str(raw), "liquidations", "BINANCE_FUTURES",
+                                   "BTC-USDT-PERP", "2026-04-01")
+        pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.Table.from_pandas(bad_liq, preserve_index=False), path)
+        # funding descriptive columns for perp
+        funding = pd.DataFrame({
+            "timestamp": [day_open + 10**12], "receipt_timestamp": [day_open + 10**12],
+            "rate": [0.0001], "mark_price": [100.12345678],
+            "index_price": [100.11111111]})
+        path = lb.raw_parquet_path(str(raw), "funding", "BINANCE_FUTURES",
+                                   "BTC-USDT-PERP", "2026-04-01")
+        pq.write_table(pa.Table.from_pandas(funding, preserve_index=False), path)
+        cli = _cli()
+        rc = cli.main(["tick-scale", "--raw", str(raw), "--out", str(tmp_path)])
+        assert rc == cli.FAIL_EXIT                       # off-tick cap fires (degraded)
+        rep = json.loads((tmp_path / "tick_scale.json").read_text())
+        perp = rep["instruments"]["binance-perp"]
+        assert not perp["ok"]
+        assert perp["per_feed"]["liquidations"]["reason"] == "no_integral_scale"
+        assert perp["conformance_scale"] == 10           # replay scale survives
 
     def test_python_cli_vs_native_override_manifests_equal(self, tmp_path):
         from recon import native as rnative

@@ -213,9 +213,14 @@ def cmd_tick_scale(args) -> int:
         # trade tick and never enter the replay, so they are gated only by the
         # universal d<=4 integrality cap, never the conformance scale.
         replay_feeds = ("book_delta_v2", "trades", "book")
+        replay_ok = all(per_feed[f]["ok"] for f in replay_feeds)
         measured = [per_feed[f]["measured_decimals"] for f in replay_feeds
                     if per_feed[f]["ok"] and per_feed[f]["measured_decimals"] is not None]
-        conf_scale = 10 ** max([*measured, exp_d]) if feed_ok else None
+        # the replay conformance scale depends only on the REPLAY feeds: a liquidation-
+        # only integrality failure fires the off-tick anomaly cap (degraded) but must not
+        # null the scale and cascade into a native-provenance hard invalidator
+        # (inconclusive) downstream (Codex round 24)
+        conf_scale = 10 ** max([*measured, exp_d]) if replay_ok else None
         out[key] = {"exchange": inst.exchange, "symbol": inst.symbol,
                     "expected_decimals": exp_d, "per_feed": per_feed,
                     "descriptive_not_tick_quantized": desc,
@@ -820,6 +825,12 @@ def cmd_decide(args) -> int:
             raise ValueError(
                 f"{args.comparison} was scaled by a tick report for "
                 f"{comp.get('tick_report_day')!r}, not the fixture day {fixture_day}")
+        if comp.get("k") != int(prereg["replay_contract"]["k"]):
+            # a stale comparison generated at another depth under the same contract hash
+            # must never be trusted (Codex round 24)
+            raise ValueError(
+                f"{args.comparison} records depth k={comp.get('k')}, not the "
+                f"preregistered replay_contract.k={prereg['replay_contract']['k']}")
         comparison_pass = bool(comp.get("pass"))
 
     if lake_verdict == "certified":
