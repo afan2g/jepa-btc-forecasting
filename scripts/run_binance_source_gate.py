@@ -166,15 +166,27 @@ def cmd_tick_scale(args) -> int:
     day = prereg["fixture"]["lake"]["day"]
     out = {}
     overall_ok = True
+    # GATED feeds carry exchange-tick-quantized prices (deltas, trades, book seed, and
+    # liquidations — liquidation fills execute on the book). Funding mark/index prices
+    # are index-derived and NOT tick-quantized, so they are measured DESCRIPTIVELY only
+    # (recorded, never gated, excluded from the conformance scale) — amendment 5.
+    gated_extra = {"binance-perp": [("liquidations", "price")], "binance-spot": []}
+    descriptive = {"binance-perp": [("funding", "mark_price"), ("funding", "index_price")],
+                   "binance-spot": []}
     for key, inst in lb.INSTRUMENTS.items():
         exp_d = _expected_decimals(prereg, inst.exchange, inst.symbol)
         per_feed = {}
-        feeds = [("book_delta_v2", ["price"]), ("trades", ["price"])]
-        for feed, cols in feeds:
+        feeds = [("book_delta_v2", "price"), ("trades", "price")] + gated_extra[key]
+        for feed, col in feeds:
             path = lb.raw_parquet_path(args.raw, feed, inst.exchange, inst.symbol, day)
-            df = _read_columns(path, cols)
+            if not os.path.exists(path) and feed == "liquidations":
+                per_feed[feed] = {"ok": True, "missing_sparse": True, "n_prices": 0,
+                                  "measured_decimals": None, "off_tick_at_expected": None,
+                                  "conformance_scale": None, "reason": None}
+                continue
+            df = _read_columns(path, [col])
             per_feed[feed] = bsg.measure_float_price_scale(
-                df["price"].to_numpy(dtype="float64"), expected_decimals=exp_d)
+                df[col].to_numpy(dtype="float64"), expected_decimals=exp_d)
         book_path = lb.raw_parquet_path(args.raw, "book", inst.exchange, inst.symbol, day)
         import pyarrow.parquet as pq
         names = [n for n in pq.read_schema(book_path).names
@@ -183,12 +195,26 @@ def cmd_tick_scale(args) -> int:
         prices = bdf.to_numpy(dtype="float64").ravel()
         prices = prices[np.isfinite(prices)]
         per_feed["book"] = bsg.measure_float_price_scale(prices, expected_decimals=exp_d)
+        desc = {}
+        for feed, col in descriptive[key]:
+            path = lb.raw_parquet_path(args.raw, feed, inst.exchange, inst.symbol, day)
+            df = _read_columns(path, [col])
+            desc[f"{feed}.{col}"] = bsg.measure_float_price_scale(
+                df[col].to_numpy(dtype="float64"), expected_decimals=exp_d)
         feed_ok = all(m["ok"] for m in per_feed.values())
         overall_ok &= feed_ok
-        measured = [m["measured_decimals"] for m in per_feed.values() if m["ok"]]
+        # conformance scale is defined over the REPLAY feeds only — verbatim
+        # tick_rules.lake_measurement: "10^max(d_measured over delta+book+trades,
+        # d_expected)". Liquidation prices can be average-fill values finer than the
+        # trade tick and never enter the replay, so they are gated only by the
+        # universal d<=4 integrality cap, never the conformance scale.
+        replay_feeds = ("book_delta_v2", "trades", "book")
+        measured = [per_feed[f]["measured_decimals"] for f in replay_feeds
+                    if per_feed[f]["ok"] and per_feed[f]["measured_decimals"] is not None]
         conf_scale = 10 ** max([*measured, exp_d]) if feed_ok else None
         out[key] = {"exchange": inst.exchange, "symbol": inst.symbol,
                     "expected_decimals": exp_d, "per_feed": per_feed,
+                    "descriptive_not_tick_quantized": desc,
                     "measured_decimals_max": max(measured) if measured else None,
                     "conformance_scale": conf_scale, "ok": feed_ok}
     report = {"step": "tick-scale", "prereg_commit": _prereg_commit(), "day": day,

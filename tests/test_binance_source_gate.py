@@ -547,6 +547,17 @@ class TestChdReplayFailClosed:
             with pytest.raises(bsg.ChdValidationError, match="malformed_decimal"):
                 replay(df)
 
+    def test_malformed_update_id_values_refuse_with_gate_code(self):
+        """Non-integer update-id vendor bytes must refuse with a stable code, never a raw
+        pandas error (Codex round 20)."""
+        rows = valid_hour().to_dict("records")
+        df = pd.DataFrame(rows)                          # no Int64 coercion
+        df["final_update_id"] = df["final_update_id"].astype(object)
+        df.loc[len(df) - 1, "final_update_id"] = "abc"
+        with pytest.raises(bsg.ChdValidationError, match="malformed_update_id"):
+            bsg.replay_chd_window([({"date": "2026-04-01", "hour": 12}, df)],
+                                  market="futures", price_scale=10, grid=grid(4))
+
     def test_non_positive_update_price_refuses(self):
         """A zero/negative price in an update level must never mutate the book, even deep
         outside the top-K (Codex round 18)."""

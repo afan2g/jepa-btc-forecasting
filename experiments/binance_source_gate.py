@@ -402,8 +402,14 @@ def _group_events(df: pd.DataFrame, *, price_scale: int) -> list[ChdEvent]:
     qty = df["quantity"].astype(str).to_numpy()
 
     def _ids(col: str) -> np.ndarray:
-        # nullable INT64 -> int64 with -1 sentinel for null
-        return pd.array(df[col], dtype="Int64").to_numpy(dtype="int64", na_value=-1)
+        # nullable INT64 -> int64 with -1 sentinel for null; non-integer vendor bytes
+        # refuse with a stable code, never a raw pandas error (Codex round 20)
+        try:
+            return pd.array(df[col], dtype="Int64").to_numpy(dtype="int64", na_value=-1)
+        except (ValueError, TypeError, OverflowError) as e:
+            raise ChdValidationError(
+                "malformed_update_id",
+                f"{col}: non-integer values ({type(e).__name__}: {e})"[:300]) from e
 
     first_u, final_u = _ids("first_update_id"), _ids("final_update_id")
     prev_u, last_u = _ids("prev_final_update_id"), _ids("last_update_id")
