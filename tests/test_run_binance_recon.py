@@ -5,8 +5,12 @@ CLI runs end-to-end against it: certified top-K publishing (exact column order, 
 parquet KV schema_version/rows), fail-loud passthrough normalization, the resumable processed
 manifest (status / rows / sha256 / schema version / engine-time choice / dropped rows /
 classification / recon meta), resume + --overwrite semantics, the sparse-vs-required missing
-policy, schema-drift -> error -> exit 3, and the explicit `--engine native` abort (exit 2, no
-silent fallback — Binance has no verified tick scale yet, plan Risk Q1).
+policy, schema-drift -> error -> exit 3, and engine selection: the Binance tick scales are
+registered (#64 tick-scale evidence, issue #71), so `--engine auto` resolves to native exactly
+when the extension is importable, explicit `--engine native` runs natively when available and
+still ABORTS (exit 2, no silent fallback) when the extension is absent — pinned deterministically
+by nulling the module's `_rn` handle, so this suite passes both in CI without the extension and
+locally with it.
 
 These tests need pyarrow (they build the raw store), so the module importorskips it; the
 pyarrow-free core coverage lives in tests/test_lake_binance_seed_source.py.
@@ -26,6 +30,12 @@ pq = pytest.importorskip("pyarrow.parquet")
 
 from ingest import lake_binance as lb  # noqa: E402
 from ingest.download_lake_binance import _sha256_file  # noqa: E402
+from recon import native as rn  # noqa: E402
+
+# The engine `--engine auto` resolves to for the perp instrument in THIS environment: native when
+# the extension is importable (its tick scale is registered — issue #71), else Python.
+AUTO_ENGINE = "native" if rn.native_available() else "python"
+AUTO_SCALE = 10 if rn.native_available() else None
 
 # scripts/ is not a package — load the runner by path (same pattern as test_quality_map).
 _SPEC = importlib.util.spec_from_file_location(
@@ -188,7 +198,7 @@ def test_e2e_certifies_topk_and_normalizes_all_tables(tmp_path):
     assert t["status"] == "ok" and t["classification"] == rbr.CERTIFIED
     assert t["rows"] == 24 and t["schema_version"] == "topk_l2/1"
     assert t["sha256"] == _sha256_file(topk)              # digest of the published bytes
-    assert t["engine"] == "python" and t["engine_time_col"] == "origin_time"
+    assert t["engine"] == AUTO_ENGINE and t["engine_time_col"] == "origin_time"
     assert t["engine_time_fallback"] is False
     assert t["dropped_rows"] == {"book_delta_v2": 0, "book": 0}
     assert t["seed_source_crossed_frac"] == 0.0
@@ -199,10 +209,12 @@ def test_e2e_certifies_topk_and_normalizes_all_tables(tmp_path):
     assert tr["schema_version"] == "trades/1" and tr["engine_time_col"] == "origin_time"
     assert tr["dropped_rows"] == {"trades": 0} and tr["resorted"] is False
     assert len(tr["sha256"]) == 64
-    # report: auto engine resolved to python (no verified Binance tick scale — Risk Q1)
+    # report: auto resolves to native exactly when the extension is importable (the perp tick
+    # scale is registered — issue #71), else Python with the fallback note
     report = read_report(rep)
     assert report["counts"]["ok"] == 5 and report["counts"]["error"] == 0
-    assert report["engine_by_instrument"]["binance-perp"]["engine"] == "python"
+    assert report["engine_by_instrument"]["binance-perp"]["engine"] == AUTO_ENGINE
+    assert report["engine_by_instrument"]["binance-perp"]["price_scale"] == AUTO_SCALE
 
 
 def test_jobs_parallel_path_produces_same_outputs(tmp_path):
@@ -356,9 +368,13 @@ def test_unknown_trade_side_value_fails_loud(tmp_path):
 
 
 # --------------------------------------------------------------------------- engine selection
-def test_explicit_native_engine_aborts_before_any_processing(tmp_path):
-    # No Binance tick scale is registered (plan Risk Q1: unverified) => explicit native must fail
-    # clearly BEFORE any unit runs — never a silent Python fallback (plan Review Checklist).
+def test_explicit_native_engine_aborts_when_extension_absent(tmp_path, monkeypatch):
+    # The perp tick scale IS registered (issue #71), so the only abort cause left is a missing
+    # extension: explicit native must still fail clearly BEFORE any unit runs — never a silent
+    # Python fallback (plan Review Checklist). `_rn = None` simulates the unbuilt extension
+    # deterministically, in CI and locally alike.
+    monkeypatch.setattr(rn, "_rn", None)
+    monkeypatch.setattr(rn, "_IMPORT_ERROR", ImportError("not built"))
     raw = write_store(tmp_path)
     rc, out, rep = run_cli(tmp_path, raw, "--engine", "native")
     assert rc == rbr.SETUP_ERROR_EXIT
@@ -367,10 +383,57 @@ def test_explicit_native_engine_aborts_before_any_processing(tmp_path):
     assert not pathlib.Path(rep).exists() or not list(pathlib.Path(rep).glob("*.json"))
 
 
+@pytest.mark.skipif(not rn.native_available(),
+                    reason="recon_native extension not built (maturin develop)")
+def test_explicit_native_engine_runs_e2e_when_available(tmp_path):
+    # With the extension built, explicit native certifies end-to-end at the registered perp
+    # scale and records the engine + scale in the manifest and report.
+    rc, out, rep = run_cli(tmp_path, write_store(tmp_path), "--engine", "native")
+    assert rc == 0
+    t = last_by_output(out)["topk_l2"]
+    assert t["status"] == "ok" and t["classification"] == rbr.CERTIFIED
+    assert t["engine"] == "native" and t["price_scale"] == 10
+    assert os.path.exists(outpath(out, "topk_l2"))
+    assert read_report(rep)["engine_by_instrument"]["binance-perp"] \
+        == {"engine": "native", "price_scale": 10, "note": None}
+
+
 def test_engine_python_explicitly_selected(tmp_path):
+    # The Python oracle stays reachable and behaviorally unchanged (issue #71).
     rc, out, rep = run_cli(tmp_path, write_store(tmp_path), "--engine", "python")
     assert rc == 0
     assert read_report(rep)["engine_by_instrument"]["binance-perp"]["engine"] == "python"
+    assert last_by_output(out)["topk_l2"]["status"] == "ok"
+
+
+SPOT = ("BINANCE", "BTC-USDT")
+
+
+def test_spot_instrument_forwards_its_own_scale_through_the_runner(tmp_path):
+    # binance-spot must run at ITS registered scale (100), never the perp's 10 — this pins the
+    # per-instrument engine_by_key forwarding glue, which the perp-only tests cannot see (the
+    # perp's correct value, 10, coincides with a plausible hard-code). The default fixtures'
+    # $0.10-grid prices are also exact $0.01 multiples, so they are valid on the spot grid.
+    raw = str(tmp_path / "raw")
+    for feed, fn in (("book_delta_v2", _deltas_df), ("book", _book_df), ("trades", _trades_df)):
+        path = lb.raw_parquet_path(raw, feed, *SPOT, DAY)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        pq.write_table(pa.Table.from_pandas(fn(), preserve_index=False), path)
+    out = str(tmp_path / "out")
+    rep = str(tmp_path / "reports")
+    rc = rbr.main(["--instrument", "binance-spot", "--start", DAY, "--end", DAY,
+                   "--raw", raw, "--out", out, "--report-dir", rep,
+                   "--grid-s", "3600", "--k", "2", "--seed-min-levels", "2"])
+    assert rc == 0
+    spot_scale = 100 if rn.native_available() else None
+    t = last_by_output(out)["topk_l2"]
+    assert t["status"] == "ok" and t["classification"] == rbr.CERTIFIED
+    assert t["engine"] == AUTO_ENGINE and t["price_scale"] == spot_scale
+    assert os.path.exists(lb.processed_parquet_path(out, "topk_l2", *SPOT, DAY))
+    resolved = read_report(rep)["engine_by_instrument"]["binance-spot"]
+    assert resolved["engine"] == AUTO_ENGINE and resolved["price_scale"] == spot_scale
+    if not rn.native_available():
+        assert resolved["note"] is not None      # the auto fallback is announced, never silent
 
 
 # --------------------------------------------------------------------------- raw vendor names
@@ -495,9 +558,11 @@ def test_raw_input_refresh_invalidates_processed_units(tmp_path):
     assert rc3 == 0 and read_report(rep)["counts"]["skip"] == 5
 
 
-def test_passthrough_only_request_ignores_native_engine_gate(tmp_path):
+def test_passthrough_only_request_ignores_native_engine_gate(tmp_path, monkeypatch):
     # --feeds trades never touches the replay engine, so an explicit --engine native must not
-    # abort on the (intentionally unverified) Binance tick scale; recon requests still do.
+    # abort even when the extension is absent (simulated via `_rn = None`, which would abort a
+    # recon request); replay requests still gate.
+    monkeypatch.setattr(rn, "_rn", None)
     raw = write_store(tmp_path)
     out = str(tmp_path / "out")
     rep = str(tmp_path / "reports")

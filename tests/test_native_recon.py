@@ -99,6 +99,45 @@ def test_tick_scale_for_known_and_unknown():
     assert rn.tick_scale_for("COINBASE", "ETH-USD") is None
 
 
+def test_tick_scale_for_verified_binance_pairs():
+    # The #64-measured Binance scales (issue #71): perp $0.10 tick -> 10, spot $0.01 tick -> 100.
+    assert rn.tick_scale_for("BINANCE_FUTURES", "BTC-USDT-PERP") == 10
+    assert rn.tick_scale_for("binance_futures", "btc-usdt-perp") == 10   # case-insensitive
+    assert rn.tick_scale_for("BINANCE", "BTC-USDT") == 100
+    assert rn.tick_scale_for("binance", "btc-usdt") == 100
+    assert rn.tick_scale_for("BINANCE", "ETH-USDT") is None              # only the measured pairs
+
+
+@pytest.mark.parametrize("exchange,symbol,scale", [
+    ("COINBASE", "BTC-USD", 100),
+    ("BINANCE_FUTURES", "BTC-USDT-PERP", 10),
+    ("BINANCE", "BTC-USDT", 100),
+])
+def test_resolve_engine_verified_pairs_with_extension_present(monkeypatch, exchange, symbol, scale):
+    # Deterministic in CI too: resolve_engine consults availability only via the module's `_rn`
+    # handle, so pinning it non-None exercises the native branch without the built extension.
+    monkeypatch.setattr(rn, "_rn", object())
+    assert rn.resolve_engine("auto", exchange=exchange, symbol=symbol) == ("native", scale, None)
+    assert rn.resolve_engine("native", exchange=exchange, symbol=symbol) == ("native", scale, None)
+    assert rn.resolve_engine("python", exchange=exchange, symbol=symbol) == ("python", None, None)
+
+
+@pytest.mark.parametrize("exchange,symbol", [
+    ("COINBASE", "BTC-USD"),
+    ("BINANCE_FUTURES", "BTC-USDT-PERP"),
+    ("BINANCE", "BTC-USDT"),
+])
+def test_resolve_engine_verified_pairs_with_extension_absent(monkeypatch, exchange, symbol):
+    # Without the extension, auto falls back with a note and explicit native returns the abort
+    # path (python + reason) — the caller must fail closed, never silently fall back.
+    monkeypatch.setattr(rn, "_rn", None)
+    monkeypatch.setattr(rn, "_IMPORT_ERROR", ImportError("not built"))
+    eng, scale, note = rn.resolve_engine("auto", exchange=exchange, symbol=symbol)
+    assert eng == "python" and scale is None and note is not None
+    eng, scale, note = rn.resolve_engine("native", exchange=exchange, symbol=symbol)
+    assert eng == "python" and scale is None and note is not None
+
+
 # --------------------------------------------------------------------------- capability gate (stale build)
 # A stale/incompatible recon_native must be rejected at import time so `--engine native` fails BEFORE
 # any Lake load (not later at reconstruct, or — worse — with silently-misaligned reason codes).

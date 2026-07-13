@@ -79,11 +79,19 @@ except Exception as exc:  # noqa: BLE001 — absent, ImportError, or an ABI/vers
 # Verified (exchange, symbol) -> price_scale, where native tick = round(price * price_scale). A symbol
 # is only eligible for native mode if its true tick size is KNOWN and every price is an exact multiple
 # of it (so tick ordering == float ordering and same-ts crossing decisions cannot drift from Python).
-# Coinbase BTC-USD trades on a $0.01 quote increment => scale 100 (integer cents). Extend ONLY after a
-# product's tick size is verified; unknown symbols must fall back to Python (plan §"Rust Data
-# Structures").
+# Coinbase BTC-USD trades on a $0.01 quote increment => scale 100 (integer cents). The two Binance
+# BTC-USDT instruments were measured by the #64 tick-scale step (issue #71): ZERO off-tick prices
+# across book_delta_v2/trades/book on Lake day 2026-04-01 — every feed this tick contract governs
+# (only delta and book-seed prices are tick-keyed by the replay; passthrough tables such as the
+# perp liquidations prices are never tick-keyed and were not measured) — perp $0.10
+# tick => 10, spot $0.01 tick => 100 (report data/reports/binance_source_quality/tick_scale.json,
+# report_hash d5025c58aa48fb6b23d26f8f26cf270c42b4be33e567644f359fafd171a1d7f0, prereg commit
+# 60a2b745). Extend ONLY after a product's tick size is verified the same way; unknown symbols must
+# fall back to Python (plan §"Rust Data Structures").
 _TICK_SCALE: dict[tuple[str, str], int] = {
     ("COINBASE", "BTC-USD"): 100,
+    ("BINANCE_FUTURES", "BTC-USDT-PERP"): 10,
+    ("BINANCE", "BTC-USDT"): 100,
 }
 
 
