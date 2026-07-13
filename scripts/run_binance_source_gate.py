@@ -735,6 +735,16 @@ def cmd_decide(args) -> int:
                 raise ValueError(
                     f"{path} was scaled by a tick report for "
                     f"{rep.get('tick_report_day')!r}, not the fixture day {fixture_day}")
+            # the recorded provenance paths must satisfy the same exchange-segment
+            # binding the loader enforces — a stale pre-hardening report cannot claim a
+            # market its objects do not belong to (Codex round 26)
+            for ident in (rep.get("identities") or [None]):
+                opath = ((ident or {}).get("provenance") or {}).get("object_path")
+                if not opath or rep["exchange"] not in pathlib.Path(opath).parts:
+                    raise ValueError(
+                        f"{path} identity provenance {opath!r} does not place the object "
+                        f"under the claimed exchange {rep['exchange']!r} — regenerate the "
+                        "replay report")
         h = (rep.get("meta") or {}).get("frame_replay_hash")
         if h:
             chd_frame_hashes.add(h)
@@ -753,8 +763,13 @@ def cmd_decide(args) -> int:
         if comp.get("step") != "compare":
             raise ValueError(f"{args.comparison} is not a compare report")
         _require_current_prereg(args.comparison, comp)
-        # window binding: any stated window bound must lie inside the fixture day
-        for bound in (comp.get("window") or []):
+        # window binding: both bounds or neither (a stale half-window report must not
+        # pass, Codex round 26), and any stated bound must lie inside the fixture day
+        bounds = list(comp.get("window") or [None, None])
+        if len(bounds) != 2 or bool(bounds[0]) != bool(bounds[1]):
+            raise ValueError(f"{args.comparison} records a half-specified window "
+                             f"{bounds!r} — regenerate the comparison")
+        for bound in bounds:
             if bound is not None and not str(bound).startswith(fixture_day):
                 raise ValueError(f"{args.comparison} window bound {bound!r} is outside "
                                  f"the fixture day {fixture_day}")

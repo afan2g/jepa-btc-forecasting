@@ -1015,6 +1015,9 @@ class TestDecideCli:
                 "step": "chd-replay", "prereg_sha256": PREREG_SHA, "chd_verdict": v,
                 "date": date, "symbol": symbol,
                 "exchange": exchange, "hours": [12], "tick_report_day": "2026-04-01",
+                "identities": [{"hour": 12, "provenance": {
+                    "object_path": f"data/raw/chd/{exchange}/dt={date}/hour=12/"
+                                   f"{symbol}_orderbook.parquet.zst"}}],
                 "meta": {"frame_replay_hash": f"hash{i}", "k": 10}}))
             paths.append(str(p))
         return paths
@@ -1086,7 +1089,26 @@ class TestDecideCli:
             "step": "chd-replay", "prereg_sha256": PREREG_SHA, "chd_verdict": "certified", "pass": True,
             "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
             "hours": [12], "tick_report_day": "2026-04-01",
+            "identities": [{"hour": 12, "provenance": {"object_path":
+                "data/raw/chd/binance_futures/dt=2026-04-01/hour=12/x.zst"}}],
             "meta": {"frame_replay_hash": "hash0", "k": 1}}))
+        cli = _cli()
+        rc = cli.main(["decide", "--lake-verdict", self._lake(tmp_path, "degraded"),
+                       "--chd-replay", str(p), "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT
+
+    def test_wrong_provenance_exchange_hard_rejects(self, tmp_path):
+        """A completing report whose recorded object paths sit under another exchange's
+        directory must never aggregate as the claimed market (Codex round 26)."""
+        p = tmp_path / "chd_wrong_prov.json"
+        p.write_text(json.dumps({
+            "step": "chd-replay", "prereg_sha256": PREREG_SHA,
+            "chd_verdict": "certified", "pass": True, "date": "2026-04-01",
+            "symbol": "BTCUSDT", "exchange": "binance_futures", "hours": [12],
+            "tick_report_day": "2026-04-01",
+            "identities": [{"hour": 12, "provenance": {"object_path":
+                "data/raw/chd/binance_spot/dt=2026-04-01/hour=12/x.zst"}}],
+            "meta": {"frame_replay_hash": "hash0", "k": 10}}))
         cli = _cli()
         rc = cli.main(["decide", "--lake-verdict", self._lake(tmp_path, "degraded"),
                        "--chd-replay", str(p), "--out", str(tmp_path)])
@@ -1100,6 +1122,8 @@ class TestDecideCli:
             "step": "chd-replay", "prereg_sha256": PREREG_SHA, "chd_verdict": "certified", "pass": True,
             "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
             "hours": [12], "tick_report_day": "2026-03-31",
+            "identities": [{"hour": 12, "provenance": {"object_path":
+                "data/raw/chd/binance_futures/dt=2026-04-01/hour=12/x.zst"}}],
             "meta": {"frame_replay_hash": "hash0", "k": 10}}))
         cli = _cli()
         rc = cli.main(["decide", "--lake-verdict", self._lake(tmp_path, "degraded"),
@@ -1152,6 +1176,8 @@ class TestDecideCli:
         assert run({"tick_report_day": "2026-03-31"}) == cli.SETUP_ERROR_EXIT
         # stale off-depth comparison (round 24)
         assert run({"k": 1}) == cli.SETUP_ERROR_EXIT
+        # stale half-specified window (round 26)
+        assert run({"window": ("2026-04-01T12:00:00", None)}) == cli.SETUP_ERROR_EXIT
 
     def test_stale_prereg_lake_verdict_hard_rejects(self, tmp_path):
         p = tmp_path / "stale_verdict.json"
