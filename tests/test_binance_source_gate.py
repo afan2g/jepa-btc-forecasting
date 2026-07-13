@@ -1253,6 +1253,49 @@ class TestNetworkIsolation:
         assert not rep["pass"] and "byte cap" in rep["failure"]
         assert rep["attempts"] == 1
 
+    def test_fetch_byte_cap_is_cumulative_across_retries(self, tmp_path, monkeypatch):
+        """A transient failure just under the cap must not let retries multiply the
+        per-object traffic: the cap applies to CUMULATIVE bytes (Codex round 13)."""
+        import urllib.request
+
+        calls = {"n": 0}
+
+        class FlakyResp:
+            def __init__(self):
+                self.sent = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n):
+                if self.sent:
+                    raise OSError("connection reset")    # transient, mid-stream
+                self.sent = True
+                return b"x" * 600                        # just under the 1000-byte cap
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            return FlakyResp()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        cli = _cli()
+        dest = tmp_path / "probe.zst"
+        rc = cli.main(["fetch", "--object",
+                       "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
+                       "--dest", str(dest), "--approved-by", "user",
+                       "--byte-cap", "1000", "--out", str(tmp_path)])
+        assert rc == cli.FAIL_EXIT
+        assert calls["n"] == 2                           # attempt 2 crossed the cap
+        rep = json.loads((tmp_path / "fetch_binance_futures_2026-04-01_12_"
+                                     "BTCUSDT_orderbook.parquet.zst.json").read_text())
+        assert "byte cap" in rep["failure"] and "cumulative" in rep["failure"]
+        assert rep["total_bytes"] == 1200 and rep["attempts"] == 2
+        assert not dest.exists()
+
     def test_fetch_refuses_cap_overrides(self, tmp_path):
         """The preregistered request caps are ceilings — operator overrides above them
         refuse before any network code runs (Codex round 6)."""

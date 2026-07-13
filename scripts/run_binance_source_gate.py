@@ -1089,6 +1089,7 @@ def cmd_fetch(args) -> int:
     url = f"{CHD_BASE_URL}/download?file={args.object}"
     attempts = 0
     got_bytes = 0
+    total_bytes = 0          # cumulative across attempts — the cap is per OBJECT
     t0 = time.monotonic()
     failure = None
     os.makedirs(os.path.dirname(args.dest) or ".", exist_ok=True)
@@ -1105,8 +1106,13 @@ def cmd_fetch(args) -> int:
                     if not chunk:
                         break
                     got_bytes += len(chunk)
-                    if got_bytes > args.byte_cap:
-                        raise _ByteCapExceeded(f"byte cap {args.byte_cap} exceeded")
+                    total_bytes += len(chunk)
+                    # CUMULATIVE across attempts (Codex round 13): a transient failure
+                    # just under the cap must not let retries multiply per-object traffic
+                    if total_bytes > args.byte_cap:
+                        raise _ByteCapExceeded(
+                            f"byte cap {args.byte_cap} exceeded (cumulative "
+                            f"{total_bytes} bytes over {attempts} attempt(s))")
                     out.write(chunk)
             os.replace(tmp, args.dest)
             failure = None
@@ -1135,7 +1141,8 @@ def cmd_fetch(args) -> int:
               "url": url, "dest": args.dest, "approved_by": args.approved_by.strip(),
               "expansion_approved_by": (args.expansion_approved_by.strip()
                                         if args.expansion_approved_by else None),
-              "attempts": attempts, "bytes": got_bytes, "secs": secs, "sha256": sha,
+              "attempts": attempts, "bytes": got_bytes, "total_bytes": total_bytes,
+              "secs": secs, "sha256": sha,
               "byte_cap": args.byte_cap, "timeout_s": args.timeout,
               "failure": failure, "pass": bool(ok)}
     _write_report(args.out, f"fetch_{args.object.replace('/', '_')}.json", report)
