@@ -318,9 +318,11 @@ def test_end_of_partition_refusal():
     assert len(run(flat_warmup(), [(T0, 100.0)], coverage_end=T0 + 60 * G)) == 3
 
 
-def test_refusal_happens_before_opening_path_data_past_the_anchor():
+def test_refusal_happens_before_opening_the_path_stream_at_all():
     # mirrors the §J partition fixture: the unsafe row must be refused WITHOUT
-    # consuming the forward path (the next partition is never opened here)
+    # consuming a single path element (deep-review P2: T9 may hand over a lazy
+    # chained iterator whose next unread element opens the adjacent partition's
+    # source — the refusal must fire before the stream is touched)
     consumed = []
 
     def tracked():
@@ -332,8 +334,7 @@ def test_refusal_happens_before_opening_path_data_past_the_anchor():
                                 coverage_end_ns=T0 + 2 * G)  # 60s cannot fit
     with pytest.raises(ValueError, match="future support"):
         next(gen)
-    assert all(ts <= T0 for ts, _ in consumed[:1])  # at most the one lookahead
-    assert len(consumed) <= 1
+    assert consumed == []                      # the stream was never opened
 
 
 # ------------------------------------------------- fail-closed contract rails

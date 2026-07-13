@@ -209,11 +209,17 @@ def triple_barrier_labels(path: Iterable, anchors: Iterable, *,
     return _label_iter(iter(path), iter(anchors), ladder, params, coverage_end)
 
 
+_STREAM_UNOPENED = object()   # lookahead sentinel: the path was never touched
+
+
 def _label_iter(path_iter, anchor_iter, ladder, params, coverage_end):
     max_tag, max_h = ladder[-1]
     halflife = params.halflife_ns
     pts: deque[tuple[int, float]] = deque()   # coalesced points kept for scanning
-    nxt = next(path_iter, None)               # lookahead raw path point
+    # The lookahead is NOT primed here: the first anchor's boundary-refusal
+    # check must run before the stream is touched at all (deep-review P2 — a
+    # lazy chained partition iterator must not be opened for a refused window).
+    nxt = _STREAM_UNOPENED                    # lookahead raw path point
     prev_raw_ts: int | None = None
     # trailing EWMA state over consecutive coalesced-point returns (bps)
     ewma_s = 0.0
@@ -272,6 +278,8 @@ def _label_iter(path_iter, anchor_iter, ladder, params, coverage_end):
         # Pre-anchor points fold into the EWMA immediately and are DISCARDED
         # (Codex P2: a long warm-up/filtered prefix must never be enqueued
         # wholesale); only in-window points are buffered for the barrier scans.
+        if nxt is _STREAM_UNOPENED:           # first supported anchor opens it
+            nxt = next(path_iter, None)
         bound = t_event + max_h
         while nxt is not None:
             ts, mid = _validated_point(nxt, prev_raw_ts)
