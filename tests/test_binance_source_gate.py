@@ -968,6 +968,51 @@ class TestDecideCli:
                        "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT
 
+    def test_refused_replay_report_routes_instead_of_rejecting(self, tmp_path):
+        """A legitimate fail-closed chd-replay refusal (window identity present, no
+        frame) must route the decision (Codex round 3), not hard-reject."""
+        p = tmp_path / "chd_refused.json"
+        p.write_text(json.dumps({
+            "step": "chd-replay", "chd_verdict": "inconclusive", "pass": False,
+            "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
+            "hours": [12], "refusal": "missing_initial_snapshot"}))
+        cli = _cli()
+        argv = ["decide", "--lake-verdict", self._lake(tmp_path, "certified"),
+                "--chd-replay", str(p), "--out", str(tmp_path)]
+        assert cli.main(argv) == 0
+        rep = json.loads((tmp_path / "final_source_decision.json").read_text())
+        assert rep["decision"] == "lake_go"
+        assert "internal certification only" in rep["detail"]
+
+    def test_comparison_without_bindable_hash_hard_rejects(self, tmp_path):
+        """A legacy/hand-built comparison lacking chd_frame_replay_hash, or one supplied
+        without any completing replay evidence, must never certify 'independently
+        validated' (Codex round 3)."""
+        cli = _cli()
+        chd = self._chd(tmp_path, ["certified"])
+        no_hash = tmp_path / "comparison.json"
+        no_hash.write_text(json.dumps({
+            "step": "compare", "pass": True,
+            "window": ["2026-04-01T12:00:00", "2026-04-01T13:00:00"]}))
+        argv = ["decide", "--lake-verdict", self._lake(tmp_path, "certified"),
+                "--chd-replay", chd[0], "--comparison", str(no_hash),
+                "--out", str(tmp_path)]
+        assert cli.main(argv) == cli.SETUP_ERROR_EXIT
+        # comparison supplied but the only replay evidence is a frameless refusal
+        refused = tmp_path / "chd_refused.json"
+        refused.write_text(json.dumps({
+            "step": "chd-replay", "chd_verdict": "inconclusive", "pass": False,
+            "date": "2026-04-01", "symbol": "BTCUSDT", "exchange": "binance_futures",
+            "hours": [12], "refusal": "sequence_gap"}))
+        argv = ["decide", "--lake-verdict", self._lake(tmp_path, "certified"),
+                "--chd-replay", str(refused),
+                "--comparison", self._comp(tmp_path, True), "--out", str(tmp_path)]
+        assert cli.main(argv) == cli.SETUP_ERROR_EXIT
+        # and a comparison with NO replay evidence at all
+        argv = ["decide", "--lake-verdict", self._lake(tmp_path, "certified"),
+                "--comparison", self._comp(tmp_path, True), "--out", str(tmp_path)]
+        assert cli.main(argv) == cli.SETUP_ERROR_EXIT
+
 
 # ----------------------------------------------------------------------------- network isolation
 class TestNetworkIsolation:
@@ -1079,7 +1124,36 @@ class TestCliWithFixtures:
                          .read_text())
         assert rep["chd_verdict"] == "inconclusive"
         assert rep["refusal"] == "missing_initial_snapshot"
+        # the refusal report carries the full window identity so `decide` can consume it
+        assert rep["symbol"] == "BTCUSDT" and rep["exchange"] == "binance_futures"
         assert not (tmp_path / "chd_frame.parquet").exists()
+
+    def test_stale_decompression_cache_is_rebuilt(self, tmp_path):
+        """Replacing the .zst object must rebuild the derived parquet cache — never
+        validate stale bytes under the new object's provenance (Codex round 3)."""
+        cli = _cli()
+        v1 = self._write_hour(tmp_path, valid_hour(), zstd_outer=True)
+        rc = cli.main(["chd-validate", "--file", v1, "--exchange", "binance_futures",
+                       "--date", "2026-04-01", "--hour", "12", "--out", str(tmp_path)])
+        assert rc == 0
+        rep1 = json.loads((tmp_path / "chd_validate_binance_futures_2026-04-01_12.json")
+                          .read_text())
+        # replace the object in place with different content (one more update event)
+        df2 = pd.concat([valid_hour(),
+                         chd_frame(update_rows(1007, 1008, 1006, HOUR0 + 4 * SEC,
+                                               [("bid", 99.4, 1.0)]))],
+                        ignore_index=True)
+        (tmp_path / "BTCUSDT_orderbook.parquet.zst").unlink()
+        v2 = self._write_hour(tmp_path, df2, zstd_outer=True)
+        assert v2 == v1
+        rc = cli.main(["chd-validate", "--file", v2, "--exchange", "binance_futures",
+                       "--date", "2026-04-01", "--hour", "12", "--out", str(tmp_path)])
+        assert rc == 0
+        rep2 = json.loads((tmp_path / "chd_validate_binance_futures_2026-04-01_12.json")
+                          .read_text())
+        assert rep2["identity"]["rows"] == rep1["identity"]["rows"] + 1
+        assert rep2["identity"]["provenance"]["parquet_sha256"] != \
+            rep1["identity"]["provenance"]["parquet_sha256"]
 
     def test_compare_cli_on_identical_frames(self, tmp_path):
         import pyarrow as pa

@@ -662,11 +662,20 @@ def cmd_decide(args) -> int:
             if bound is not None and not str(bound).startswith(fixture_day):
                 raise ValueError(f"{args.comparison} window bound {bound!r} is outside "
                                  f"the fixture day {fixture_day}")
-        # content binding: the compared CHD frame must be one the replay evidence
-        # produced (identical windows are preregistered, so the as-used frame hash must
-        # match a replay report's frame hash)
+        # content binding is MANDATORY: a comparison is only evidence when the replay
+        # evidence that produced its CHD frame is supplied alongside it and the as-used
+        # frame hash matches — a legacy/hand-built comparison with no bindable hash, or
+        # one supplied without any completing replay report, is rejected outright
         comp_chd_hash = comp.get("chd_frame_replay_hash")
-        if chd_reports and comp_chd_hash and comp_chd_hash not in chd_frame_hashes:
+        if not comp_chd_hash:
+            raise ValueError(f"{args.comparison} carries no chd_frame_replay_hash — "
+                             "regenerate it with the current compare command")
+        if not chd_frame_hashes:
+            raise ValueError(
+                "a comparison was supplied but no supplied chd-replay report produced a "
+                "frame (none completed) — the comparison cannot be bound to approved "
+                "replay evidence")
+        if comp_chd_hash not in chd_frame_hashes:
             raise ValueError(
                 f"{args.comparison} compared a CHD frame (hash {comp_chd_hash[:16]}...) "
                 "that none of the supplied chd-replay reports produced — align the "
@@ -718,7 +727,12 @@ def cmd_decide(args) -> int:
 # ----------------------------------------------------------------------------- chd-validate
 def _decompress_if_zstd(path: str) -> tuple[str, dict]:
     """Return a plain-parquet path for `path` (streamed zstd decompress to a sibling
-    `.parquet` if needed) plus provenance hashes. Bounded memory (1 MiB chunks)."""
+    `.parquet` if needed) plus provenance hashes. Bounded memory (1 MiB chunks).
+
+    The decompressed sibling is a DERIVED cache bound to the source object by a
+    `.src_sha256` sidecar: if the `.zst` at this path is ever replaced (re-download,
+    manual swap), the stale cache is rebuilt rather than validated under the new
+    object's provenance (Codex round 3)."""
     from ingest.download_lake_binance import _sha256_file
     with open(path, "rb") as f:
         magic = f.read(4)
@@ -733,7 +747,12 @@ def _decompress_if_zstd(path: str) -> tuple[str, dict]:
                                      f"{path}: magic {magic!r} is neither zstd nor parquet")
     import pyarrow as pa
     dest = path[:-len(".zst")] if path.endswith(".zst") else path + ".parquet"
-    if not os.path.exists(dest):
+    sidecar = dest + ".src_sha256"
+    cached_src = None
+    if os.path.exists(sidecar):
+        with open(sidecar) as f:
+            cached_src = f.read().strip()
+    if not os.path.exists(dest) or cached_src != prov["object_sha256"]:
         tmp = dest + ".tmp"
         with pa.input_stream(path, compression="zstd") as src, open(tmp, "wb") as out:
             while True:
@@ -742,6 +761,8 @@ def _decompress_if_zstd(path: str) -> tuple[str, dict]:
                     break
                 out.write(chunk)
         os.replace(tmp, dest)
+        with open(sidecar, "w") as f:
+            f.write(prov["object_sha256"] + "\n")
     prov.update(compression="zstd", parquet_path=dest, parquet_sha256=_sha256_file(dest))
     return dest, prov
 
@@ -800,9 +821,11 @@ def cmd_chd_replay(args) -> int:
         frame, meta = bsg.replay_chd_window(loaded, market=market,
                                             price_scale=int(args.scale), grid=grid, k=args.k)
     except bsg.SourceGateError as e:
+        # carries the full window identity so `decide` can accept this legitimate
+        # fail-closed inconclusive as evidence (rather than rejecting an unbound report)
         report = {"step": "chd-replay", "prereg_commit": _prereg_commit(),
-                  "exchange": args.exchange, "date": args.date, "hours": hours,
-                  "pass": False, "chd_verdict": "inconclusive",
+                  "exchange": args.exchange, "symbol": args.symbol, "date": args.date,
+                  "hours": hours, "pass": False, "chd_verdict": "inconclusive",
                   "refusal": e.code, "detail": str(e)[:500]}
         _write_report(args.out, f"{name}.json", report)
         print(f"chd-replay: REFUSED ({e.code}) -> inconclusive")
