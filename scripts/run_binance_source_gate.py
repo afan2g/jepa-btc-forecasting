@@ -1003,9 +1003,33 @@ def cmd_fetch(args) -> int:
     prereg = bsg.load_preregistration(args.prereg)
     probe = prereg["fixture"]["cryptohftdata"]["probe"]
     allowed = {probe["object"]}
-    # request_bounds.expansion is a SEPARATE approval: the probe approval alone never
-    # unlocks the 48 expansion objects (Codex round 7)
+    # request_bounds.expansion is a SEPARATE approval AND requires passing probe evidence
+    # ("every probe check passed AND the approval explicitly permits expansion"): the
+    # expansion objects enter the allowlist only when both are supplied (Codex rounds 7/8)
     if args.expansion_approved_by and args.expansion_approved_by.strip():
+        if not args.probe_validate_report or not args.probe_replay_report:
+            print("REFUSING fetch: expansion requires --probe-validate-report and "
+                  "--probe-replay-report proving every probe check passed "
+                  "(request_bounds.expansion).", file=sys.stderr)
+            return SETUP_ERROR_EXIT
+        val = _read_json(args.probe_validate_report)
+        ident = val.get("identity") or {}
+        if val.get("step") != "chd-validate" or not val.get("pass") or \
+                ident.get("exchange") != probe["exchange"] or \
+                ident.get("symbol") != probe["symbol"] or \
+                ident.get("date") != probe["date"] or \
+                ident.get("hour") != probe["hour_utc"]:
+            print("REFUSING fetch: --probe-validate-report is not a PASSING chd-validate "
+                  "report for the preregistered probe object.", file=sys.stderr)
+            return SETUP_ERROR_EXIT
+        rep = _read_json(args.probe_replay_report)
+        if rep.get("step") != "chd-replay" or rep.get("chd_verdict") != "certified" or \
+                not rep.get("pass") or rep.get("exchange") != probe["exchange"] or \
+                rep.get("symbol") != probe["symbol"] or rep.get("date") != probe["date"] \
+                or probe["hour_utc"] not in (rep.get("hours") or []):
+            print("REFUSING fetch: --probe-replay-report is not a CERTIFIED chd-replay "
+                  "report covering the preregistered probe hour.", file=sys.stderr)
+            return SETUP_ERROR_EXIT
         for exchange in ("binance_futures", "binance_spot"):
             for hour in range(24):
                 allowed.add(f"{exchange}/{probe['date']}/{hour:02d}/"
@@ -1183,6 +1207,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--expansion-approved-by", default=None,
                    help="explicit EXPANSION approval provenance; without it only the "
                         "preregistered probe object may be fetched")
+    p.add_argument("--probe-validate-report", default=None,
+                   help="PASSING chd-validate report for the probe object (required with "
+                        "--expansion-approved-by)")
+    p.add_argument("--probe-replay-report", default=None,
+                   help="CERTIFIED chd-replay report covering the probe hour (required "
+                        "with --expansion-approved-by)")
     p.add_argument("--byte-cap", type=int, default=FETCH_BYTE_CAP)
     p.add_argument("--max-attempts", type=int, default=FETCH_MAX_ATTEMPTS)
     p.add_argument("--timeout", type=int, default=FETCH_TIMEOUT_S)

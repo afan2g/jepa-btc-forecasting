@@ -1142,21 +1142,56 @@ class TestNetworkIsolation:
         assert rc == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"do-not-overwrite"
 
-    def test_fetch_expansion_needs_separate_approval(self, tmp_path):
-        """The probe approval alone never unlocks an expansion object; with an explicit
-        --expansion-approved-by the object clears the allowlist (and is then stopped by
-        the dest-exists guard here, before any network) (Codex round 7)."""
+    def _probe_evidence(self, tmp_path, *, validate_pass=True, replay_verdict="certified"):
+        val = tmp_path / "probe_validate.json"
+        val.write_text(json.dumps({
+            "step": "chd-validate", "pass": validate_pass,
+            "identity": {"exchange": "binance_futures", "symbol": "BTCUSDT",
+                         "date": "2026-04-01", "hour": 12}}))
+        rep = tmp_path / "probe_replay.json"
+        rep.write_text(json.dumps({
+            "step": "chd-replay", "chd_verdict": replay_verdict,
+            "pass": replay_verdict == "certified", "exchange": "binance_futures",
+            "symbol": "BTCUSDT", "date": "2026-04-01", "hours": [12]}))
+        return str(val), str(rep)
+
+    def test_fetch_expansion_needs_separate_approval_and_probe_evidence(self, tmp_path):
+        """Expansion objects require BOTH an explicit expansion approval AND passing
+        probe evidence (Codex rounds 7-8); with both, the object clears the allowlist
+        (stopped here by the dest-exists guard, before any network)."""
         cli = _cli()
         expansion_obj = "binance_spot/2026-04-01/03/BTCUSDT_orderbook.parquet.zst"
-        rc = cli.main(["fetch", "--object", expansion_obj,
-                       "--dest", str(tmp_path / "e.zst"), "--approved-by", "user",
-                       "--out", str(tmp_path)])
-        assert rc == cli.SETUP_ERROR_EXIT
-        assert not (tmp_path / "e.zst").exists()
+        val, rep = self._probe_evidence(tmp_path)
         dest = tmp_path / "e.zst"
-        dest.write_bytes(b"sentinel")                    # stops AFTER the allowlist
+        # probe approval alone: refused
+        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
+                       "--approved-by", "user", "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        # expansion approval without probe evidence: refused
         rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
                        "--approved-by", "user", "--expansion-approved-by", "user-exp",
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        # failing probe evidence: refused
+        bad_val, _ = self._probe_evidence(tmp_path, validate_pass=False)
+        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
+                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
+                       "--probe-validate-report", bad_val, "--probe-replay-report", rep,
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        val, rep = self._probe_evidence(tmp_path)
+        _, bad_rep = self._probe_evidence(tmp_path, replay_verdict="degraded")
+        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
+                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
+                       "--probe-validate-report", val, "--probe-replay-report", bad_rep,
+                       "--out", str(tmp_path)])
+        assert rc == cli.SETUP_ERROR_EXIT and not dest.exists()
+        # full evidence: clears the allowlist, stopped by the dest guard (no network)
+        val, rep = self._probe_evidence(tmp_path)        # regenerate passing evidence
+        dest.write_bytes(b"sentinel")
+        rc = cli.main(["fetch", "--object", expansion_obj, "--dest", str(dest),
+                       "--approved-by", "user", "--expansion-approved-by", "user-exp",
+                       "--probe-validate-report", val, "--probe-replay-report", rep,
                        "--out", str(tmp_path)])
         assert rc == cli.SETUP_ERROR_EXIT
         assert dest.read_bytes() == b"sentinel"
