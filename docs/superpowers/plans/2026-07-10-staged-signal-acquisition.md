@@ -1,11 +1,13 @@
 # Staged Signal Acquisition and Gate Protocol
 
-**Status:** adopted 2026-07-10 and **amended 2026-07-11 by #66**. The
-Binance-first amendment supersedes the former Coinbase-first execution order.
-Completed Coinbase quality, reconstruction, manifest, and executor work remains
-valid evidence and fallback infrastructure.
+**Status:** adopted 2026-07-10, **amended 2026-07-11 by #66**, and specified
+for G0-BN protocol/freeze semantics by #83 on 2026-07-13. The Binance-first
+amendment supersedes the former Coinbase-first execution order. Completed
+Coinbase quality, reconstruction, manifest, and executor work remains valid
+evidence and fallback infrastructure.
 
-**Tracks:** #46 (original policy), #66 (current amendment).
+**Tracks:** #46 (original policy), #66 (Binance-first amendment), #83
+(executable G0-BN contract).
 
 **References:**
 
@@ -14,6 +16,8 @@ valid evidence and fallback infrastructure.
 - `docs/data.md`
 - `docs/feature-manifest.md`
 - `docs/superpowers/plans/2026-07-03-bar-label-producer.md`
+- `docs/superpowers/specs/2026-07-13-g0bn-protocol.md` (binding G0-BN
+  protocol, freeze, one-shot access, metrics, and verdict)
 - `docs/superpowers/plans/2026-07-02-binance-downloader-plan.md`
 - `docs/superpowers/plans/2026-06-22-lightgbm-baseline.md`
 
@@ -24,8 +28,10 @@ Stage evidence and data spend in this order:
 1. **Certify one Binance source (#64).** Use bounded existing/sample evidence to
    select Crypto Lake, CryptoHFTData, or a documented fallback for Binance
    BTC-USDT perpetual.
-2. **Implement single-venue modeling support (#67).** Add a source-neutral
-   `binance_single_venue` producer/evaluator mode.
+2. **Implement single-venue modeling support (#67).** Add the source-isolated
+   `binance_single_venue` producer plus the distinct `g0bn-*` config, ledger,
+   freeze, holdout-plan, transaction, runner, and report contracts. Do not
+   parameterize or relabel the existing G0-CB/G0-XV evaluator.
 3. **Acquire only the bounded core dataset (#68).** Pull Binance BTC-USDT
    perpetual L2 snapshots/deltas and trades for 92 days; no spot, auxiliary
    derivatives, Coinbase, other assets, or broad archive.
@@ -43,12 +49,24 @@ domain shift, and trial multiplicity. They must earn inclusion.
 
 ## 2. G0-BN Gate Semantics
 
+The complete executable contract is
+[`2026-07-13-g0bn-protocol.md`](../specs/2026-07-13-g0bn-protocol.md).
+Its definitions are binding for #67 and #69. In particular, `g0bn-trial-v1`,
+`g0bn-ledger-v1`, `g0bn-partition-plan-v1`, `g0bn-freeze-v1`,
+`g0bn-holdout-plan-v1`, `g0bn-holdout-universe-v1`, `g0bn-one-shot-v1`,
+`g0bn-raw-access-claim-v1`, `g0bn-matrix-access-claim-v1`,
+`g0bn-consumption-v1`, `g0bn-materialization-attestation-v1`, and
+`g0bn-verdict-v1` are distinct from all `g0xv-*` identities; the legacy
+Coinbase-targeted evaluator remains a regression contract.
+
 ### 2.1 Hypothesis
 
-Binance BTC-USDT perpetual L2 book and trade flow predict that instrument's own
-2 s / 10 s future mid returns with stable OOS lift over persistence and positive
-net performance after realistic Binance execution costs. The 60 s horizon is a
-fixed decay/control arm.
+Binance `BINANCE_FUTURES/BTC-USDT-PERP` (`BTCUSDT` linear perpetual) L2 book
+and trade flow predict that instrument's own 2 s and 10 s future mid returns
+with stable OOS lift over persistence, and at least one of those primary
+horizons has positive net performance after realistic Binance execution costs.
+Both primary horizons must establish predictivity. The 60 s horizon is a fixed
+control-only arm and cannot select or rescue the verdict.
 
 Sub-second source events may be reconstructed causally, but a 100 ms forecast
 horizon is outside this project's non-HFT scope.
@@ -62,8 +80,13 @@ The first gate uses only:
 - stationarized own-venue OFI, imbalance, microprice displacement,
   spread/tick, trade-flow composition, event intensity, and short realized
   volatility; and
-- persistence/no-change, microprice displacement, penalized linear OFI, and
-  LightGBM models.
+- the fixed five-candidate ladder, using these IDs at every horizon:
+  `persistence_zero` (no change), `microprice_raw` (raw uncalibrated
+  microprice displacement), `ofi_ridge` (uniqueness-weighted OFI-only Ridge),
+  `lgbm_reg` (full-feature LightGBM regression), and `lgbm_clf` (full-feature
+  LightGBM classification). Ordered features, complete runtime-resolved
+  parameters, seeds/threads, preprocessing, code, and software-version hashes
+  are part of each trial identity.
 
 Funding, open interest, liquidations, Binance spot, Coinbase, and other assets
 are excluded from the first gate even when files are readily available.
@@ -72,28 +95,72 @@ are excluded from the first gate even when files are readily available.
 
 - Reconstruct and feature on received-time-observable, deterministic event
   streams. No future snapshot or source event may affect a decision.
-- Purge complete label spans and embargo at least the maximum label horizon and
-  feature lookback.
-- Freeze features, horizons, costs, latency, model configurations, thresholds,
-  exclusions, splits, and the complete candidate ledger before OOS loading.
-- Charge a versioned Binance fee schedule, observed spread, explicit latency,
-  slippage, turnover, and the no-trade band. Report gross and net side by side.
-- Report persistence lift, DSR, PBO, bootstrap uncertainty, turnover, and
-  spread/volatility regime slices. Accuracy alone cannot pass.
-- Every candidate/configuration/horizon/threshold/post-hoc variant enters one
-  immutable effective trial count and PBO study.
+- Before parquet access where the API controls loading, require exactly one
+  `BINANCE_FUTURES/BTC-USDT-PERP` venue and only #64-certified, #68-sealed
+  allowlisted L2 snapshot/delta and trade sources. Reject Coinbase, CoinAPI,
+  spot, other assets/perpetuals, funding/OI/liquidations/basis, or any extra
+  state/source feature.
+- Purge complete label spans with `t0=t_event` and `t1=t_barrier`. Because the
+  merged test interval already ends at its maximum `t_barrier`, set CPCV
+  `embargo_ns = max_lookback_ns`; adding the horizon would double-count label
+  span. Partition/source guards remain separate.
+- Canonically freeze the certified source, producer/clock/label definitions,
+  ordered features, horizon roles, real fee tier, cost/slippage/latency block,
+  exclusions, partitions/CV, model definitions, thresholds, outcome-blind OOS
+  plan, software, and the complete G0-BN ledger before any January outcome read.
+  The freeze pins the adaptive threshold rule and exact development-end state,
+  never a realized January schedule or January build/manifest/row/count/result.
+- Charge T7's exact versioned Binance cost assumption: two sides of one frozen
+  scalar taker fee, two observable half-spread crossings, aggregate base
+  slippage, and absolute `target_read_ts`-to-`t_event` mid drift under
+  `abs_true_over_observable_mid_v1`, plus the frozen no-trade margin. Report
+  gross and net side by side plus
+  `decision_trade_rate=n_trades/n_valid_rows`.
+- Report paired persistence-lift uncertainty, gross/net uncertainty, MCC
+  intervals with undefined/degenerate reasons, development DSR/PBO provenance,
+  tight/wide spread slices, and development-frozen volatility slices. Accuracy
+  alone cannot pass.
+- Every candidate/configuration/horizon/threshold/post-hoc variant enters the
+  separate immutable G0-BN effective trial count and PBO study. The base ledger
+  has exactly five candidates at each of three horizons (15 identities).
+  Unique aborted or changed variants append entries and increase the count;
+  exact deterministic retries are idempotent, and a conflicting result for the
+  same identity fails closed.
 
 ### 2.4 Outcomes
 
-- **PASS / tradeable:** stable OOS persistence lift and positive preregistered
-  net evidence authorize the next incremental-data gate.
-- **PREDICTIVE_NOT_TRADEABLE:** stable predictive lift but no taker-cost edge.
-  Do not expand automatically; record a human decision for a separately scoped
-  fair-value or maker-execution experiment.
-- **FAIL:** no stable predictive lift. Stop Coinbase, cross-venue, multi-asset,
-  broad-archive, supervised-deep, and JEPA work unless a new pivot is reviewed.
-- **INCONCLUSIVE:** data, leakage, cost, PBO, or reproducibility failure. Repair
-  fail-closed without selecting a replacement OOS from observed outcomes.
+Persistence lift is exactly
+`sum(u*(y^2-(y-f)^2))/sum(u*y^2)`, equivalently
+`1-weighted_SSE_model/weighted_SSE_zero`; a zero/non-finite denominator is
+INCONCLUSIVE. Uncertainty uses a deterministic 10,000-replicate paired UTC-day
+**circular two-day moving-block** bootstrap with NumPy PCG64 seed 0 and linear
+percentiles, never row-IID resampling. Every evaluated horizon requires at least
+20 UTC days and `sum(uniqueness) >= 100`.
+
+Development uses one-sided Bonferroni `alpha=0.05/8` for the four selectable
+candidates times two primary horizons. It first chooses among predictive-
+eligible candidates with positive lift lower bounds and passing PBO/integrity;
+it prefers a trade-eligible candidate with positive net lower bound, then falls
+back deterministically to the best lift lower bound. All tie-breaks are frozen
+without January. No 60 s candidate is selected. OOS uses one-sided Bonferroni
+`alpha=0.05/2`: stable predictivity requires a positive lift lower bound at
+**both** 2 s and 10 s, while tradeability requires at least one primary horizon
+also to have a positive mean-daily-net lower bound and meet the frozen trade,
+DSR, and PBO gates.
+
+| Valid/sufficient transaction | Both primary horizons predictive | Any primary horizon tradeable | Outcome |
+| --- | --- | --- | --- |
+| No | any | any | **INCONCLUSIVE** |
+| Yes | No | any | **FAIL** |
+| Yes | Yes | No | **PREDICTIVE_NOT_TRADEABLE** |
+| Yes | Yes | Yes | **PASS / tradeable** |
+
+PREDICTIVE_NOT_TRADEABLE permits only a separately reviewed fair-value/maker
+experiment. FAIL stops Coinbase, cross-venue, multi-asset, broad-archive,
+supervised-deep, and JEPA work unless a new pivot is reviewed. Any failure after
+either irreversible access burn is terminal INCONCLUSIVE; it does not permit a
+second materialization, validation-only read, score, or outcome-selected
+replacement holdout.
 
 G0-BN is a bounded acquisition/signal screen, not the later full-data formal G1.
 Formal G1 may confirm and expand only a premise that G0-BN has already passed.
@@ -104,7 +171,7 @@ Formal G1 may confirm and expand only a premise that G0-BN has already passed.
 |---|---|---|
 | Bounded acquisition | `2025-11-01` through `2026-01-31` | 92 days; Binance perpetual L2+trades only. |
 | Development/CPCV | `2025-11-01` through `2025-12-31` | 61 days; tuning, CPCV, calibration, and complete trial capture. |
-| Fixed OOS | `2026-01-01` through `2026-01-31` | 31 days; physically/logically sealed until complete freeze. |
+| Fixed OOS | `2026-01-01` through `2026-01-31` | 31 days; a separate custodian may seal exact raw/normalized inputs, but the operator gets no outcome access before plan + freeze + the ordered access burns. |
 
 These are support-span partitions, not filters on `t_event`. Before any adjacent
 source or label path is opened, a development candidate is dropped unless its
@@ -112,9 +179,40 @@ complete guarded feature, cost, and label support ends before
 `2026-01-01T00:00:00Z`. January applies the symmetric future-boundary rule at
 `2026-02-01T00:00:00Z`, so labels cannot silently consume February.
 
-The producer records bounds, horizon map, guard, prefilter rule, source hashes,
-and per-horizon drop counts in a hash-pinned partition artifact. The artifact
-enters every dataset/build ID and is validated before CPCV, fit, or score.
+The G0-BN partition plan freezes bounds, horizon map, guard, prefilter rule,
+source hashes, development drop counts, the holdout drop-count schema, and
+sufficiency thresholds. It does **not** contain realized January counts: those
+would require forbidden pre-freeze materialization. January counts and content
+hashes are created and attested only after the raw-access burn.
+
+The coherent sequence is:
+
+1. #68, under a custodian identity and permissions distinct from the
+   developer/experiment operator, seals the exact raw and certified normalized
+   L2/trade objects plus outcome-blind inventory metadata. Operator-owned files
+   plus `chmod` do not satisfy custody.
+2. November-December alone determines calibration and development-end adaptive
+   state. The final v1 config is then sealed before the first candidate identity
+   is registered; all trial executions and the two primary selections follow
+   under that immutable config. A stable
+   `holdout_universe_id` depends only on `g0bn-v1`, the exact instrument, and
+   fixed January/February bounds—not pilot/config/freeze/source/plan/results.
+3. An outcome-blind `holdout_plan_sha256` is built before January
+   materialization and enters the future build recipe; `g0bn-freeze-v1` pins
+   that plan but contains no January build ID, manifest/matrix/logical-row hash,
+   row/drop count, realized schedule/state, or result.
+4. #69 completes all data-free preflight/refit, then atomically creates/fsyncs
+   the raw-access burn before the first January raw/normalized
+   object/payload/footer read. Its sole blind materializer writes once and
+   attests the actual manifest/matrix/build/count/schedule hashes without
+   reopening the derived artifacts.
+5. Only after that materialization completes does #69 atomically create/fsync
+   the separate matrix-access burn, before the sole scorer first opens the
+   derived matrix/parquet/footer to validate and score.
+
+Both burns belong to the same stable transaction/universe. Any crash or
+materialization, transition, validation, fit, score, or write failure after
+either burn is terminal INCONCLUSIVE; no intermediate state is resumable.
 
 The existing `2026-04-01` Binance smoke is integrity evidence only and is not a
 G0-BN modeling partition. April remains frozen for the deferred cross-venue
@@ -155,17 +253,28 @@ The producer emits explicit builds:
 
 - `binance_single_venue_g0bn_dev`: November-December Binance-perpetual features,
   Binance labels/costs, and no January or optional-source access.
-- `binance_single_venue_g0bn_oos`: sealed January build opened only by the
-  frozen G0-BN selection artifact.
+- `binance_single_venue_g0bn_oos`: does not exist before the freeze and
+  raw-access burn. #69
+  materializes it once from the holdout plan's exact sealed raw/normalized
+  allowlist after the raw-access burn, then attests its actual manifest,
+  logical-row, matrix, build, count, and realized-state hashes. The scorer opens
+  it only after the separate matrix-access burn.
 - conditional increment builds: matched-row base and augmented manifests whose
   feature lists differ but whose row IDs, reserved columns, labels, costs,
   horizons, and splits are identical.
 - full-data builds: produced only after the preceding acquisition gate passes.
 
-Manifest v1 remains sufficient. `binance_single_venue` uses one venue entry
-without a role because the same instrument supplies features and targets.
-`dataset_id`, `build_id`, `venues`, `sources`, and explicit `feature_cols` encode
-capability; training never infers columns from a frame.
+Manifest v1 remains sufficient. `binance_single_venue` uses exactly one venue
+entry because the same instrument supplies features and targets. `dataset_id`,
+`build_id`, `venues`, `sources`, and explicit ordered `feature_cols` encode
+capability; training never infers columns from a frame. G0-BN manifests also
+carry `partition_contract` and `g0bn_protocol` source bindings; the holdout adds
+`g0bn_holdout_plan` with the stable universe/transaction and plan/freeze hashes.
+
+Generic runners reject a holdout partition, holdout-plan binding, or
+`binance_single_venue_g0bn_oos` during manifest-only preflight before any
+parquet loader is called. There is no `--allow-holdout` flag. Only the dedicated
+scorer may call lower-level scoring primitives, after its matrix-access burn.
 
 Every manifest pins raw/processed source manifests and hashes, window,
 exclusions, clock schedule, feature order, horizons, cost/gate block, partition
@@ -180,8 +289,15 @@ artifact, candidate ledger where applicable, and build ID.
 - obtains explicit human approval before vendor I/O;
 - downloads atomically and resumably without opportunistic extra feeds;
 - preserves source identity and forbids silent cross-vendor fallback;
-- reconstructs day-by-day and publishes only certified outputs; and
-- seals January outcome-bearing products until G0-BN freeze.
+- reconstructs development days day-by-day and publishes only certified
+  outputs;
+- uses a separate custodian identity/permission boundary to own and seal the
+  exact January raw and certified normalized L2/trade inputs; records custodian
+  and operator identities plus ACL/IAM/bucket-policy evidence; and
+- publishes only outcome-blind object ID, checksum, size, schema,
+  timestamp-coverage, and continuity metadata. It does not create or expose a
+  January modeling matrix, label, cost, feature, forecast, or metric. Developer-
+  performed filesystem permission changes are insufficient custody.
 
 The completed nine-unit `2026-04-01` smoke measured ~0.687 decimal GB. Scaling
 that observation over 92 days gives ~63.2 GB, but a single day is **not** an
@@ -205,9 +321,18 @@ experiment; it is never bulk-transfer authorization by itself.
 - #64: bounded Binance source-quality decision; may continue under this amended
   premise without reopening completed Coinbase work.
 - #66: premise/docs/issues/roadmap amendment.
-- #67: `binance_single_venue` producer and evaluator support; subissue of #37.
-- #68: bounded 92-day Binance-perpetual acquisition and certification.
-- #69: decision-bearing G0-BN execution.
+- #67: reviewable config/identity, candidate-ledger, freeze/plan,
+  generic-runner guard, stable-universe/two-burn one-shot runner,
+  materialization attestation, metrics/report, and synthetic integration slices
+  defined in the binding spec. It depends at integration on producer T7 (cost),
+  T8 (manifest/bindings), and T9 (raw-claim-gated blind materializer), but
+  performs no real execution.
+- #68: bounded 92-day Binance-perpetual acquisition/certification and separate-
+  custodian sealing of the exact January raw/normalized inputs.
+- #69: final operator values, development evidence/config/freeze/plan, atomic
+  raw-access burn, one blind January materialization/attestation, atomic matrix-
+  access burn, one validation/score, and the terminal verdict. It is the only
+  real T10-equivalent operation.
 - #65/#34/#47: deferred Coinbase target-data and Coinbase-only work, blocked on
   G0-BN PASS.
 - #35/#36/#48: deferred six-month cross-venue acquisition/reconstruction/gate,
@@ -233,6 +358,9 @@ Do not start the next source or archive when any of these holds:
   measuring incremental features;
 - OOS outcomes influenced source, feature, threshold, cost, model, or exclusion
   selection;
+- a January outcome artifact existed before the authorized raw-access burn, the
+  stable G0-BN transaction already has either claim, custody was not separate,
+  or a burned attempt failed;
 - trial counts, DSR, or PBO do not reconcile;
 - vendor, quota, disk, byte, or spend approval is missing; or
 - a policy deviation has not been recorded on its owning issue.
