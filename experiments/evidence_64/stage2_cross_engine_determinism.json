@@ -6,6 +6,52 @@
   "equal": true,
   "n_units": 7,
   "diffs": [],
+  "units": [
+    [
+      "funding",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ],
+    [
+      "liquidations",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ],
+    [
+      "open_interest",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ],
+    [
+      "topk_l2",
+      "BINANCE",
+      "BTC-USDT",
+      "2026-04-01"
+    ],
+    [
+      "topk_l2",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ],
+    [
+      "trades",
+      "BINANCE",
+      "BTC-USDT",
+      "2026-04-01"
+    ],
+    [
+      "trades",
+      "BINANCE_FUTURES",
+      "BTC-USDT-PERP",
+      "2026-04-01"
+    ]
+  ],
+  "run1_semantic_fingerprint": "5a3b6bfad74fa695cef6563e8e1f0acc0c4a83b045b9a6fc744cfdf727e6b0f0",
+  "run2_semantic_fingerprint": "5a3b6bfad74fa695cef6563e8e1f0acc0c4a83b045b9a6fc744cfdf727e6b0f0",
   "excluded_keys": [
     "secs",
     "ts",
@@ -13,5 +59,5 @@
     "price_scale"
   ],
   "pass": true,
-  "report_hash": "0a9fbe236e3391f8b74136f0a4e78727f148691bab1375b40d69781e41786083"
+  "report_hash": "63e15febb3753d041f14937c3c348aff38d33682d68088fad9351723f9a0e145"
 }
