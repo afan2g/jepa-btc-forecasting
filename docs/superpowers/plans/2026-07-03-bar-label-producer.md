@@ -1142,7 +1142,7 @@ branch or holdout route. Suggested implementation branch names remain in
 
 | Task | Scope | Builds on (file:line) | Deliverable | Pre/Post backfill |
 | --- | --- | --- | --- | --- |
-| **T1** `feat/bars-clock` | **Built by #62.** Target-venue dollar-notional clock (accumulate in `origin_time` order, **`t_event` = monotone watermark `max(t_event(N−1), max(received_time) of the bar's trades, cap_fire)`, non-decreasing across bars** — P1/#13) + hybrid time cap + **trailing/as-of-only per-day threshold schedule + warm-up** (P2b) + `emitted_by_time_cap`; source-specific ordering normalizers. #67/T9 still owns explicit G0-BN source-mode routing and #69 owns real calibration. | `recon/events.py:Trade`; streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle only, §C.1) | `bars/clock.py`, `bars/events.py`, schedule/clock tests | **Done**; calibration #69 |
+| **T1** `feat/bars-clock` | **Built by #62.** Target-venue dollar-notional clock (accumulate in `origin_time` order, **`t_event` = monotone watermark `max(t_event(N−1), max(received_time) of the bar's trades, cap_fire)`, non-decreasing across bars** — P1/#13) + hybrid time cap + **trailing/as-of-only per-day threshold schedule + warm-up** (P2b) + `emitted_by_time_cap`; source-specific ordering normalizers. #67/T9 still owns explicit G0-BN source-mode routing and #69 owns real calibration. | `bars/events.py:ClockTrade`; streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle only, §C.1) | `bars/clock.py`, `bars/events.py`, schedule/clock tests | **Done**; calibration #69 |
 | **T2** `feat/bars-snapshot` | **Built by #74/#77.** Two target-venue reads (#1): observable book at `target_read_ts` (received-gated — features + `half_spread_bps`) and true label book at `t_event` (origin cut — `P0`); received prefilter, staleness cap, top-K mid/microprice. G0-BN target binding remains integration work. | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:60-69` | `bars/snapshot.py`, `tests/test_bars_snapshot.py` | **Done** |
 | **T3** `feat/bars-features` | **Built by #78/#81.** Per-bar §6/E1.2 vector, causal stationarization, and value-level no-lookahead/scale tests. | T2, `recon/orderbook.py:snapshot` | `bars/features.py`, `tests/test_bars_features.py` | **Done** |
 | **T4** `feat/bars-xvenue` | Deferred cross-venue increment: **`t_event` = monotone watermark `max(t_event(N−1), max(received_time) over the bar's trades, cap_fire)` (non-decreasing across bars — #13); every input gated by per-event `received_time ≤ t_event` (exact); p99/max tail only for the live watermark, never medians** (P1); basis; spot/perp and later Coinbase alignment; **sample-timing test (delayed-event guard)**. G0-BN does not depend on this task. | T3, data.md §5/§5b | `bars/align.py` + sample-timing test | Deferred until G0-BN PASS |
@@ -1199,9 +1199,10 @@ schema change.
    but G0-BN keeps distinct config/ledger/freeze/consumption/report identities
    and its own moving-block uncertainty/selection/verdict path; the producer
    emits the required input columns.
-10. **This PR is docs-only** — no `bars/` code yet (the contract is already pinned by
-    `eval/matrix.py:RESERVED` + `docs/feature-manifest.md`, so a stub adds no clarity). A
-    `bars/schema.py` contract module is **T8's** concern, not this PR's.
+10. **This PR is docs-only** — prior worker PRs already built the T1/T2/T3/T5/
+    T6/T7 primitives under `bars/` and `data/`; this PR changes their planning
+    contract but adds no code. A `bars/schema.py` contract module remains
+    **T8's** concern, not this PR's.
 
 ## Required operator values (unresolved until owning task)
 
