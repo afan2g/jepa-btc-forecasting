@@ -465,6 +465,29 @@ def test_holdout_write_requires_fresh_paths(tmp_path):
                       matrix_path=mpath, manifest_path=jpath)
 
 
+def test_holdout_write_preflights_both_paths_no_partial_matrix(tmp_path):
+    """Codex P1: if only the manifest path pre-exists, the blind write must refuse
+    BEFORE the derived January parquet is created — a stray published matrix from a
+    failed one-shot write compromises the transaction (spec §5.1/§6.3)."""
+    frame, man, params = built_g0bn(partition="holdout")
+    mpath, jpath = _paths(tmp_path)
+    jpath.write_text("{}\n")                       # manifest destination already taken
+    with pytest.raises(FileExistsError):
+        write_holdout(frame, man, build_params=params,
+                      matrix_path=mpath, manifest_path=jpath)
+    assert not mpath.exists()                      # no partial holdout parquet on disk
+
+
+def test_holdout_write_preflights_when_only_matrix_exists(tmp_path):
+    frame, man, params = built_g0bn(partition="holdout")
+    mpath, jpath = _paths(tmp_path)
+    mpath.write_bytes(b"stale")                     # matrix destination already taken
+    with pytest.raises(FileExistsError):
+        write_holdout(frame, man, build_params=params,
+                      matrix_path=mpath, manifest_path=jpath)
+    assert not jpath.exists()                       # manifest never written
+
+
 def test_holdout_write_defers_value_validation(tmp_path):
     """Blind materialization must not inspect outcome values: a frame that would fail
     validate_frame/validate_matrix still writes; the post-burn scorer owns that judgment."""

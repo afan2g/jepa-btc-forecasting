@@ -592,6 +592,19 @@ def _publish(frame: pd.DataFrame, manifest: dict, *, build_params: dict, matrix_
         raise ValueError(f"manifest build_id {manifest['build_id']!r} does not match "
                          f"the recomputed build identity {bid!r} (canonical logical "
                          "rows + build params; plan §I)")
+    if exclusive:
+        # Preflight BOTH destinations before writing either: the matrix parquet is
+        # written first, so without this an existing manifest_path would raise only
+        # AFTER a fresh derived January parquet was created and fsynced — a stray
+        # published holdout matrix from a failed one-shot write (spec §5.1/§6.3). The
+        # §6.2 process-owner lock guarantees no concurrent writer, so an up-front check
+        # plus each create's O_EXCL fully closes the partial-artifact window.
+        existing = [str(p) for p in (matrix_path, manifest_path) if os.path.exists(p)]
+        if existing:
+            raise FileExistsError(
+                f"refusing a blind holdout write to existing output path(s): {existing}; "
+                "the one-shot materializer requires fresh outputs and never overwrites "
+                "a derived January artifact")
     published = canonical_row_order(frame)[cols]
     table = pa.Table.from_pandas(published, preserve_index=False)
     file_sha, schema_sha = _write_parquet(table, matrix_path, parquet_options,
