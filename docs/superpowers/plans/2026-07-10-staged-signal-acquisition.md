@@ -104,6 +104,10 @@ are excluded from the first gate even when files are readily available.
   merged test interval already ends at its maximum `t_barrier`, set CPCV
   `embargo_ns = max_lookback_ns`; adding the horizon would double-count label
   span. Partition/source guards remain separate.
+- With `n_groups=6,k=2`, enumerate the 15 test-group pairs lexicographically,
+  require exactly five finite test forecasts per row, and collapse them by the
+  ordered float64 arithmetic mean. Score each original row once; that collapsed
+  series alone feeds development lift, net, bootstrap, DSR, PBO, and selection.
 - Canonically freeze the certified source, producer/clock/label definitions,
   ordered features, horizon roles, real fee tier, cost/slippage/latency block,
   exclusions, partitions/CV, model definitions, thresholds, outcome-blind OOS
@@ -296,10 +300,12 @@ artifact, candidate ledger where applicable, and build ID.
 - uses a separate custodian identity/permission boundary to own and seal the
   exact January raw and certified normalized L2/trade inputs; records custodian
   and operator identities plus ACL/IAM/bucket-policy evidence; and
-- publishes only outcome-blind object ID, checksum, size, schema,
-  timestamp-coverage, and continuity metadata. It does not create or expose a
-  January modeling matrix, label, cost, feature, forecast, or metric. Developer-
-  performed filesystem permission changes are insufficient custody.
+- publishes only outcome-blind object IDs, opaque checksums, schema/product IDs,
+  declared timestamp-coverage bounds, and continuity/gap metadata. Variable-
+  length byte sizes and record counts stay inside custody until after the raw-
+  access burn. It does not create or expose a January modeling matrix, label,
+  cost, feature, forecast, or metric. Developer-performed filesystem permission
+  changes are insufficient custody.
 
 The completed nine-unit `2026-04-01` smoke measured ~0.687 decimal GB. Scaling
 that observation over 92 days gives ~63.2 GB, but a single day is **not** an

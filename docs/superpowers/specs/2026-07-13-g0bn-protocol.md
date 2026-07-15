@@ -213,7 +213,7 @@ The schema has exactly these decision-bearing sections:
 | `costs` | Exact T7 `CostAssumption`: `venue=binance`, product/source/version identity, scalar one-way `taker_fee_bps`, scalar aggregate `base_slippage_bps`, and `drift_policy=abs_true_over_observable_mid_v1`; fee-tier applicability/evidence hash; two fee sides; two spread crossings; no-trade margin; observable decision-cost versus realized charged-cost rule |
 | `exclusions` | Outcome-blind rule version; exact included days; map of every excluded day to reason and evidence hash; staleness/gap/one-sided-book/lookback rules and drop policy |
 | `partition` | Exact nanosecond bounds; horizon map; `partition_guard_ns`; prefilter string; `schema=g0bn-partition-plan-v1` and its SHA-256; realized development counts; holdout count schema and sufficiency rules, but no realized holdout counts |
-| `cv` | Fixed §3.4 `n_groups`, `k`, split/grouping versions, `embargo_ns`, PBO blocks/minimum rows, DSR/PBO definitions and thresholds |
+| `cv` | Fixed §3.4 `n_groups`, `k`, split/grouping/forecast-collapse versions, expected per-row test multiplicity, `embargo_ns`, PBO blocks/minimum rows, DSR/PBO definitions and thresholds |
 | `horizons` | Ordered objects `{tag, ns, role}` exactly as §2.3 |
 | `candidates` | Ordered, complete definitions from §4, including full resolved model parameters and hashes |
 | `selection` | Deterministic development ranking/tie rule; eligible candidate IDs; attempt-accounting policy |
@@ -270,6 +270,24 @@ by `t_event` before `data.cv.cpcv_splits`; the producer's unique
 `(t_event,horizon)` invariant makes that order total. Grouping is contiguous and
 deterministic, span purge uses `t0=t_event`/`t1=t_barrier`, and
 `embargo_ns=max_lookback_ns` as specified in §9. There is no random CV seed.
+
+`cpcv_splits` enumerates the 15 test-group pairs in lexicographic
+`itertools.combinations(range(6), 2)` order. Each row must therefore receive
+exactly `C(5,1)=5` test predictions. For each trial/horizon, initialize an
+IEEE-754 float64 forecast accumulator and integer counter in the stable row
+order. Cast each split forecast to float64, require it to be finite, and add it
+at its original row position in that fixed split order. After all 15 splits,
+fail unless every counter is exactly 5, then define the sole CPCV-OOS forecast
+as `f_i = forecast_sum_i / 5.0`. This rule is versioned
+`mean_repeated_test_forecasts_v1`; there is no weighting, median, path-level row
+duplication, or choice of one split. The `cv` block repeats the version,
+combination order, dtype, and expected multiplicity, so `cv_sha256` makes the
+collapse identity-bearing.
+
+All development lift, gross/net, trade mask/count, bootstrap, aggregate trade
+Sharpe/DSR, and per-trial PBO columns use that one collapsed `f_i` and score
+each original row once. Per-split forecasts and fold diagnostics may be retained
+for audit, but they cannot feed selection or create extra statistical rows.
 
 For each horizon, development trade Sharpe is the unannualized
 uniqueness-weighted mean of traded CPCV-OOS net bps divided by its weighted
@@ -415,8 +433,9 @@ those with only an aborted event. It never imports G0-CB/G0-XV entries.
 
 ### 4.3 Development selection
 
-CPCV produces one OOS forecast per development row for every trial. Selection
-is defined only for the two primary horizons. For each of the four
+CPCV produces one OOS forecast per development row for every trial using the
+mandatory §3.4 five-prediction arithmetic-mean collapse. Selection is defined
+only for the two primary horizons. For each of the four
 non-persistence candidates at each primary horizon, the §8.3 paired circular
 two-day bootstrap uses the development CPCV-OOS rows and the one-sided
 Bonferroni level `alpha_dev = 0.05 / 8 = 0.00625`. The eight comparisons are
@@ -463,12 +482,14 @@ the effective ACL/IAM/bucket-policy evidence. A developer copying files or
 running `chmod` is not separation of custody and cannot satisfy #68.
 
 The authorized custodian may stream transport/source bytes and publish a
-signed/hash-pinned, outcome-blind inventory containing object IDs, byte sizes,
-checksums, schema/product IDs, min/max timestamps, and continuity/gap flags.
-Source record counts, if needed inside custody for verification, are not copied
-into the holdout plan or freeze. The custodian must not publish price, size,
-side, return, spread, label, feature, cost, or other outcome-bearing values.
-The public metadata may enumerate scope and outcome-blind exclusions only.
+signed/hash-pinned, outcome-blind inventory containing object IDs, opaque
+cryptographic checksums, schema/product IDs, declared timestamp-coverage bounds,
+and continuity/gap flags. Variable-length byte sizes and source record counts
+are January activity proxies: they stay inside custody until after the
+raw/source-access burn and do not enter the public inventory, config, holdout
+plan, or freeze. The custodian must not publish price, trade size, side, return,
+spread, label, feature, cost, or other outcome-bearing values. The public
+metadata may enumerate scope and outcome-blind exclusions only.
 
 Once #68 seals the inventory, the selection/evaluation plane may not open or
 decode a January raw or normalized source payload or parquet footer before the
@@ -1013,9 +1034,12 @@ At minimum, #67's subissues include cheap tests for:
    rejection, unique aborted/additional-variant counting with no replacement,
    and proof that
    legacy G0-CB/G0-XV ledgers/counts/results are unchanged;
-5. development trade-first then predictive-only selection, exact unrounded tie
-   breaks, Bonferroni lower bounds, 60 s inability to select/pass/rescue, and
-   DSR/PBO provenance from the pinned ledger;
+5. lexicographic 15-split enumeration, exactly five finite test forecasts per
+   row, ordered float64 arithmetic-mean collapse with missing/extra/non-finite
+   coverage rejection, proof that the collapsed row series feeds lift/net/DSR/
+   PBO, development trade-first then predictive-only selection, exact unrounded
+   tie breaks, Bonferroni lower bounds, 60 s inability to select/pass/rescue,
+   and DSR/PBO provenance from the pinned ledger;
 6. freeze construction from development plus seal metadata with a read spy
    proving zero January loader calls; `holdout_plan_sha256` build binding; and
    rejection of a January build/manifest/matrix/row hash, count, schedule/state,

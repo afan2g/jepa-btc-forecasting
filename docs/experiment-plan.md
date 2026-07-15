@@ -78,8 +78,10 @@ feature before parquet access wherever the API controls loading.
 3. **Bounded data (#68):** acquire only L2 snapshots/deltas and trades for
    `2025-11-01..2026-01-31`. A custodian identity/permission boundary distinct
    from the developer/experiment operator seals the exact January raw and
-   certified normalized objects and publishes only outcome-blind inventory
-   metadata. Operator-run `chmod` is not custody.
+   certified normalized objects and publishes only activity-obscuring,
+   outcome-blind inventory metadata. Variable-length byte sizes and record
+   counts stay inside custody until after the raw-access burn. Operator-run
+   `chmod` is not custody.
 4. **G0-BN (#69):** use `2025-11-01..2025-12-31` for all calibration,
    development/CPCV trials, deterministic selection, config, holdout plan, and
    freeze. `holdout_plan_sha256` is outcome-blind and enters the future build
@@ -119,6 +121,9 @@ choose by positive lift lower bound under frozen tie-breaks. OOS uses
 `sum(uniqueness)>=100`, with no row-IID fallback. Both primaries need a positive
 lift lower bound; PASS additionally requires at least one primary to have a
 positive mean-daily-net lower bound plus frozen trade, DSR, and PBO gates.
+With `n_groups=6,k=2`, each development row's five repeated CPCV test forecasts
+collapse by the binding ordered float64 arithmetic mean before any lift, net,
+bootstrap, DSR, PBO, or selection calculation; each original row is scored once.
 The terminal report includes paired lift/gross/net uncertainty,
 `decision_trade_rate`, MCC intervals and explicit undefined/degenerate reasons,
 DSR/PBO ledger/split/code provenance, tight/wide spread slices, and volatility

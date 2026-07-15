@@ -200,8 +200,10 @@ threshold choices use the immutable development partition
 `[2026-01-01, 2026-02-01)`. #68 uses a custodian identity and effective
 permissions distinct from the developer/experiment operator to own and seal
 the exact January raw and certified normalized L2/trade objects plus
-outcome-blind inventory metadata. Developer-owned files plus `chmod` are not a
-custody boundary. No January source payload/footer, bar, matrix, manifest,
+activity-obscuring, outcome-blind inventory metadata. Variable-length byte
+sizes and record counts stay inside custody until after the raw-access burn.
+Developer-owned files plus `chmod` are not a custody boundary. No January
+source payload/footer, bar, matrix, manifest,
 label, cost, feature, forecast, or metric is read by the selection/evaluation
 plane before an outcome-blind `g0bn-holdout-plan-v1` and complete
 `g0bn-freeze-v1` exist.
@@ -781,7 +783,10 @@ cross-cutting discipline).
   predictive plus either primary tradeable is PASS; both predictive with
   neither tradeable is PREDICTIVE_NOT_TRADEABLE; a valid/sufficient transaction
   with either nonpredictive is FAIL; integrity/sufficiency failure is
-  INCONCLUSIVE. The report includes paired lift/gross/net uncertainty,
+  INCONCLUSIVE. With `n_groups=6,k=2`, every row's five repeated CPCV test
+  forecasts collapse by the binding lexicographic, ordered-float64 arithmetic
+  mean and the resulting original-row series alone feeds lift, net, bootstrap,
+  DSR, PBO, and selection. The report includes paired lift/gross/net uncertainty,
   `decision_trade_rate`, MCC intervals with explicit undefined/degenerate
   reasons, DSR/PBO ledger/split/code provenance, tight/wide spread slices, and
   development-frozen volatility slices. The 60 s controls cannot select,
