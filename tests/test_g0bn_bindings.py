@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from eval.matrix import RESERVED
 from eval.synthetic import make_manifest, make_matrix
 from eval.writer import (
     G0BN_DEV_DATASET_ID,
@@ -223,6 +224,65 @@ def test_wrong_horizon_map_fails(horizons):
         validate_g0bn_manifest(g0bn_manifest(horizons=horizons))
 
 
+def _clock(**over):
+    clock = dict(g0bn_manifest()["bar_clock"])
+    clock.update(over)
+    return clock
+
+
+def test_non_dollar_clock_fails():
+    with pytest.raises(ValueError, match="bar_clock|dollar"):
+        validate_g0bn_manifest(g0bn_manifest(bar_clock=_clock(kind="time")))
+
+
+@pytest.mark.parametrize("stream", ["coinbase_trades", "binance_spot_trades",
+                                    "binance_futures_l2_delta", ""])
+def test_non_binance_perp_reference_stream_fails(stream):
+    with pytest.raises(ValueError, match="reference_stream"):
+        validate_g0bn_manifest(g0bn_manifest(bar_clock=_clock(reference_stream=stream)))
+
+
+def test_stitch_seam_policy_on_clock_fails():
+    """A seam_policy means the clock consumed a vendor stitch plan — forbidden for the
+    single-venue G0-BN build (source isolation)."""
+    with pytest.raises(ValueError, match="seam_policy"):
+        validate_g0bn_manifest(g0bn_manifest(bar_clock=_clock(seam_policy="coinapi_v1")))
+
+
+def test_missing_clock_kind_fails():
+    clock = _clock()
+    del clock["kind"]
+    with pytest.raises(ValueError):
+        validate_g0bn_manifest(g0bn_manifest(bar_clock=clock))
+
+
+def test_extra_reserved_col_fails():
+    """reserved_cols must be exactly eval.matrix.RESERVED: an extra reserved column
+    would be treated as declared by the writer and persisted into the sealed OOS
+    artifact, smuggling an unauthorized source/outcome column past source isolation."""
+    man = g0bn_manifest(reserved_cols=list(RESERVED) + ["secret_venue_mid"])
+    with pytest.raises(ValueError, match="reserved_cols"):
+        validate_g0bn_manifest(man)
+
+
+def test_reordered_reserved_cols_fails():
+    reordered = list(RESERVED)
+    reordered[0], reordered[1] = reordered[1], reordered[0]
+    with pytest.raises(ValueError, match="reserved_cols"):
+        validate_g0bn_manifest(g0bn_manifest(reserved_cols=reordered))
+
+
+def test_unauthorized_extra_col_fails():
+    man = g0bn_manifest(extra_cols=["latency_drift_bps", "secret_signal"])
+    with pytest.raises(ValueError, match="extra_cols|secret_signal"):
+        validate_g0bn_manifest(man)
+
+
+def test_emitted_by_time_cap_extra_col_allowed():
+    man = g0bn_manifest(extra_cols=["latency_drift_bps", "emitted_by_time_cap"])
+    assert validate_g0bn_manifest(man) is man
+
+
 def test_missing_latency_drift_extra_col_fails():
     with pytest.raises(ValueError, match="latency_drift_bps"):
         validate_g0bn_manifest(g0bn_manifest(extra_cols=[]))
@@ -343,11 +403,32 @@ def test_other_dataset_id_with_bindings_fails():
 
 # ---------------------------------------------------------------- classification (67-D preflight)
 
+def _legacy_partition_binding(partition="development"):
+    """The pre-existing G0/G0-XV partition-contract binding shape (eval/partition.py,
+    eval/synthetic.py) — same source `name` as the G0-BN partition binding but a
+    different field set. It must NOT be treated as a G0-BN marker."""
+    return {"name": "partition_contract", "sha256": "aa" * 32, "partition": partition,
+            "boundary_drop_counts": {"10s": 0}}
+
+
 def test_classify_legacy_manifest_is_not_g0bn():
     _, feats, lb = make_matrix(n=32, signal_strength=1.0, seed=1)
     cls = classify_manifest(make_manifest(feats, lb))
     assert (cls.is_g0bn, cls.partition, cls.holdout_bound) == (False, None, False)
     assert cls.dataset_id == "synthetic"
+
+
+def test_classify_legacy_partition_binding_manifest_is_not_g0bn():
+    """A legacy G0-XV manifest carries a `partition_contract` source binding but no
+    g0bn_protocol/g0bn_holdout_plan and a non-G0-BN dataset_id — the shared binding
+    name must not route it into the G0-BN validator (would wrongly reject a valid
+    non-G0-BN build)."""
+    _, feats, lb = make_matrix(n=32, signal_strength=1.0, seed=1)
+    for partition in ("development", "holdout"):
+        man = make_manifest(feats, lb)
+        man["sources"] = list(man["sources"]) + [_legacy_partition_binding(partition)]
+        cls = classify_manifest(man)
+        assert (cls.is_g0bn, cls.holdout_bound) == (False, False)
 
 
 def test_classify_development_manifest():
@@ -369,11 +450,22 @@ def test_classify_oos_dataset_id_without_bindings_fails():
         classify_manifest(man)
 
 
-def test_classify_partition_binding_without_protocol_binding_fails():
+def test_classify_lone_partition_binding_is_not_g0bn():
+    """A partition_contract binding alone (no g0bn_protocol, non-G0-BN dataset_id) is
+    not a G0-BN marker — the marker is g0bn_protocol/g0bn_holdout_plan or a G0-BN
+    dataset_id, never the shared partition binding."""
     _, feats, lb = make_matrix(n=32, signal_strength=1.0, seed=1)
     man = make_manifest(feats, lb)
     man["sources"] = list(man["sources"]) + [partition_binding("holdout")]
-    with pytest.raises(ValueError):
+    cls = classify_manifest(man)
+    assert cls.is_g0bn is False
+
+
+def test_classify_g0bn_protocol_build_missing_partition_binding_fails():
+    """The real spec-§7 rejection: a g0bn_protocol build (G0-BN marker present) with a
+    missing/ambiguous partition binding must fail closed, not fall back to generic."""
+    man = _drop_source(g0bn_manifest(), "partition_contract")
+    with pytest.raises(ValueError, match="exactly one"):
         classify_manifest(man)
 
 

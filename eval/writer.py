@@ -38,7 +38,7 @@ from bars.cost import CostAssumption, VENUE_BINANCE, validate_cost_assumption
 from eval.hashing import canonical_json, canonical_row_order, hash_obj, matrix_content_hash
 from eval.manifest import feature_list, validate_frame, validate_manifest, write_manifest
 from eval.manifest import manifest_sha256 as _manifest_sha256
-from eval.matrix import TIMING_COLS, validate_matrix
+from eval.matrix import RESERVED, TIMING_COLS, validate_matrix
 
 # --------------------------------------------------------------------- G0-BN constants
 # Staged dataset identities (docs/feature-manifest.md): development and holdout are
@@ -71,6 +71,17 @@ G0BN_FEATURES = (
 )
 G0BN_TARGETS = ("y_fwd_bps", "label")
 G0BN_HORIZONS_NS = {"2s": 2_000_000_000, "10s": 10_000_000_000, "60s": 60_000_000_000}
+# The G0-BN bar clock is a notional/dollar clock driven by the Binance perp OWN-trade
+# stream (spec §2.1: the same instrument supplies the trade clock). These are the
+# isolation-bearing clock fields T8 pins at the manifest gate; the development-frozen
+# numeric values (target bars/day, time cap, schedule hash) are operator/67-A concerns.
+G0BN_CLOCK_KIND = "dollar"
+G0BN_CLOCK_REFERENCE_STREAM = "binance_futures_trades"
+# The only diagnostics a single-venue G0-BN build may opt into: the required latency
+# drift (§I) and the time-cap flag (§H). Any other extra_col could carry an
+# unauthorized source/outcome column past source isolation.
+G0BN_REQUIRED_EXTRA_COLS = ("latency_drift_bps",)
+G0BN_ALLOWED_EXTRA_COLS = ("latency_drift_bps", "emitted_by_time_cap")
 # Binary64 storage pins (spec §8.2): the scorer performs no float32 round trip, so the
 # manifest must declare — and the frame must physically carry — float64 exactly.
 G0BN_COST_DTYPES = {"cost_bps": "float64", "half_spread_bps": "float64",
@@ -284,9 +295,36 @@ def validate_g0bn_manifest(manifest: dict) -> dict:
     if manifest["horizons"] != G0BN_HORIZONS_NS:
         raise ValueError(f"G0-BN horizons must be exactly {G0BN_HORIZONS_NS}; "
                          f"got {manifest['horizons']!r}")
-    if "latency_drift_bps" not in manifest.get("extra_cols", []):
-        raise ValueError("G0-BN manifests must declare latency_drift_bps in extra_cols "
-                         "(required non-feature diagnostic; docs/feature-manifest.md)")
+
+    clock = manifest["bar_clock"]
+    if clock.get("kind") != G0BN_CLOCK_KIND:
+        raise ValueError(f"G0-BN bar_clock.kind must be {G0BN_CLOCK_KIND!r} (notional "
+                         f"clock); got {clock.get('kind')!r}")
+    if clock.get("reference_stream") != G0BN_CLOCK_REFERENCE_STREAM:
+        raise ValueError(f"G0-BN bar_clock.reference_stream must be the Binance perp "
+                         f"own-trade stream {G0BN_CLOCK_REFERENCE_STREAM!r} (spec §2.1); "
+                         f"got {clock.get('reference_stream')!r}")
+    if "seam_policy" in clock:
+        raise ValueError("G0-BN bar_clock must not carry a seam_policy: a vendor stitch "
+                         "plan is forbidden for the single-venue build (source isolation)")
+
+    # reserved_cols is the fixed ModelMatrix registry, in order and complete. An EXTRA
+    # reserved column would be treated as declared by _check_write_schema and persisted/
+    # hashed into the sealed OOS artifact — an unauthorized-column smuggling vector.
+    if list(manifest["reserved_cols"]) != list(RESERVED):
+        raise ValueError(f"G0-BN reserved_cols must be exactly eval.matrix.RESERVED in "
+                         f"order {list(RESERVED)}; got {manifest['reserved_cols']!r}")
+    extra = list(manifest.get("extra_cols", []))
+    missing_extra = [c for c in G0BN_REQUIRED_EXTRA_COLS if c not in extra]
+    if missing_extra:
+        raise ValueError(f"G0-BN manifests must declare {list(G0BN_REQUIRED_EXTRA_COLS)} "
+                         f"in extra_cols (required non-feature diagnostic); missing "
+                         f"{missing_extra}")
+    unauthorized = [c for c in extra if c not in G0BN_ALLOWED_EXTRA_COLS]
+    if unauthorized:
+        raise ValueError(f"G0-BN extra_cols may only opt into "
+                         f"{list(G0BN_ALLOWED_EXTRA_COLS)} (source isolation); "
+                         f"unauthorized diagnostics: {unauthorized}")
     dtypes = manifest.get("dtypes")
     if dtypes is None:
         raise ValueError("G0-BN manifests require a dtypes map pinning the float64 "
@@ -317,16 +355,25 @@ class ManifestClass:
     holdout_bound: bool
 
 
+# G0-BN markers are the G0-BN-specific bindings and dataset IDs — NOT partition_contract,
+# whose source name is shared with the legacy G0/G0-XV partition binding
+# (eval/partition.py). Marking on partition_contract would route a valid legacy manifest
+# into the G0-BN validator and wrongly reject it.
+_G0BN_MARKER_BINDINGS = (PROTOCOL_BINDING, HOLDOUT_PLAN_BINDING)
+
+
 def classify_manifest(manifest: dict) -> ManifestClass:
     """Classify a manifest WITHOUT touching parquet. Non-G0-BN manifests pass through;
-    any manifest carrying a G0-BN marker (a binding or a G0-BN dataset_id) must satisfy
-    the full binding contract or this raises — a missing/ambiguous partition binding on
-    a G0-BN build is a rejection, never a fallback to generic handling."""
+    any manifest carrying a G0-BN marker (a g0bn_protocol/g0bn_holdout_plan binding or a
+    G0-BN dataset_id) must satisfy the full binding contract or this raises — a
+    missing/ambiguous partition binding on a G0-BN build is a rejection, never a fallback
+    to generic handling. The shared `partition_contract` name is deliberately NOT a
+    marker (legacy G0/G0-XV manifests use it too)."""
     validate_manifest(manifest)
     ds = manifest["dataset_id"]
-    has_binding = any(isinstance(s, dict) and s.get("name") in _BINDING_NAMES
-                      for s in manifest["sources"])
-    if not has_binding and ds not in (G0BN_DEV_DATASET_ID, G0BN_OOS_DATASET_ID):
+    has_marker = any(isinstance(s, dict) and s.get("name") in _G0BN_MARKER_BINDINGS
+                     for s in manifest["sources"])
+    if not has_marker and ds not in (G0BN_DEV_DATASET_ID, G0BN_OOS_DATASET_ID):
         return ManifestClass(dataset_id=ds, is_g0bn=False, partition=None,
                              holdout_bound=False)
     validate_g0bn_manifest(manifest)
