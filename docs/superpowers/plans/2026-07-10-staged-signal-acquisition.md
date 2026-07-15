@@ -108,6 +108,12 @@ are excluded from the first gate even when files are readily available.
   require exactly five finite test forecasts per row, and collapse them by the
   ordered float64 arithmetic mean. Score each original row once; that collapsed
   series alone feeds development lift, net, bootstrap, DSR, PBO, and selection.
+- Convert finite non-negative effective trades for DSR as
+  `T=max(2,int(numpy.rint(numpy.float64(effective_trades))))`, using nearest/
+  even half ties. For PBO, order the five base identities as frozen below, then
+  other successful lowercase SHA-256 trial IDs ascending; exact IS ties choose
+  the first maximum, and the OOS rank count includes all column means less than
+  or equal to the chosen value before division by `n_columns + 1`.
 - Canonically freeze the certified source, producer/clock/label definitions,
   ordered features, horizon roles, real fee tier, cost/slippage/latency block,
   exclusions, partitions/CV, model definitions, thresholds, outcome-blind OOS
@@ -207,16 +213,21 @@ The coherent sequence is:
    materialization and enters the future build recipe; `g0bn-freeze-v1` pins
    that plan but contains no January build ID, manifest/matrix/logical-row hash,
    row/drop count, realized schedule/state, or result.
-4. #69 completes all data-free preflight/refit, then atomically creates/fsyncs
-   the raw-access burn before the first January raw/normalized
-   object/payload/footer read. Its sole blind materializer writes once and
-   attests the actual manifest/matrix/build/count/schedule hashes without
-   reopening the derived artifacts.
+4. #69 acquires and holds the stable transaction's nonblocking process-owner
+   lock across all outcome-capable work, then completes data-free preflight/
+   refit and atomically creates/fsyncs the raw-access burn before the first
+   January raw/normalized object/payload/footer read. A concurrent live start
+   exits `transaction_already_running` without reading claims/data or mutating
+   the journal. Its sole blind materializer writes once and attests the actual
+   manifest/matrix/build/count/schedule hashes without reopening the derived
+   artifacts.
 5. Only after that materialization completes does #69 atomically create/fsync
    the separate matrix-access burn, before the sole scorer first opens the
    derived matrix/parquet/footer to validate and score.
 
-Both burns belong to the same stable transaction/universe. Any crash or
+Both burns belong to the same stable transaction/universe. A pre-burn owner
+death is retryable; after acquiring the now-free lock, only a later owner may
+classify a post-burn nonterminal state as crash-left INCONCLUSIVE. Any crash or
 materialization, transition, validation, fit, score, or write failure after
 either burn is terminal INCONCLUSIVE; no intermediate state is resumable.
 

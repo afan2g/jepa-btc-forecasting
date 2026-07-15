@@ -215,19 +215,23 @@ result changes cannot mint another transaction. The freeze pins
 January build/manifest/matrix/logical-row hash, row/drop count, realized
 adaptive schedule/state, or result.
 
-After data-free refit/preflight, #69 atomically creates/fsyncs the distinct
-`g0bn-raw-access-claim-v1` **before** the first January raw/normalized
+#69 first acquires and holds the stable transaction's nonblocking process-owner
+lock across every outcome-capable child. A concurrent live start exits
+`transaction_already_running` without reading claims/data or mutating the
+journal. After data-free refit/preflight, #69 atomically creates/fsyncs the
+distinct `g0bn-raw-access-claim-v1` **before** the first January raw/normalized
 object/payload/footer read. T9 then performs the sole blind materialization,
 closes the artifacts, and writes `g0bn-materialization-attestation-v1` with the
 actual hashes/counts without reopening them. Only after that completes does #69
 atomically create/fsync `g0bn-matrix-access-claim-v1`, before the sole scorer
-first opens the derived matrix/parquet/footer to validate and score. Both
-burns belong to the same `g0bn-one-shot-v1` transaction and
-`g0bn-consumption-v1` journal. Any crash or materialization, transition,
-validation, fit, score, or write failure after either burn is terminal
-INCONCLUSIVE with no resumable intermediate path. The existing `2026-04-01`
-Binance smoke day is an integrity fixture only and must not enter calibration,
-selection, or outcome reporting.
+first opens the derived matrix/parquet/footer to validate and score. Both burns
+belong to the same `g0bn-one-shot-v1` transaction and `g0bn-consumption-v1`
+journal. A pre-burn owner death is retryable; only a later lock owner may
+classify a post-burn nonterminal state as crash-left INCONCLUSIVE. Any crash or
+materialization, transition, validation, fit, score, or write failure after
+either burn is terminal INCONCLUSIVE with no resumable intermediate path. The
+existing `2026-04-01` Binance smoke day is an integrity fixture only and must
+not enter calibration, selection, or outcome reporting.
 
 Issue #67 implements the separately typed config/identity, candidate ledger,
 freeze/plan, generic-runner guard, stable-universe/two-burn one-shot runner,
@@ -786,7 +790,13 @@ cross-cutting discipline).
   INCONCLUSIVE. With `n_groups=6,k=2`, every row's five repeated CPCV test
   forecasts collapse by the binding lexicographic, ordered-float64 arithmetic
   mean and the resulting original-row series alone feeds lift, net, bootstrap,
-  DSR, PBO, and selection. The report includes paired lift/gross/net uncertainty,
+  DSR, PBO, and selection. DSR uses
+  `T=max(2,int(numpy.rint(numpy.float64(effective_trades))))`, with nearest/even
+  half ties. PBO orders the five base identities as frozen above, then other
+  successful lowercase SHA-256 trial IDs ascending; exact IS ties choose the
+  first maximum, and OOS ranking counts every column mean less than or equal to
+  the chosen value before division by `n_columns + 1`. The report includes
+  paired lift/gross/net uncertainty,
   `decision_trade_rate`, MCC intervals with explicit undefined/degenerate
   reasons, DSR/PBO ledger/split/code provenance, tight/wide spread slices, and
   development-frozen volatility slices. The 60 s controls cannot select,
@@ -1049,11 +1059,15 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   access. Deferred mode fixtures prove their own explicit venue/source
   templates without changing G0-BN's row schema.
 - **Holdout identity/two-burn order:** changing pilot/config/freeze/source/plan
-  fields leaves the stable universe/transaction unchanged. A read spy proves
-  raw claim `O_EXCL` + file/directory fsync precede the first sealed source/
-  footer read; blind materialization closes and attests actual build/manifest/
-  matrix/count/schedule hashes without reopening; matrix claim `O_EXCL` +
-  fsync then precedes the scorer's first derived matrix/parquet/footer read.
+  fields leaves the stable universe/transaction unchanged. A read spy proves a
+  transaction-derived nonblocking process-owner lock spans all outcome-capable
+  work; an active duplicate exits `transaction_already_running` without reading
+  claims/data or mutating the journal. Raw claim `O_EXCL` + file/directory fsync
+  precede the first sealed source/footer read; blind materialization closes and
+  attests actual build/manifest/matrix/count/schedule hashes without reopening;
+  matrix claim `O_EXCL` + fsync then precedes the scorer's first derived matrix/
+  parquet/footer read. A pre-burn owner death is retryable, while only a later
+  lock owner classifies a crash-left post-burn nonterminal state INCONCLUSIVE.
   Crashes and materialization/transition/validation/fit/score/write failures
   after either burn all leave terminal INCONCLUSIVE, with no intermediate
   resumption path.
@@ -1063,8 +1077,10 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   cover the exact uniqueness-weighted persistence-lift formula, zero
   denominator, paired circular two-day PCG64 bootstrap, `0.05/8` development
   and `0.05/2` OOS tails, ≥20-day/`sum(u)>=100` sufficiency, trade-first then
-  predictive-only selection, all four verdicts, MCC degeneracy reasons, and
-  proof that 60 s cannot select/rescue.
+  predictive-only selection, DSR nearest/even effective-trade rounding,
+  canonical PBO columns with first-maximum IS and less-than-or-equal OOS ties,
+  all four verdicts, MCC degeneracy reasons, and proof that 60 s cannot select/
+  rescue.
 - **Determinism (P3/#10):** two builds of the same fixture with **different injected
   `generated_at`** ⇒ **identical canonical logical rows and identical `build_id`** (the timestamp
   is excluded from the hash) — assert **logical-row equality**, not raw parquet bytes (which are

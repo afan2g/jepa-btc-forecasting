@@ -213,13 +213,13 @@ The schema has exactly these decision-bearing sections:
 | `costs` | Exact T7 `CostAssumption`: `venue=binance`, product/source/version identity, scalar one-way `taker_fee_bps`, scalar aggregate `base_slippage_bps`, and `drift_policy=abs_true_over_observable_mid_v1`; fee-tier applicability/evidence hash; two fee sides; two spread crossings; no-trade margin; observable decision-cost versus realized charged-cost rule |
 | `exclusions` | Outcome-blind rule version; exact included days; map of every excluded day to reason and evidence hash; staleness/gap/one-sided-book/lookback rules and drop policy |
 | `partition` | Exact nanosecond bounds; horizon map; `partition_guard_ns`; prefilter string; `schema=g0bn-partition-plan-v1` and its SHA-256; realized development counts; holdout count schema and sufficiency rules, but no realized holdout counts |
-| `cv` | Fixed §3.4 `n_groups`, `k`, split/grouping/forecast-collapse versions, expected per-row test multiplicity, `embargo_ns`, PBO blocks/minimum rows, DSR/PBO definitions and thresholds |
+| `cv` | Fixed §3.4 `n_groups`, `k`, split/grouping/forecast-collapse versions, expected per-row test multiplicity, `embargo_ns`, DSR effective-trade integerization, PBO column/tie/rank rules and blocks/minimum rows, and DSR/PBO definitions and thresholds |
 | `horizons` | Ordered objects `{tag, ns, role}` exactly as §2.3 |
 | `candidates` | Ordered, complete definitions from §4, including full resolved model parameters and hashes |
 | `selection` | Deterministic development ranking/tie rule; eligible candidate IDs; attempt-accounting policy |
 | `verdict_thresholds` | All day/uniqueness/trade floors, circular two-day moving-block bootstrap settings, development and OOS Bonferroni tail levels, lift/net lower-bound comparisons, DSR/PBO cutoffs, and truth-table version |
 | `reporting` | Exact metric/report versions, spread and volatility regime tag formulas/bin edges, component-cost fields, and strict report/verdict schemas |
-| `oos` | Exact January scope, stable universe/transaction algorithms, holdout dataset ID, separate raw/source- and matrix-access boundaries, materializer/validator/scorer/report versions, output allowlist, and terminal-failure policy |
+| `oos` | Exact January scope, stable universe/transaction algorithms, holdout dataset ID, process-owner lock path/algorithm/lifetime and concurrent-start refusal, separate raw/source- and matrix-access boundaries, materializer/validator/scorer/report versions, output allowlist, and terminal-failure policy |
 | `software` | Python, NumPy, pandas, scikit-learn, LightGBM, pyarrow, and repository versions/hashes; deterministic-thread/seed settings |
 
 The final config repeats values rather than relying on code defaults. Code must
@@ -296,19 +296,40 @@ over those traded rows. G0-BN's versioned DSR calculation pins the following
 inputs: candidate trade Sharpe; population standard deviation of the finite
 trade Sharpes for all successfully scored unique trial identities at the same
 horizon plus `1e-9`; the complete cross-horizon unique-identity ledger count as
-`n_trials`; rounded
-effective trades with a floor of 2 as `T`; and the traded-PnL sample skew and
-Pearson kurtosis. It uses the Bailey/Lopez de Prado normal-approximation formula
-implemented by the hash-pinned metric version and requires `DSR > 0.95`.
+`n_trials`; and the traded-PnL sample skew and Pearson kurtosis. Given the
+already-computed finite, non-negative binary64 `effective_trades`, its DSR sample
+count is exactly:
+
+```text
+T_rounded = numpy.rint(numpy.float64(effective_trades))
+T = max(2, int(T_rounded))
+```
+
+`numpy.rint` is round-to-nearest with exact half cases going to the nearest even
+integer (`2.5 -> 2`, `3.5 -> 4`). The result is range-checked and represented as
+a signed int64 before conversion to the DSR scalar; there is no floor, ceiling,
+half-away, or language-default alternative. The config, metric provenance, and
+report carry both the unrounded effective-trade value and resulting `T`, plus
+the rule ID `nearest_ties_to_even_int64_v1`. The Bailey/Lopez de Prado
+normal-approximation formula then uses that `T` and requires `DSR > 0.95`.
 An aborted unique trial identity increases `n_trials` even though it cannot
 supply a Sharpe. An exact retry event under the same identity does not.
 
 PBO uses `s=8` contiguous `numpy.array_split` blocks over the common,
 chronologically ordered CPCV-OOS net-PnL matrix for every successfully scored
-unique trial identity at that horizon, including deterministic baselines. Block means are
-uniqueness-weighted; all `C(8,4)` train-block combinations use the complement
-as test; the IS-best column's OOS relative rank uses denominator
-`n_columns + 1`; and PBO is the fraction of rank logits below zero. PBO is
+unique trial identity at that horizon, including deterministic baselines.
+Columns are canonical: the five eligible base identities come first in §4.1
+order, followed by every other successfully scored identity in ascending
+lowercase `trial_id` SHA-256 order. Block means are uniqueness-weighted; all
+`C(8,4)` train-block combinations use the complement as test. For each
+combination, the IS-best is the first column attaining the exact maximum IS
+mean in that canonical order, matching `numpy.argmax`; there is no tolerance,
+jitter, or average-rank tie break. If `j*` is that column, its OOS rank count is
+exactly `sum_j(oos_mean_j <= oos_mean_j*)`, so equal OOS values are included.
+Divide that integer by `n_columns + 1`, take its logit, and count it toward PBO
+iff the unrounded logit is strictly below zero. The ordered trial-ID list,
+`first_max_v1` IS tie rule, and `less_equal_count_v1` OOS rank rule enter the
+PBO input hash and config. PBO is
 available only with at least two columns and 32 rows finite in every column,
 and the frozen requirement is `PBO < 0.50`. These constants and metric-code
 hashes are repeated in the config rather than inherited from legacy defaults.
@@ -594,7 +615,33 @@ transaction ID; every record repeats and validates both stable IDs.
 
 ### 6.2 State machine
 
+Every invocation first derives the stable transaction ID and opens one
+never-replaced owner-lock file at the transaction-derived path using
+`O_CREAT|O_RDWR|O_NOFOLLOW`, mode `0600`, with file/directory fsync on first
+creation. It then attempts Linux `fcntl.flock(fd, LOCK_EX|LOCK_NB)` and keeps
+that file description locked until all outcome-capable work has stopped and a
+terminal journal update is fsynced. The file is never unlinked or atomically
+replaced; its existence is not a burn, and only the kernel lock state indicates
+an active owner. The implementation fails before the raw claim unless the
+configured local filesystem and OS provide those semantics. Any outcome-
+accessing child must inherit a duplicate of the locked file description and may
+not detach, so the lock remains held while any compliant materializer or scorer
+can still read or write January artifacts.
+
+Lock contention returns the operational refusal `transaction_already_running`
+without reading a claim, journal, January source, or derived artifact and
+without writing any state. It is not a fifth verdict and does not consume the
+transaction. There is no PID timeout, heartbeat expiry, or lock stealing. Once
+a process successfully acquires the lock, no compliant owner is live: only then
+may it inspect durable transaction state and classify a raw-claim-bearing
+nonterminal state left by a prior process as crash-left INCONCLUSIVE. A
+pre-raw-claim crash remains retryable because it accessed no January outcome.
+The owner-lock algorithm, path, filesystem requirement, child-inheritance rule,
+and non-mutating contention result are pinned in the `oos` config block.
+
 ```text
+exclusive process-owner lock held around every state below
+
 ABSENT
   | atomic raw-access O_CREAT|O_EXCL + file/directory fsync
   v
@@ -624,10 +671,13 @@ closed.
 `g0bn-consumption-v1` is the separate hash-chained journal of these states. Its
 monotone history records both claim hashes, attestation hash when available,
 stage, and terminal report/error hash. The claim files are irreversible even if
-the journal's best-effort failure append cannot be written. Finding a raw claim
-without `SCORED` on process start maps to terminal INCONCLUSIVE without opening
-any January source or derived artifact. There is no resumable intermediate
-state, validation-only mode, second scoring call, or post-burn re-entry path.
+the journal's best-effort failure append cannot be written. After acquiring the
+owner lock, finding a raw claim without a reconciled terminal `SCORED` or
+`INCONCLUSIVE` state maps the crash-left transaction to terminal INCONCLUSIVE
+without opening any January source or derived artifact. A process that cannot
+acquire the owner lock must not perform that classification. There is no
+resumable intermediate state, validation-only mode, second scoring call, or
+post-burn re-entry path.
 
 All predictable config, development-manifest, refit, shape, permission, and
 output-path checks run before the raw claim. If any materialization, validation,
@@ -638,8 +688,11 @@ transaction/universe is terminal INCONCLUSIVE; a config change cannot reset it.
 
 The dedicated #69 runner performs, in order:
 
-1. Load and self-verify config, freeze, ledger, holdout plan, partition, source
-   seal metadata, development manifest/matrix, and software hashes.
+1. Derive the stable IDs, acquire and hold the §6.2 process-owner lock, classify
+   any crash-left durable state, then load and self-verify config, freeze,
+   ledger, holdout plan, partition, source seal metadata, development manifest/
+   matrix, and software hashes. Lock contention exits without mutation or data
+   access.
 2. Enforce the exact certified Binance source template; prepare the two selected
    primary candidates and all five 60 s controls by refitting every fitted
    candidate on its canonical full development rows and instantiating each
@@ -674,7 +727,9 @@ The dedicated #69 runner performs, in order:
    hash. This single commit publishes both the score and state; no second result
    file is required for correctness. Any exception after step 3 leaves the
    transaction consumed and produces an INCONCLUSIVE failure append when
-   possible.
+   possible. Release the owner lock only after the terminal journal fsync and
+   after every outcome-capable child has exited and released its duplicate lock
+   description.
 
 The materializer cannot accept a date range, glob, fallback source, alternate
 config, or unclaimed invocation. It consumes the exact plan allowlist and the
@@ -1000,7 +1055,7 @@ to mutate GitHub from this plan:
 | **67-B — candidate engine and ledger** | Five-candidate G0-BN development engine, full parameter resolution, CPCV forecasts, DSR/PBO, deterministic selection, separate append-only ledger | 67-A; T8 manifest reader contract |
 | **67-C — freeze and holdout plan** | Outcome-blind plan builder, reproducible freeze reconstruction, exact-scope and no-OOS-field validation | 67-A/B; T8 bindings |
 | **67-D — generic-runner guard** | Manifest-only holdout rejection in path/in-memory generic APIs and CLI, proven before loader invocation | 67-A; T8 bindings |
-| **67-E — one-shot runner** | Separate durable raw- and matrix-access claims, non-resumable state machine, pre-burn dev fit, blind T9 materialization/attestation, post-matrix-burn validation/score, terminal journal | 67-C/D; T7 cost contract; T8 writer/bindings; T9 callable materializer |
+| **67-E — one-shot runner** | Process-owner lock with non-mutating active-run refusal, separate durable raw- and matrix-access claims, crash-left non-resumable state machine, pre-burn dev fit, blind T9 materialization/attestation, post-matrix-burn validation/score, terminal journal | 67-C/D; T7 cost contract; T8 writer/bindings; T9 callable materializer |
 | **67-F — metrics and report** | Dedicated split decision/realized-cost scorer, paired circular two-day moving-block bootstrap, Bonferroni tails, exact metrics, four predicates/verdicts, strict report and hashes | 67-B/E |
 | **67-G — integration/regression** | End-to-end synthetic PASS/PNT/FAIL/INCONCLUSIVE cases and unchanged G0-CB/G0-XV suite | 67-A–F, T7–T9 |
 
@@ -1038,8 +1093,10 @@ At minimum, #67's subissues include cheap tests for:
    row, ordered float64 arithmetic-mean collapse with missing/extra/non-finite
    coverage rejection, proof that the collapsed row series feeds lift/net/DSR/
    PBO, development trade-first then predictive-only selection, exact unrounded
-   tie breaks, Bonferroni lower bounds, 60 s inability to select/pass/rescue,
-   and DSR/PBO provenance from the pinned ledger;
+   tie breaks, DSR `T` nearest/ties-to-even cases, canonical PBO column order,
+   first-maximum IS and less-than-or-equal OOS tie cases, Bonferroni lower
+   bounds, 60 s inability to select/pass/rescue, and DSR/PBO provenance from the
+   pinned ledger;
 6. freeze construction from development plus seal metadata with a read spy
    proving zero January loader calls; `holdout_plan_sha256` build binding; and
    rejection of a January build/manifest/matrix/row hash, count, schedule/state,
@@ -1050,12 +1107,16 @@ At minimum, #67's subissues include cheap tests for:
    `t_barrier` without horizon double-counting;
 8. generic CLI/API rejection of holdout bindings before a parquet loader spy is
    called, including missing/ambiguous binding cases;
-9. independent `O_EXCL`/fsync durability for raw access before the first sealed
-   source/footer read and matrix access only after attestation but before the
-   first derived matrix/parquet/footer read, including concurrent exclusion;
-10. materialization, transition, validation, fit, score, and output-write
-    failures after either burn each leaving the stable transaction terminal
-    INCONCLUSIVE; every crash-left nonterminal state is consumed without a read;
+9. independent process-owner `flock` and `O_EXCL`/fsync durability: a concurrent
+   invocation gets `transaction_already_running` without reading claims/data or
+   mutating the journal; the owner lock spans every outcome-capable child; raw
+   access precedes the first sealed source/footer read and matrix access follows
+   attestation but precedes the first derived matrix/parquet/footer read;
+10. pre-burn owner death remaining retryable, while owner death after the raw
+    burn plus materialization, transition, validation, fit, score, and output-
+    write failures each leave the stable transaction terminal INCONCLUSIVE;
+    only a new lock owner consumes a crash-left nonterminal state, without a
+    January read;
 11. a hand-computed paired circular two-day lift/gross/net/MCC bootstrap with
     PCG64 seed 0, 10,000 replicates, linear percentiles, development `0.05/8`
     and OOS `0.05/2` tails, `>=20` day and `sum(u)>=100` failures, and no row-IID

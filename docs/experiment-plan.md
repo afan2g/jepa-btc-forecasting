@@ -86,9 +86,13 @@ feature before parquet access wherever the API controls loading.
    development/CPCV trials, deterministic selection, config, holdout plan, and
    freeze. `holdout_plan_sha256` is outcome-blind and enters the future build
    recipe; the freeze contains no January build/manifest/row hash, count,
-   realized schedule/state, or result. After data-free refit/preflight, the
-   stable transaction first atomically burns raw access before any January
-   raw/normalized object/payload/footer read. The sole blind materializer then
+   realized schedule/state, or result. #69 first holds the transaction-derived
+   nonblocking process-owner lock. A concurrent live invocation exits
+   `transaction_already_running` without reading claims/data or mutating the
+   journal; only a later lock owner may classify a post-burn nonterminal state
+   as crash-left INCONCLUSIVE. After data-free refit/preflight, the stable
+   transaction first atomically burns raw access before any January raw/
+   normalized object/payload/footer read. The sole blind materializer then
    writes and attests the actual build. Only after it completes does a separate
    atomic matrix-access burn occur, before the sole scorer first opens the
    derived matrix/parquet/footer to validate and score. January labels may not
@@ -124,6 +128,12 @@ positive mean-daily-net lower bound plus frozen trade, DSR, and PBO gates.
 With `n_groups=6,k=2`, each development row's five repeated CPCV test forecasts
 collapse by the binding ordered float64 arithmetic mean before any lift, net,
 bootstrap, DSR, PBO, or selection calculation; each original row is scored once.
+DSR converts finite non-negative effective trades to
+`T=max(2,int(numpy.rint(numpy.float64(effective_trades))))`, with nearest/even
+half ties. PBO orders the five base candidates as listed above, then other
+successful lowercase SHA-256 trial IDs ascending; exact IS ties select the
+first maximum, and the OOS rank count includes every column whose mean is less
+than or equal to the selected column before division by `n_columns + 1`.
 The terminal report includes paired lift/gross/net uncertainty,
 `decision_trade_rate`, MCC intervals and explicit undefined/degenerate reasons,
 DSR/PBO ledger/split/code provenance, tight/wide spread slices, and volatility
