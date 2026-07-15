@@ -71,6 +71,17 @@ def test_logical_row_hash_rejects_missing_column():
         logical_row_sha256(frame, ordered_manifest_columns(g0bn_manifest()))
 
 
+def test_logical_row_hash_rejects_categorical_columns():
+    """A categorical column changes the canonical sort (category order, not value) and
+    the value-byte encoding, so identical logical content would hash differently —
+    reject instead of silently diverging identities."""
+    frame = g0bn_frame()
+    cat = frame.assign(horizon=pd.Categorical(
+        frame["horizon"], categories=["60s", "2s", "10s"], ordered=True))
+    with pytest.raises(ValueError, match="categorical"):
+        logical_row_sha256(cat, ordered_manifest_columns(g0bn_manifest()))
+
+
 def test_build_id_binds_dataset_rows_and_params():
     frame = g0bn_frame()
     lrh = logical_row_sha256(frame, ordered_manifest_columns(g0bn_manifest()))
@@ -285,6 +296,26 @@ def test_development_write_rejects_bad_drift_diagnostic(tmp_path, mutate):
                           matrix_path=tmp_path / "m.parquet", manifest_path=tmp_path / "m.json")
 
 
+def test_development_write_rejects_negative_reconciling_drift(tmp_path):
+    """Isolates the sign guard: the drift is negative but cost_bps still reconciles
+    (cost = 2*fee + slip + drift), so only the non-negativity check can reject."""
+    frame, man, params = built_g0bn()
+    bad = frame.assign(latency_drift_bps=-0.1,
+                       cost_bps=2.0 * FEE_BPS + SLIP_BPS - 0.1)
+    frame, man, params = built_g0bn(frame=bad)
+    with pytest.raises(ValueError, match="latency_drift_bps"):
+        write_development(frame, man, build_params=params,
+                          matrix_path=tmp_path / "m.parquet", manifest_path=tmp_path / "m.json")
+
+
+def test_development_write_rejects_numeric_regime(tmp_path):
+    frame, man, params = built_g0bn()
+    frame = frame.assign(regime=np.int64(1))
+    with pytest.raises(ValueError, match="regime"):
+        write_development(frame, man, build_params=params,
+                          matrix_path=tmp_path / "m.parquet", manifest_path=tmp_path / "m.json")
+
+
 def test_development_write_rejects_cost_reconciliation_break(tmp_path):
     frame, man, params = built_g0bn()
     frame.loc[0, "cost_bps"] = 2.0 * FEE_BPS + SLIP_BPS + frame.loc[0, "latency_drift_bps"] + 0.5
@@ -325,6 +356,20 @@ def test_development_writer_refuses_holdout_manifest(tmp_path):
         write_development(frame, man, build_params=params,
                           matrix_path=tmp_path / "m.parquet", manifest_path=tmp_path / "m.json")
     assert not (tmp_path / "m.parquet").exists()
+
+
+def test_development_writer_refuses_holdout_manifest_without_plan_params(tmp_path):
+    """Isolates the classify-driven refusal (writer must not depend on the separate
+    holdout_plan_sha256 build-params guard): a holdout-bound manifest whose build
+    params carry no plan hash — and whose build_id is consistent with those params —
+    must still be refused, with nothing written."""
+    from tests.g0bn_fixtures import build_params as make_params
+    frame, man, _ = built_g0bn(partition="holdout", params=make_params("development"))
+    mpath, jpath = _paths(tmp_path)
+    with pytest.raises(ValueError, match="holdout"):
+        write_development(frame, man, build_params=make_params("development"),
+                          matrix_path=mpath, manifest_path=jpath)
+    assert not mpath.exists() and not jpath.exists()
 
 
 def test_holdout_writer_refuses_development_manifest(tmp_path):
@@ -434,13 +479,20 @@ def test_holdout_write_defers_value_validation(tmp_path):
     assert mpath.exists() and jpath.exists()
 
 
-def test_holdout_write_still_refuses_schema_drift(tmp_path):
+@pytest.mark.parametrize("corrupt,match", [
+    (lambda f: f.assign(cost_bps=f["cost_bps"].astype(np.float32)), "cost_bps"),
+    (lambda f: f.assign(cvd=f["cvd"].astype(np.float32)), "cvd"),
+    (lambda f: f.assign(mystery=1.0), "mystery"),
+    (lambda f: f.assign(label=f["label"].astype(np.float64)), "label"),
+    (lambda f: f.assign(t_event=f["t_event"].astype(np.float64)), "t_event"),
+    (lambda f: f.assign(regime=np.int64(0)), "regime"),
+    (lambda f: f.assign(horizon=pd.Categorical(f["horizon"])), "horizon"),
+])
+def test_holdout_write_still_refuses_schema_drift(tmp_path, corrupt, match):
+    """The blind path skips value validation but its structural gate is load-bearing:
+    every physical-schema drift must fail before a byte reaches the sealed artifact."""
     frame, man, params = built_g0bn(partition="holdout")
-    f32 = frame.assign(cost_bps=frame["cost_bps"].astype(np.float32))
-    with pytest.raises(ValueError, match="cost_bps"):
-        write_holdout(f32, man, build_params=params,
+    with pytest.raises(ValueError, match=match):
+        write_holdout(corrupt(frame), man, build_params=params,
                       matrix_path=tmp_path / "m.parquet", manifest_path=tmp_path / "m.json")
-    undeclared = frame.assign(mystery=1.0)
-    with pytest.raises(ValueError, match="mystery"):
-        write_holdout(undeclared, man, build_params=params,
-                      matrix_path=tmp_path / "m2.parquet", manifest_path=tmp_path / "m2.json")
+    assert not (tmp_path / "m.parquet").exists()

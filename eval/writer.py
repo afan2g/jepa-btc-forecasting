@@ -38,7 +38,7 @@ from bars.cost import CostAssumption, VENUE_BINANCE, validate_cost_assumption
 from eval.hashing import canonical_json, canonical_row_order, hash_obj, matrix_content_hash
 from eval.manifest import feature_list, validate_frame, validate_manifest, write_manifest
 from eval.manifest import manifest_sha256 as _manifest_sha256
-from eval.matrix import validate_matrix
+from eval.matrix import TIMING_COLS, validate_matrix
 
 # --------------------------------------------------------------------- G0-BN constants
 # Staged dataset identities (docs/feature-manifest.md): development and holdout are
@@ -105,7 +105,6 @@ _LOGICAL_ROWS_TAG = "model-matrix-logical-rows-v1"
 _BUILD_ID_TAG = "model-matrix-build-v1"
 _PHYSICAL_SCHEMA_TAG = "model-matrix-physical-schema-v1"
 
-_TIMING_COLS = ("t_event", "t_barrier", "t_feature_start", "t_available")
 _FLOAT64_RESERVED = ("y_fwd_bps", "cost_bps", "half_spread_bps", "uniqueness")
 
 # Binding binary64 reconciliation tolerance (spec §8.2 math.isclose policy).
@@ -376,6 +375,12 @@ def logical_row_sha256(frame: pd.DataFrame, ordered_cols) -> str:
     for key in ("t_event", "horizon"):
         if key not in frame.columns:
             raise ValueError(f"logical_row_sha256: frame lacks canonical sort key {key!r}")
+    categorical = [c for c in cols if isinstance(frame[c].dtype, pd.CategoricalDtype)]
+    if categorical:
+        # A categorical sorts by category order (not value) and byte-encodes via codes,
+        # so identical logical content would silently hash differently.
+        raise ValueError(f"categorical columns are not canonical-hashable: {categorical}; "
+                         "cast them to their value dtype before hashing")
     if frame.duplicated(subset=["t_event", "horizon"]).any():
         raise ValueError("duplicate (t_event, horizon) rows: the canonical row order "
                          "requires the producer's uniqueness invariant")
@@ -530,7 +535,7 @@ def _check_write_schema(frame: pd.DataFrame, manifest: dict) -> None:
         if str(frame[c].dtype) != "float64":
             raise ValueError(f"feature column {c!r} must be float64 (binary64) exactly, "
                              f"got {frame[c].dtype}")
-    for c in _TIMING_COLS:
+    for c in TIMING_COLS:
         if str(frame[c].dtype) != "int64":
             raise ValueError(f"timing column {c!r} must be int64 nanoseconds exactly, "
                              f"got {frame[c].dtype}")
@@ -541,8 +546,10 @@ def _check_write_schema(frame: pd.DataFrame, manifest: dict) -> None:
     if str(frame["label"].dtype) != "int64":
         raise ValueError(f"label must be int64, got {frame['label'].dtype}")
     for c in ("regime", "horizon"):
-        if pd.api.types.is_numeric_dtype(frame[c]):
-            raise ValueError(f"{c!r} must be a string tag column, got {frame[c].dtype}")
+        if (pd.api.types.is_numeric_dtype(frame[c])
+                or isinstance(frame[c].dtype, pd.CategoricalDtype)):
+            raise ValueError(f"{c!r} must be a plain string tag column (categoricals "
+                             f"break canonical ordering), got {frame[c].dtype}")
     for col, spec in manifest.get("dtypes", {}).items():
         if frame[col].dtype != pd.api.types.pandas_dtype(spec):
             raise ValueError(f"dtype mismatch for {col!r}: manifest pins {spec}, frame "

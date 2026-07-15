@@ -12,7 +12,7 @@ from datetime import datetime
 import pandas as pd
 
 from eval.hashing import hash_obj
-from eval.matrix import RESERVED
+from eval.matrix import RESERVED, TIMING_COLS
 
 MANIFEST_VERSION = 1
 
@@ -30,7 +30,7 @@ LEAKY_NAME_PATTERNS = ("fwd", "future", "forward", "barrier", "label", "target",
 
 VENUE_ROLES = ("signal", "target")
 
-_TIMING_COLS = ("t_event", "t_barrier", "t_feature_start", "t_available")
+_TIMING_COLS = TIMING_COLS
 # Required in the frame even when targets are optional: the timing/horizon checks need them.
 _STRUCTURAL_COLS = frozenset(_TIMING_COLS) | {"horizon"}
 
