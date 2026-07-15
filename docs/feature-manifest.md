@@ -20,7 +20,10 @@ standard). Code: `eval/manifest.py`. Tests: `tests/test_manifest.py`.
   gate E0.1, `tests/test_reconstruct_no_lookahead.py`), not the manifest's.
 - **Reproducibility.** A manifest pins the dataset/build IDs, bar clock, venues,
   horizons, and source artifacts that produced the matrix, plus a generation
-  timestamp — a training run is reconstructable from the manifest alone.
+  timestamp. Ordinary builds are reconstructable from the manifest and its
+  referenced artifacts. A consumed G0-BN holdout is audit-reproducible but not
+  re-executable: its manifest also reconciles the frozen plan, stable
+  transaction, two claims, and materialization attestation.
 
 ## Schema (v1)
 
@@ -39,7 +42,7 @@ Required fields:
 | `horizons` | Tag → physical duration in ns (e.g. `{"10s": 10000000000}`); matches the per-row `horizon` tag. |
 | `sources` | Source artifacts/versions (e.g. `crypto-lake/book_delta_v2`). |
 | `generated_at` | ISO-8601 timestamp with explicit timezone. |
-| `max_lookback_ns` / `embargo_ns` | Longest feature look-back and CV embargo; `embargo_ns >= max_lookback_ns`. |
+| `max_lookback_ns` / `embargo_ns` | Longest retained feature look-back/observation delay and CV embargo. For G0-BN, `t1=t_barrier` already carries actual label span; embargo starts after `t_barrier` and `max_lookback_ns = max_retained(t_event-t_feature_start)` after over-cap rows are dropped. Thus `embargo_ns = max_lookback_ns`; never add the nominal horizon again. Schema validation remains `embargo_ns >= max_lookback_ns`. |
 
 ## Staged Dataset Modes
 
@@ -49,9 +52,12 @@ add an inferred mode field. Dataset capability is explicit in `dataset_id`,
 
 - **`binance_single_venue` (`G0-BN`):** one `venues` entry for
   `BINANCE_FUTURES/BTC-USDT-PERP` (role may be omitted because the same
-  instrument supplies features and targets); only certified Binance L2/trade
-  sources; Binance-specific labels and costs; no Coinbase, spot, auxiliary
-  derivatives, or other-asset feature columns.
+  instrument supplies features and targets); only #64-certified, #68-sealed,
+  allowlisted Binance Futures L2 snapshot/delta and trade sources;
+  Binance-specific labels and costs; no Coinbase/CoinAPI, spot, other
+  assets/perpetuals, funding/OI/liquidations/basis, extra state feeds, or
+  source-derived feature columns. Validate this exact template before parquet
+  access wherever the API controls loading.
 - **Conditional increment manifests:** add spot, derivatives state, Coinbase,
   or another asset only through a new manifest/build. Never mutate the
   `binance_single_venue` feature list or zero-fill an unavailable source.
@@ -62,8 +68,68 @@ add an inferred mode field. Dataset capability is explicit in `dataset_id`,
 
 `G0-BN` development and January OOS are physically/logically separate builds.
 The development manifest's complete guarded support ends before
-`2026-01-01T00:00:00Z`; the sealed OOS build is not opened before candidate,
-cost, threshold, and trial-ledger freeze.
+`2026-01-01T00:00:00Z`. A #68 custodian identity/permission boundary distinct
+from the developer/experiment operator may already own and seal the exact
+January raw and normalized source objects; operator-run `chmod` is insufficient.
+The OOS matrix and manifest **do not exist** before the outcome-blind holdout
+plan, complete freeze, data-free preflight/refit, and raw-access burn. #69's
+sole blind materializer creates them once, closes them, and attests their actual
+manifest/logical-row/matrix-file/build/count/schedule hashes. The logical-row
+hash is the modeling-content identity; the matrix-file hash protects the one
+physical holdout artifact but is audit-only for model/trial identity. Only then
+does the separate matrix-access burn occur, before the sole scorer first
+reopens the derived matrix/parquet/footer to validate and score. Any failure
+after either burn is terminal INCONCLUSIVE.
+
+### G0-BN protocol bindings
+
+Manifest v1 needs no new top-level key: its structured `sources` entries carry
+the bindings, and the
+[`G0-BN binding spec`](superpowers/specs/2026-07-13-g0bn-protocol.md)
+validates their exact fields. Every G0-BN manifest contains exactly one source
+dict whose `name` is each of:
+
+- `partition_contract`: `schema=g0bn-partition-plan-v1`, its hash, and
+  `partition` equal to `development` or `holdout`;
+- `g0bn_protocol`: `protocol=g0bn-v1`, protocol-config hash, source
+  certification hash, instrument identity, and horizon-role hash.
+
+The blind-materialized holdout manifest additionally contains exactly one source
+dict with `name=g0bn_holdout_plan`, `protocol=g0bn-one-shot-v1`,
+`consumption_schema=g0bn-consumption-v1`, the stable
+`g0bn-holdout-universe-v1` universe ID, transaction ID, holdout-plan hash, and
+freeze hash. The universe ID depends only on `g0bn-v1`, the exact instrument,
+and fixed January/February bounds; pilot/config/freeze/source/plan/result values
+cannot mint another transaction. Its dataset ID is exactly
+`binance_single_venue_g0bn_oos`. Development uses
+`binance_single_venue_g0bn_dev` and must not carry a holdout-plan binding.
+
+The G0-BN freeze pins the development manifest/content and outcome-blind
+`holdout_plan_sha256`; that hash enters the future OOS build parameters and
+breaks the build/freeze identity cycle. The freeze contains no fictional
+January `build_id` or manifest/logical-row/matrix-file hash, nor any row/drop
+count, realized adaptive schedule/state, or result. Those values are first
+derived and attested
+by blind materialization. Removing or renaming a binding changes the
+manifest/config hashes and cannot turn a holdout build into a generic one.
+
+Every G0-BN development and holdout manifest also lists
+`latency_drift_bps` in `extra_cols`. Its `dtypes` map must contain
+`cost_bps: float64`, `half_spread_bps: float64`, and
+`latency_drift_bps: float64` for those cost fields, and the matrix stores each
+as Parquet/Arrow binary64 (`double`) without a float32 downcast. The actual
+frame dtypes must match before write and again after read. `latency_drift_bps`
+is finite and non-negative and is a required non-feature diagnostic, not a
+model input or target. T7's reserved `cost_bps` remains the realized non-spread
+cost
+`2*taker_fee_bps + base_slippage_bps + latency_drift_bps`. The dedicated G0-BN
+scorer derives the decision cost as `cost_bps - latency_drift_bps`, reconciles
+it to the frozen `2*taker_fee_bps + base_slippage_bps` under the binding
+binary64 tolerance, and uses only that decision cost plus the observable spread
+and frozen margin for the trade mask.
+It charges the full realized `cost_bps` to net PnL. Missing, non-finite,
+negative, or inconsistent drift diagnostics fail the one-shot transaction
+INCONCLUSIVE; the legacy generic evaluator contract is unchanged.
 
 Optional: `extra_cols` (explicitly allowed diagnostics columns), `dtypes`
 (column → dtype expectations), `availability_lag_ns` (allowed `t_available -
@@ -99,6 +165,18 @@ and the CLI (`eval.runner.resolve_gate`); JEPA pretraining manifests may omit
 it and will consume the same manifest with
 `validate_frame(df, man, require_targets=False)` (label columns may be absent
 for unsupervised pretraining; everything else still applies).
+
+**G0-BN holdout exception:** generic baseline APIs/CLIs are not transaction
+entry points. #67 adds a manifest-only preflight before any parquet loader. It
+rejects a `partition_contract.partition == holdout`, a
+`g0bn_holdout_plan` binding, `dataset_id == binance_single_venue_g0bn_oos`, or
+an ambiguous/missing partition binding on a G0-BN manifest. The in-memory
+`run_from_manifest(matrix, manifest)` rejects the same manifests immediately;
+callers are not authorized to preload one. There is no override flag. The
+dedicated `g0bn-one-shot-v1` scorer alone may call lower-level scoring
+primitives, and only after its distinct matrix-access burn. The blind
+materializer is separately gated by the raw-access burn and does not call the
+scorer or reopen its output.
 
 ## Validation behavior (fail closed)
 

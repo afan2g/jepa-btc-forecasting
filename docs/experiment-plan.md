@@ -2,7 +2,11 @@
 
 > **Altitude:** This is the experiment/milestone **roadmap** — the sequence of experiments, each with a quantitative **gate** and a **decision**. It is not line-level code. Each phase below will get its own detailed TDD implementation plan (`docs/superpowers/plans/…`) when we execute it.
 >
-> **Companions:** [`jepa_btc_forecasting_spec.md`](../jepa_btc_forecasting_spec.md) (the design) and [`docs/literature-review.md`](literature-review.md) (the evidence). Section refs like "§5.4" point to the spec; "LR §3" points to the literature review.
+> **Companions:** [`jepa_btc_forecasting_spec.md`](../jepa_btc_forecasting_spec.md)
+> (the design), [`docs/literature-review.md`](literature-review.md) (the
+> evidence), and the binding
+> [`G0-BN protocol`](superpowers/specs/2026-07-13-g0bn-protocol.md). Section
+> refs like "§5.4" point to the spec; "LR §3" points to the literature review.
 
 **Goal:** Determine — as cheaply and honestly as possible — whether there is a cost-surviving short-horizon BTC signal, and whether CF-JEPA pretraining adds edge over a strong supervised baseline; ship whichever model wins.
 
@@ -34,8 +38,14 @@ experiment, not automatic expansion. Fail formal **G1** → stop or pivot; fail
 **G3** → ship LightGBM; fail **G5** → ship the simpler model.
 
 **Cross-cutting discipline (applies to every modeling screen/gate from Phase 0S on):**
-- **Pre-register** labels, CV scheme, no-trade-band rule, and primary metric before touching the held-out OOS month. Every post-hoc tweak is a new "trial" and must enter the DSR trial count `N`. (LR §6)
-- **Every predictivity claim is reported as a LIFT over a persistence/identity baseline**, OOS, under purged+embargoed CPCV. (LR §1, §3)
+- **Pre-register** the certified source, producer/clock, ordered features,
+  labels, CV, horizons/roles, exclusions, real fee/slippage/latency block,
+  no-trade rule, candidates with full resolved parameters, thresholds, and OOS
+  plan before touching the held-out OOS month. Every post-hoc tweak is a new
+  trial and must enter the protocol-specific DSR trial count `N`. (LR §6)
+- **Every predictivity claim is reported as a LIFT over a persistence/identity
+  baseline**: development estimates use purged/embargoed CPCV, and a fixed
+  holdout estimate uses its frozen one-shot OOS contract. (LR §1, §3)
 - **Stratify all results by spread/tick and volatility regime** — never report a single pooled number. (LR §4, LOBFrame)
 - **Track effective `N`** (cluster correlated trials) for the Deflated Sharpe Ratio. (LR §6)
 
@@ -43,38 +53,108 @@ experiment, not automatic expansion. Fail formal **G1** → stop or pivot; fail
 
 ## Phase 0S — Bounded Binance single-venue signal gate
 
-**Binding protocol:** [`docs/superpowers/plans/2026-07-10-staged-signal-acquisition.md`](superpowers/plans/2026-07-10-staged-signal-acquisition.md).
+**Binding protocol:** the acquisition order is in
+[`2026-07-10-staged-signal-acquisition.md`](superpowers/plans/2026-07-10-staged-signal-acquisition.md);
+the executable config/freeze/access/metric contract is
+[`2026-07-13-g0bn-protocol.md`](superpowers/specs/2026-07-13-g0bn-protocol.md).
 
 The first signal question uses one exchange, one instrument, and two source
 products. It does not require Coinbase, Binance spot, auxiliary derivatives,
 other assets, or a deep model.
 
+G0-BN's pre-loader validator permits exactly one
+`BINANCE_FUTURES/BTC-USDT-PERP` venue and #64-certified allowlisted L2
+snapshot/delta and trade sources. It rejects Coinbase/CoinAPI, spot, other
+assets or perpetuals, funding/OI/liquidations/basis, and any extra state/source
+feature before parquet access wherever the API controls loading.
+
 1. **Source gate (#64):** certify Crypto Lake or CryptoHFTData for Binance
    BTC-USDT perpetual with independent, bounded reconstruction evidence.
-2. **Bounded data (#68):** acquire and certify only L2 snapshots/deltas and
-   trades for `2025-11-01..2026-01-31`.
-3. **Producer/evaluator (#67):** emit explicit `binance_single_venue` manifests,
-   Binance labels/costs, and a fixed-OOS workflow.
-4. **G0-BN (#69):** use `2025-11-01..2025-12-31` for development/CPCV and
-   `2026-01-01..2026-01-31` as untouched OOS. Before any forward read, drop a
-   development row unless its complete guarded support ends before
-   `2026-01-01T00:00:00Z`; January labels may not consume February.
+2. **Producer/evaluator (#67):** implement source-isolated
+   `binance_single_venue` production plus distinct `g0bn-*` config, ledger,
+   freeze, holdout-universe/plan, raw- and matrix-access claims, consumption,
+   materialization-attestation, one-shot, and report identities. Preserve
+   existing G0-CB/G0-XV behavior as regression coverage.
+3. **Bounded data (#68):** acquire only L2 snapshots/deltas and trades for
+   `2025-11-01..2026-01-31`. A custodian identity/permission boundary distinct
+   from the developer/experiment operator seals the exact January raw and
+   certified normalized objects and publishes only activity-obscuring,
+   outcome-blind inventory metadata. Variable-length byte sizes and record
+   counts stay inside custody until after the raw-access burn. Operator-run
+   `chmod` is not custody.
+4. **G0-BN (#69):** use `2025-11-01..2025-12-31` for all calibration,
+   development/CPCV trials, deterministic selection, config, holdout plan, and
+   freeze. `holdout_plan_sha256` is outcome-blind and enters the future build
+   recipe; the freeze contains no January build/manifest/row hash, count,
+   realized schedule/state, or result. #69 first holds the transaction-derived
+   nonblocking process-owner lock. A concurrent live invocation exits
+   `transaction_already_running` without reading claims/data or mutating the
+   journal; only a later lock owner may classify a post-burn nonterminal state
+   as crash-left INCONCLUSIVE. After data-free refit/preflight, the stable
+   transaction first atomically burns raw access before any January raw/
+   normalized object/payload/footer read. The sole blind materializer then
+   writes and attests the actual build. Only after it completes does a separate
+   atomic matrix-access burn occur, before the sole scorer first opens the
+   derived matrix/parquet/footer to validate and score. January labels may not
+   consume February. Any failure after either burn is terminal INCONCLUSIVE.
 
-The fixed baseline ladder is: persistence/no-change, microprice displacement,
-penalized linear OFI, then LightGBM. Inputs are own-venue L2 book and trades;
-2 s and 10 s are primary horizons and 60 s is a decay/control arm. All variants
-share one immutable trial ledger.
+`holdout_universe_id` hashes only `g0bn-v1`, the exact
+`BINANCE_FUTURES/BTC-USDT-PERP` instrument object, and the fixed January start/
+February end bounds. Pilot/config/freeze/source/plan/result changes cannot mint
+a second transaction over those outcomes.
 
-Decision outcomes:
+The exact candidate IDs at each horizon are `persistence_zero` (no change),
+`microprice_raw` (raw microprice displacement), `ofi_ridge`
+(uniqueness-weighted OFI-only Ridge), `lgbm_reg` (full-feature LightGBM
+regression), and `lgbm_clf` (full-feature LightGBM classification). They produce
+exactly 15 initial trial identities across 2 s, 10 s, and 60 s; ordered inputs,
+full resolved parameters, seeds/threads, preprocessing, and code/software hashes
+are identity-bearing. Unique aborted or changed variants remain append-only in
+a separate G0-BN ledger; exact deterministic retries are idempotent and cannot
+inflate the effective trial count. Both 2 s and 10 s are co-primary; 60 s is
+unselected control-only and cannot authorize, select, or rescue.
+The classifier converts its signed probability difference to bps with the
+unweighted NumPy float64 population standard deviation (`ddof=0`) of that
+fold's purged training `y_fwd_bps`, plus exactly `1e-9`; uniqueness weights fit
+the classifier but do not enter this scale.
 
-- **PASS / tradeable:** stable OOS persistence lift and positive preregistered
-  net performance authorize the next incremental-data gate.
-- **PREDICTIVE_NOT_TRADEABLE:** stable predictive lift but no taker-cost edge;
-  stop broad expansion pending a human-approved fair-value/maker experiment.
-- **FAIL:** no stable predictive lift; stop Coinbase, cross-venue, multi-asset,
+Lift is `sum(u*(y^2-(y-f)^2))/sum(u*y^2)`, exactly
+`1-weighted_SSE_model/weighted_SSE_zero`; a zero/non-finite denominator is
+INCONCLUSIVE. Development selection uses the deterministic paired circular
+two-day moving-block bootstrap (`10,000` replicates, NumPy PCG64 seed `0`,
+linear percentiles) with one-sided Bonferroni `alpha=0.05/8`: prefer a
+predictive/PBO/integrity-eligible candidate with positive net lower bound, else
+choose by positive lift lower bound under frozen tie-breaks. OOS uses
+`alpha=0.05/2`; each evaluated horizon requires at least 20 UTC days and
+`sum(uniqueness)>=100`, with no row-IID fallback. Both primaries need a positive
+lift lower bound; PASS additionally requires at least one primary to have a
+positive mean-daily-net lower bound plus frozen trade, DSR, and PBO gates.
+With `n_groups=6,k=2`, each development row's five repeated CPCV test forecasts
+collapse by the binding ordered float64 arithmetic mean before any lift, net,
+bootstrap, DSR, PBO, or selection calculation; each original row is scored once.
+DSR converts finite non-negative effective trades to
+`T=max(2,int(numpy.rint(numpy.float64(effective_trades))))`, with nearest/even
+half ties. PBO orders the five base candidates as listed above, then other
+successful lowercase SHA-256 trial IDs ascending; exact IS ties select the
+first maximum, and the OOS rank count includes every column whose mean is less
+than or equal to the selected column before division by `n_columns + 1`.
+The terminal report includes paired lift/gross/net uncertainty,
+`decision_trade_rate`, MCC intervals and explicit undefined/degenerate reasons,
+DSR/PBO ledger/split/code provenance, tight/wide spread slices, and volatility
+slices whose statistic and edges were frozen on development.
+
+- **PASS / tradeable:** both primary horizons are predictive and at least one is
+  tradeable.
+- **PREDICTIVE_NOT_TRADEABLE:** both are predictive but neither clears taker
+  economics; stop broad expansion pending a human-approved fair-value/maker
+  experiment.
+- **FAIL:** the transaction is valid/sufficient but one or both required primary
+  horizons lack stable lift; stop Coinbase, cross-venue, multi-asset,
   full-archive, and JEPA work.
-- **INCONCLUSIVE:** data, leakage, cost, PBO, or reproducibility failure; repair
-  without replacing or reusing OOS.
+- **INCONCLUSIVE:** access, data, leakage, cost, PBO, sufficiency, or
+  reproducibility failure. Any failure after either burn is terminal; do not
+  rematerialize, run a validation-only or second score path, reuse January, or
+  select another holdout from its outcomes.
 
 After PASS, test increments one at a time on fixed target rows: Binance spot,
 then derivatives state, then low-cost Coinbase transfer/cross-venue data through
@@ -105,19 +185,19 @@ for the deferred cross-venue workflow; G0-BN never opens it.
 
 ### E0.3 — Notional bar sampler + the time-per-bar distribution
 - **Question:** What threshold gives ~0.5–2s bars in active regimes, and how wide is the time-per-bar spread?
-- **Setup:** Dollar bars off the trade stream, hybrid time cap, **adaptive threshold** (rolling 7–30d avg dollar-volume / target bars-per-day). Flag `emitted_by_time_cap`.
+- **Setup:** Dollar bars off the trade stream, hybrid time cap, and a trailing/as-of **adaptive threshold** (prior-day average dollar volume / target bars per day). Development must resolve the exact lookback, target, cap, warm-up, coverage rule, schedule, and development-end state; no range/default can enter the freeze. Freeze the causal January update rule and development-end state, not unknowable January thresholds. Blind materialization attests the realized January schedule. Flag `emitted_by_time_cap`.
 - **GATE (E0.3):** Median active-regime bar ≤ 2s (so the 2s horizon ≈ a few bars). Produce the **log-scale time-per-bar histogram** — this plot is itself the justification for §5.4 and belongs in the writeup.
 - **Deliverable:** `bars/` sampler; the histogram artifact.
 - **Refs:** §5.1–5.2; LR §5.
 
 ### E0.4 — Labels + purged/embargoed CPCV + uniqueness weighting
-- **Setup:** Triple-barrier with **vol-scaled** horizontal barriers (EWMA of micro-window returns), vertical barrier = physical horizon, labels off **mid/microprice (never last-trade)**. Purge label **spans** (not rows); **embargo ≥ max(label horizon, longest feature look-back)**; CPCV for a distribution of OOS metrics; sample-uniqueness weighting / sequential bootstrap.
+- **Setup:** Triple-barrier with **vol-scaled** horizontal barriers (trailing EWMA of micro-window returns), vertical barrier = physical horizon, and G0-BN labels off **mid (never last-trade)**. The EWMA half-life and TP/SL multipliers remain required evidenced operator values; freeze fails rather than inventing them. Purge label **spans** (not rows) using `t0=t_event`, `t1=t_barrier`; `t1` already contains the actual label span. Start embargo after `t_barrier` and set **`embargo_ns = max_retained(t_event-t_feature_start)`** after over-cap rows are dropped. Do not add the nominal horizon again; partition/source guards remain separate. Use CPCV for a distribution of OOS metrics and same-horizon sample-uniqueness weighting / sequential bootstrap.
 - **GATE (E0.4):** A deliberately-leaky control (random k-fold, no purge) must show inflated CV vs the purged/embargoed pipeline — proves the leakage controls actually bite.
 - **Deliverable:** `data/` labels + CV module; leakage-control unit test.
 - **Refs:** §8; LR §6.
 
 ### E0.5 — Cost model + no-trade-band PnL + DSR/PBO evaluator
-- **Setup:** Net PnL charging **2×taker fee + half-spread + slippage**; no-trade band = round-trip cost + margin. Report **gross vs net side-by-side**. Add **MCC** (skill vs monetizability), **Deflated Sharpe Ratio**, **PBO via CSCV**. Honest taker fills (no passive-fill-at-mid assumption).
+- **Setup:** Net PnL charges **2×taker fee + 2×half-spread + base slippage + absolute observable-to-`t_event` mid drift** under T7's `abs_true_over_observable_mid_v1` policy. The G0-BN no-trade band uses only decision-time-observable/frozen **2×fee + 2×observable half-spread + base slippage + margin**; realized label-side latency drift affects the charged net result but never trade selection. Report **gross vs net side-by-side**. Add **MCC** (skill vs monetizability), **Deflated Sharpe Ratio**, **PBO via CSCV**. Honest taker fills (no passive-fill-at-mid assumption). G0-BN freezes the evidenced real Binance Futures scalar fee tier, aggregate base-slippage allowance, source identity, and no-trade margin; it has no guessed numeric default or unimplemented alternate latency/entry/exit model.
 - **GATE (E0.5):** Evaluator reproduces a known-zero-edge synthetic series as DSR≈0 / PnL≤0 (sanity that it isn't manufacturing edge).
 - **Deliverable:** `eval/` harness.
 - **Refs:** §10; LR §4, §6.
@@ -133,7 +213,10 @@ holdout; it is not permission to ignore a failed G0-BN.
 ### E1.1 — Measure τ (the decay window)
 - **Question:** At what horizon does microstructure directional predictability decay to noise?
 - **Setup:** Fit OFI/imbalance → future-return predictive R² (and trade-sign/OFI ACF, impact-decay) vs horizon from 0.5s to 120s.
-- **GATE/Output:** Empirical decay knee (literature expects ~10–30s; LR §5). **Set the horizon ladder from this** — confirm 2s/10s, add a ~20–30s rung, keep 60s as a decay/control arm.
+- **GATE/Output:** Empirical decay knee (literature expects ~10–30s; LR §5).
+  **Set the later formal-G1 ladder from this** — confirm 2s/10s, add a
+  ~20–30s rung, and keep 60s as a decay/control arm. This does not retroactively
+  add a trial to or change the frozen G0-BN `{2s,10s,60s}` protocol.
 - **Refs:** §5.4; LR §5.
 
 ### E1.2 — Feature engineering (the short list that carries signal)
