@@ -74,10 +74,12 @@ January raw and normalized source objects; operator-run `chmod` is insufficient.
 The OOS matrix and manifest **do not exist** before the outcome-blind holdout
 plan, complete freeze, data-free preflight/refit, and raw-access burn. #69's
 sole blind materializer creates them once, closes them, and attests their actual
-manifest/logical-row/matrix/build/count/schedule hashes. Only then does the
-separate matrix-access burn occur, before the sole scorer first reopens the
-derived matrix/parquet/footer to validate and score. Any failure after either
-burn is terminal INCONCLUSIVE.
+manifest/logical-row/matrix-file/build/count/schedule hashes. The logical-row
+hash is the modeling-content identity; the matrix-file hash protects the one
+physical holdout artifact but is audit-only for model/trial identity. Only then
+does the separate matrix-access burn occur, before the sole scorer first
+reopens the derived matrix/parquet/footer to validate and score. Any failure
+after either burn is terminal INCONCLUSIVE.
 
 ### G0-BN protocol bindings
 
@@ -105,8 +107,9 @@ cannot mint another transaction. Its dataset ID is exactly
 The G0-BN freeze pins the development manifest/content and outcome-blind
 `holdout_plan_sha256`; that hash enters the future OOS build parameters and
 breaks the build/freeze identity cycle. The freeze contains no fictional
-January `build_id`, manifest/matrix/logical-row hash, row/drop count, realized
-adaptive schedule/state, or result. Those values are first derived and attested
+January `build_id` or manifest/logical-row/matrix-file hash, nor any row/drop
+count, realized adaptive schedule/state, or result. Those values are first
+derived and attested
 by blind materialization. Removing or renaming a binding changes the
 manifest/config hashes and cannot turn a holdout build into a generic one.
 

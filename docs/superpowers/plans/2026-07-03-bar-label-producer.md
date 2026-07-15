@@ -212,7 +212,7 @@ The stable `g0bn-holdout-universe-v1` ID depends only on `g0bn-v1`, the exact
 instrument, and fixed January/February bounds; pilot/config/freeze/source/plan/
 result changes cannot mint another transaction. The freeze pins
 `holdout_plan_sha256`, which enters the future OOS build recipe, and contains no
-January build/manifest/matrix/logical-row hash, row/drop count, realized
+January build/manifest/logical-row/matrix-file hash, row/drop count, realized
 adaptive schedule/state, or result.
 
 #69 first acquires and holds the stable transaction's nonblocking process-owner
@@ -850,6 +850,10 @@ sorted keys.
   row values* + all build params** (NOT file bytes — pandas/pyarrow embed version-stamped
   `created_by`/`pandas_version` metadata, so byte-identity is environment-coupled; §I/#10), with
   `generated_at` EXCLUDED, `time: {unit: "ns", timezone: "UTC"}`.
+  G0-BN trial identity uses the corresponding
+  `development_logical_row_sha256`; a physical `matrix_file_sha256` may be
+  attested for custody but is audit-only and cannot change a trial ID, retry
+  identity, effective `N`, selection, or freeze.
 - `bar_clock: {kind: "dollar", reference_stream, target_bars_per_day,
   time_cap_ns, warmup_days, threshold_schedule (per-day values or named
   artifact path) + threshold_schedule_hash, feed_lag_tail_ns,
@@ -1082,7 +1086,8 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   work; an active duplicate exits `transaction_already_running` without reading
   claims/data or mutating the journal. Raw claim `O_EXCL` + file/directory fsync
   precede the first sealed source/footer read; blind materialization closes and
-  attests actual build/manifest/matrix/count/schedule hashes without reopening;
+  attests actual build/manifest/logical-row/matrix-file/count/schedule hashes
+  without reopening;
   matrix claim `O_EXCL` + fsync then precedes the scorer's first derived matrix/
   parquet/footer read. A pre-burn owner death is retryable, while only a later
   lock owner classifies a crash-left post-burn nonterminal state INCONCLUSIVE.
@@ -1090,10 +1095,10 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   after either burn all leave terminal INCONCLUSIVE, with no intermediate
   resumption path.
 - **Freeze/statistics/report:** a read spy proves freeze construction opens no
-  January payload/footer and rejects January build/manifest/matrix/logical-row
-  hashes, counts, realized schedule/state, or results. Hand-computed fixtures
-  cover the exact uniqueness-weighted persistence-lift formula, zero
-  denominator, paired circular two-day PCG64 bootstrap, `0.05/8` development
+  January payload/footer and rejects January build/manifest/logical-row and
+  matrix-file hashes, counts, realized schedule/state, or results.
+  Hand-computed fixtures cover the exact uniqueness-weighted persistence-lift
+  formula, zero denominator, paired circular two-day PCG64 bootstrap, `0.05/8` development
   and `0.05/2` OOS tails, ≥20-day/`sum(u)>=100` sufficiency, trade-first then
   predictive-only selection, DSR nearest/even effective-trade rounding,
   canonical PBO columns with first-maximum IS and less-than-or-equal OOS ties,
@@ -1104,7 +1109,9 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   `generated_at`** ⇒ **identical canonical logical rows and identical `build_id`** (the timestamp
   is excluded from the hash) — assert **logical-row equality**, not raw parquet bytes (which are
   pyarrow/pandas-version-coupled unless writer options are pinned, §I); the manifests differ only
-  in `generated_at`.
+  in `generated_at`. A second fixture varies only physical Parquet metadata and
+  proves the G0-BN logical-row hash, trial ID, and effective `N` stay identical
+  while `matrix_file_sha256` may differ as audit-only evidence.
 
 **Tier 2 — real-data (not a routine test; #69 only after source certification):**
 the bounded development data produces the E0.3 median-bar histogram, the fixed
@@ -1169,7 +1176,7 @@ branch or holdout route. Suggested implementation branch names remain in
 | **T6** `feat/labels-uniqueness-cv` | **Built by #75/#76.** Concurrency uniqueness per horizon, retained-lookback cap/embargo sizing, and the E0.4 leakage-control gate. | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py`, `tests/test_uniqueness.py` | **Done** |
 | **T7** `feat/bars-cost` | **Built by #82/#84.** Per-row `cost_bps = 2*taker_fee_bps + base_slippage_bps + abs(true_t_event_mid/observable_mid-1)*1e4` under `abs_true_over_observable_mid_v1`, plus `half_spread_bps` from the observable target book and the separate `latency_drift_bps` diagnostic. The strict `CostAssumption` pins venue/product/source/version, scalar fee, scalar base slippage, and drift policy; G0-BN additionally freezes fee applicability/evidence and no-trade margin. One-sided book → drop; never reuse Coinbase costs. | `bars/cost.py`, G0-BN spec §3/§8 | `tests/test_bars_cost.py` | **Done**; operator values #69 |
 | **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit ordered `feature_cols`; staged identities; G0-BN requires `latency_drift_bps` as a typed non-feature diagnostic in `extra_cols` and exact float64 `dtypes` entries for it, `cost_bps`, and `half_spread_bps`; emit exactly one source dict each with `name=partition_contract` and `name=g0bn_protocol`; holdout additionally requires exactly one `name=g0bn_holdout_plan` binding with stable-universe/transaction/plan/freeze pins. Development/rebuildable modes run `validate_frame` + `validate_matrix` before write; holdout formal validation is deferred until after the matrix-access burn. Generic manifest preflight recognizes bindings before load. | `eval/manifest.py`, `eval/matrix.py:validate_matrix`, #67-A/D | manifest writer + binding/isolation/round-trip/bad-row tests | Pre |
-| **T9** `feat/producer-orchestrator` | End-to-end day-partitioned materialization with explicit source modes, certified allowlists, source-specific replay, masks, and pre-label support cutoffs. It persists T7's realized `cost_bps`, observable `half_spread_bps`, and non-feature `latency_drift_bps` separately as explicit Parquet/Arrow binary64 columns and attests the physical schema. Development may run normally. G0-BN holdout accepts only the exact frozen #68-custodian raw/normalized L2+trade allowlist plus matching durable `g0bn-raw-access-claim-v1`; no ranges/globs/fallbacks or precomputed January counts. It streams once, closes/fsyncs outputs, computes actual logical-row/matrix/manifest/build/count/schedule hashes, writes/fsyncs `g0bn-materialization-attestation-v1`, and never reopens a derived artifact. **Acceptance:** strict Binance isolation, no boundary crossing, all horizons survive, deterministic logical production, and read spies prove no source opens before raw burn and no derived output reopens in materialization. | T1–T8, #67-A/C/E, source certification/custody artifacts | `bars/produce.py` + isolation/two-burn/partition/determinism tests | Pre (synthetic fixtures) |
+| **T9** `feat/producer-orchestrator` | End-to-end day-partitioned materialization with explicit source modes, certified allowlists, source-specific replay, masks, and pre-label support cutoffs. It persists T7's realized `cost_bps`, observable `half_spread_bps`, and non-feature `latency_drift_bps` separately as explicit Parquet/Arrow binary64 columns and attests the physical schema. Development may run normally. G0-BN holdout accepts only the exact frozen #68-custodian raw/normalized L2+trade allowlist plus matching durable `g0bn-raw-access-claim-v1`; no ranges/globs/fallbacks or precomputed January counts. It streams once, closes/fsyncs outputs, computes actual logical-row/matrix-file/manifest/build/count/schedule hashes, writes/fsyncs `g0bn-materialization-attestation-v1`, and never reopens a derived artifact. **Acceptance:** strict Binance isolation, no boundary crossing, all horizons survive, deterministic logical production, and read spies prove no source opens before raw burn and no derived output reopens in materialization. | T1–T8, #67-A/C/E, source certification/custody artifacts | `bars/produce.py` + isolation/two-burn/partition/determinism tests | Pre (synthetic fixtures) |
 | **T10 / #69** (operational; no worker branch) | Use November–December only for source/clock/label/calibration decisions; then seal the final v1 operator config **before** registering or executing any candidate. Run the exact 15-entry base ledger plus append-only execution history; log/count but never select any off-protocol identity; select only primary candidates; build outcome-blind `g0bn-holdout-plan-v1` then `g0bn-freeze-v1`; perform data-free refit/preflight; atomically burn raw access; invoke T9 once and attest actual hashes; atomically burn matrix access; only then validate and score with #67's observable decision-cost mask/full realized-cost charge, then emit PASS, PREDICTIVE_NOT_TRADEABLE, FAIL, or INCONCLUSIVE. Any failure after either burn is terminal. No τ rung and no legacy G0-XV identity. | T7–T9, #64, #68, all #67 slices | E0.3/E0.5 artifacts + terminal `g0bn-report-v1` or INCONCLUSIVE consumption record | **#69 only** |
 
 ---

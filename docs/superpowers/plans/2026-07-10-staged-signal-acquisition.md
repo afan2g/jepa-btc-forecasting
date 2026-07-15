@@ -218,16 +218,16 @@ The coherent sequence is:
    fixed January/February bounds—not pilot/config/freeze/source/plan/results.
 3. An outcome-blind `holdout_plan_sha256` is built before January
    materialization and enters the future build recipe; `g0bn-freeze-v1` pins
-   that plan but contains no January build ID, manifest/matrix/logical-row hash,
-   row/drop count, realized schedule/state, or result.
+   that plan but contains no January build ID, manifest/logical-row/matrix-file
+   hash, row/drop count, realized schedule/state, or result.
 4. #69 acquires and holds the stable transaction's nonblocking process-owner
    lock across all outcome-capable work, then completes data-free preflight/
    refit and atomically creates/fsyncs the raw-access burn before the first
    January raw/normalized object/payload/footer read. A concurrent live start
    exits `transaction_already_running` without reading claims/data or mutating
    the journal. Its sole blind materializer writes once and attests the actual
-   manifest/matrix/build/count/schedule hashes without reopening the derived
-   artifacts.
+   manifest/logical-row/matrix-file/build/count/schedule hashes without
+   reopening the derived artifacts.
 5. Only after that materialization completes does #69 atomically create/fsync
    the separate matrix-access burn, before the sole scorer first opens the
    derived matrix/parquet/footer to validate and score.
@@ -278,11 +278,12 @@ The producer emits explicit builds:
 - `binance_single_venue_g0bn_dev`: November-December Binance-perpetual features,
   Binance labels/costs, and no January or optional-source access.
 - `binance_single_venue_g0bn_oos`: does not exist before the freeze and
-  raw-access burn. #69
-  materializes it once from the holdout plan's exact sealed raw/normalized
-  allowlist after the raw-access burn, then attests its actual manifest,
-  logical-row, matrix, build, count, and realized-state hashes. The scorer opens
-  it only after the separate matrix-access burn.
+  raw-access burn. #69 materializes it once from the holdout plan's exact sealed
+  raw/normalized allowlist after the raw-access burn, then attests its actual
+  manifest, logical-row, matrix-file, build, count, and realized-state hashes.
+  Logical-row content is the modeling identity; the physical matrix-file hash
+  is audit-only and cannot enter a development trial ID or effective trial
+  count. The scorer opens it only after the separate matrix-access burn.
 - conditional increment builds: matched-row base and augmented manifests whose
   feature lists differ but whose row IDs, reserved columns, labels, costs,
   horizons, and splits are identical.

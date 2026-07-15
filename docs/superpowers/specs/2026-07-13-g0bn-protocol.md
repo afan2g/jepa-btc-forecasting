@@ -84,9 +84,10 @@ provider, each exact native product/object ID, raw and normalized schema
 versions, timestamp/sequence/gap rules, source-certification hash, #68
 custodian-seal hash, and development processed-source hashes. The holdout plan
 pins the exact sealed January raw/normalized object allowlist. January modeling
-matrix/content hashes do not exist until blind materialization and enter only
-the materialization attestation and terminal journal/report. Silent provider
-fallback, a non-allowlisted object, or day-level source mixing is forbidden.
+logical-row and matrix-file hashes do not exist until blind materialization and
+enter only the materialization attestation and terminal journal/report. Silent
+provider fallback, a non-allowlisted object, or day-level source mixing is
+forbidden.
 
 Manifest/source validation runs before any source or matrix parquet access
 where the API still controls loading. It rejects a second venue; Coinbase or
@@ -150,8 +151,17 @@ Every other G0-BN JSON artifact uses that canonical encoding too. Its embedded
 artifact hash excludes exactly itself and a top-level `generated_at` when the
 schema permits that field; all other fields remain hash-bearing. Candidate and
 transaction IDs hash the exact identity objects shown below rather than a
-container carrying the resulting ID. Binary matrix/source hashes use their
-declared byte-level algorithms and are never substituted with JSON hashes.
+container carrying the resulting ID. Immutable source blobs and the one-shot
+holdout Parquet file use separately named, declared byte-level hashes such as
+`matrix_file_sha256`. A modeling matrix used by a candidate, trial, ledger,
+development selection, DSR/PBO input identity, or freeze instead uses the
+producer's canonical logical-row/content hash, named `*_logical_row_sha256`;
+Parquet metadata, row-group layout, compression, and writer version cannot
+change it. A physical matrix-file hash is audit/custody evidence only and never
+enters a G0-BN trial ID or effective trial count. A G0-BN manifest never embeds
+its own `matrix_file_sha256`; the one-shot holdout attestation/report may carry
+that hash, while an optional development file hash must remain outside every
+manifest, candidate result, ledger, selection, and freeze identity.
 
 Every referenced artifact carries an explicit SHA-256. A required operator or
 protocol decision may not be `null`, `TBD`, `UNRESOLVED`, or omitted when the
@@ -436,7 +446,7 @@ The G0-BN trial identity is the canonical hash of exactly:
   "development_dataset_id": "...",
   "development_build_id": "...",
   "development_manifest_sha256": "...",
-  "development_matrix_sha256": "...",
+  "development_logical_row_sha256": "...",
   "partition_plan_sha256": "...",
   "candidate_id": "...",
   "candidate_definition_sha256": "...",
@@ -461,7 +471,13 @@ The G0-BN trial identity is the canonical hash of exactly:
 
 The complete resolved parameter and preprocessing objects—not only their
 convenience hashes—are identity-bearing. Execution ordinals and timestamps are
-ledger-event fields, never trial-identity fields. The separate append-only
+ledger-event fields, never trial-identity fields.
+`development_logical_row_sha256` is computed over the exact manifest-ordered
+schema and canonical logical rows by the version/hash pinned in the config's
+`producer` block. `development_build_id` additionally binds those rows to all
+build parameters. Neither field is a hash of Parquet file bytes; a separately
+recorded development file hash is audit-only and excluded from the trial,
+ledger, selection, and freeze identities. The separate append-only
 ledger stores each identity plus a hash-chained execution-event history; records
 starts, aborts, and completions; rejects a conflicting completed result for an
 existing identity; and hashes both the ordered event history and canonical
@@ -489,7 +505,8 @@ strictly positive one-sided development mean-daily-net lower bound,
 `n_trades >= 30`, `sum_i u_i * trade_i >= 10`, and development `DSR > 0.95`.
 The DSR uses the complete effective ledger count; PBO uses the common
 chronological CPCV-OOS matrix and carries the ledger, split, metric-code, and
-input-matrix hashes.
+canonical input-matrix-content hashes; no physical file hash enters either
+metric identity.
 
 For each primary horizon, prefer the trade-eligible set. Choose its candidate
 by the descending tuple `(net_lower_bound, lift_lower_bound, point_net,
@@ -569,9 +586,10 @@ protocol config and before `g0bn-freeze-v1`. It contains:
 
 The plan specifies required drop-count categories and sufficiency comparisons,
 not their January values. The holdout `build_id`, manifest hash, logical-row
-hash, matrix hash, row/drop counts, realized threshold/normalizer schedules,
-and result values are deliberately absent: they do not exist until the sole
-blind materialization. The plan pins how each will be derived and attested.
+hash, matrix-file hash, row/drop counts, realized threshold/normalizer
+schedules, and result values are deliberately absent: they do not exist until
+the sole blind materialization. The plan pins how each will be derived and
+attested.
 
 ### 5.3 `g0bn-freeze-v1`
 
@@ -582,7 +600,8 @@ contains and pins:
 - selected candidate identity for each primary horizon and the unselected
   five-candidate 60 s control set;
 - complete G0-BN ledger/history hashes, effective trial count, development result hash,
-  development matrix/manifest/build hashes, split hash, DSR, and PBO evidence;
+  development logical-row/manifest/build hashes, split hash, DSR, and PBO
+  evidence;
 - source certification, raw seal, coverage, partition contract, producer code,
   and software hashes; and
 - exact verdict thresholds, bootstrap/tail rules, cost assumptions, exclusions,
@@ -591,11 +610,11 @@ contains and pins:
 The builder re-derives selection and ledger reconciliation. It rejects missing
 operator values, unknown keys, config drift, an unavailable PBO, an unsealed or
 non-custodial holdout scope, or any January outcome field. In particular, the
-freeze must not contain a January `build_id`, manifest/matrix/logical-row hash,
-modeling row/drop count, realized adaptive schedule/state, forecast, metric, or
-result. It contains `holdout_plan_sha256`, whose recipe will cause the future
-build to bind back to the plan. Thus no OOS outcome data is needed—or
-permitted—to build the freeze.
+freeze must not contain a January `build_id`, manifest hash, logical-row hash,
+matrix-file hash, modeling row/drop count, realized adaptive schedule/state,
+forecast, metric, or result. It contains `holdout_plan_sha256`, whose recipe
+will cause the future build to bind back to the plan. Thus no OOS outcome data
+is needed—or permitted—to build the freeze.
 
 ## 6. Protocol-specific one-shot transaction
 
@@ -723,7 +742,7 @@ The dedicated #69 runner performs, in order:
    raw/normalized objects and streams T9 once. It writes the OOS matrix and
    manifest whose build parameters bind `holdout_plan_sha256`; derives the
    frozen adaptive schedule/state causally; and computes the actual logical-row,
-   matrix-byte, manifest, physical-schema, build, count, and schedule hashes
+   matrix-file, manifest, physical-schema, build, count, and schedule hashes
    while producing the artifacts. It does not reopen the derived parquet/footer
    or score outcomes.
 5. Close and fsync all derived outputs, then atomically write and fsync
@@ -1007,14 +1026,14 @@ contains:
   partition/software hashes, both claim hashes, materialization-attestation
   hash, and the transaction history/state;
 - exact instrument, included/excluded days, source objects, raw seal, producer
-  version, actual OOS manifest/build/logical-row/matrix/physical-schema hashes,
-  row/drop counts, realized adaptive schedule/state hashes, and validation
-  checks;
+  version, actual OOS manifest/build/logical-row/matrix-file/physical-schema
+  hashes, row/drop counts, realized adaptive schedule/state hashes, and
+  validation checks;
 - the complete append-only trial count/history hash, primary selected
   identities/definitions, the five unselected 60 s controls, full resolved
   model/preprocessing/code/version hashes, ordered features, horizon roles,
-  and development DSR/PBO values with their ledger, split, matrix, metric-code,
-  and effective-trial-count provenance;
+  and development DSR/PBO values with their ledger, split, logical input-matrix,
+  metric-code, and effective-trial-count provenance;
 - per evaluated candidate/horizon: zero-persistence and candidate weighted loss,
   exact lift `L`, paired percentile interval and applicable one-sided lower
   bound, RMSE, MAE, mean/sum gross, fee, decision cost, spread, base slippage,
@@ -1105,7 +1124,10 @@ At minimum, #67's subissues include cheap tests for:
    Coinbase, spot, other assets, extra state feeds, non-allowlisted objects, and
    extra source features;
 2. canonical config/hash round trips, unknown/missing/TBD rejection, array-order
-   sensitivity, and tamper detection;
+   sensitivity, and tamper detection; two Parquet encodings with identical
+   canonical logical rows/build parameters but different physical metadata must
+   keep the same logical-row hash, build ID, trial IDs, and effective `N`, while
+   their differing matrix-file hashes remain audit-only;
 3. exactly 15 base trial identities with IDs `persistence_zero`,
    `microprice_raw`, `ofi_ridge`, `lgbm_reg`, and `lgbm_clf` at each horizon;
    empty-feature persistence identity; ordered feature/preprocessing/parameter/
@@ -1125,8 +1147,8 @@ At minimum, #67's subissues include cheap tests for:
    pinned ledger;
 6. freeze construction from development plus seal metadata with a read spy
    proving zero January loader calls; `holdout_plan_sha256` build binding; and
-   rejection of a January build/manifest/matrix/row hash, count, schedule/state,
-   or result field;
+   rejection of a January build/manifest/logical-row/matrix-file hash, count,
+   schedule/state, or result field;
 7. exact 31-day plan accounting, outcome-blind exclusions, symmetric partition
    bounds, stable universe/transaction IDs unchanged by config/freeze/source
    edits, and `embargo_ns=max_retained(t_event-t_feature_start)` after
