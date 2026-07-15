@@ -87,6 +87,10 @@ The first gate uses only:
   LightGBM classification). Ordered features, complete runtime-resolved
   parameters, seeds/threads, preprocessing, code, and software-version hashes
   are part of each trial identity.
+  `lgbm_clf` converts its signed probability difference to bps using the
+  unweighted NumPy float64 population standard deviation (`ddof=0`) of the
+  applicable purged training `y_fwd_bps`, plus exactly `1e-9`; uniqueness
+  weights affect fitting but not that scale.
 
 Funding, open interest, liquidations, Binance spot, Coinbase, and other assets
 are excluded from the first gate even when files are readily available.
@@ -126,7 +130,10 @@ are excluded from the first gate even when files are readily available.
   `abs_true_over_observable_mid_v1`, plus the frozen no-trade margin. The
   no-trade mask uses only the frozen fee/base allowance and observable spread;
   label-side realized drift is charged to net after selection and cannot affect
-  the mask. Report gross and net side by side plus
+  the mask. G0-BN manifests and Parquet store `cost_bps`,
+  `half_spread_bps`, and `latency_drift_bps` as exact float64/binary64 columns;
+  float32 is invalid under the frozen `1e-12` reconciliation. Report gross and
+  net side by side plus
   `decision_trade_rate=n_trades/n_valid_rows`.
 - Report paired persistence-lift uncertainty, gross/net uncertainty, MCC
   intervals with undefined/degenerate reasons, development DSR/PBO provenance,

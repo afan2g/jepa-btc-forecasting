@@ -113,6 +113,10 @@ are identity-bearing. Unique aborted or changed variants remain append-only in
 a separate G0-BN ledger; exact deterministic retries are idempotent and cannot
 inflate the effective trial count. Both 2 s and 10 s are co-primary; 60 s is
 unselected control-only and cannot authorize, select, or rescue.
+The classifier converts its signed probability difference to bps with the
+unweighted NumPy float64 population standard deviation (`ddof=0`) of that
+fold's purged training `y_fwd_bps`, plus exactly `1e-9`; uniqueness weights fit
+the classifier but do not enter this scale.
 
 Lift is `sum(u*(y^2-(y-f)^2))/sum(u*y^2)`, exactly
 `1-weighted_SSE_model/weighted_SSE_zero`; a zero/non-finite denominator is

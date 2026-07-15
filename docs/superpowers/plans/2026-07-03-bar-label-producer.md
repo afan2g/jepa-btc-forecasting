@@ -72,7 +72,7 @@ implementation ledger and contract for that remaining work.
 | --- | --- | --- |
 | Event-time reconstruction (E0.1): merge trades+deltas, book-at-T, apply-before-read | ✅ built | `recon/reconstruct.py:sample_topk_as_of`, `recon/orderbook.py:OrderBook.snapshot(k)`, `recon.live.LiveReconstructor` (streaming); `recon/merge.py:merge_sorted` = **bounded-fixture oracle only, forbidden for full days** |
 | Reconstruction trade record (engine time, side, price, amount) | ✅ built | `recon/events.py:14` `Trade(ts_engine, seq, side, price, amount)` |
-| Clock trade record (origin + received time, source identity, side, price, amount) | ✅ built | `bars/events.py:ClockTrade` |
+| Clock trade record (origin + received time, sequence, side, price, amount) | ✅ built | `bars/events.py:ClockTrade` |
 | Mid / microprice from a book snapshot | ✅ built | `recon/orderbook.py:60-69` |
 | CPCV + per-interval purge + embargo | ✅ built | `data/cv.py:cpcv_splits(t_event, t0, t1, *, n_groups, k, embargo_ns)` |
 | No-trade-band net PnL, uniqueness-weighted Sharpe | ✅ built | `eval/cost.py:net_pnl`, `eval/cost.py:weighted_sharpe` |
@@ -282,7 +282,7 @@ BTC ranges 2×+; dollar bars are homoscedastic).
   calibration**. #64 must reject a source that cannot satisfy the normalized
   causal timestamp contract.
 - **Deferred Coinbase/cross-venue clock:** Coinbase/target-venue-triggered
-  notional (`price × amount` over Coinbase `recon.events.Trade`) remains the
+  notional (`price × amount` over Coinbase `bars.events.ClockTrade`) remains the
   default when Coinbase is the target. Its monotone watermark is
   `max(t_event(N−1), max(received_time) over members, cap_fire)` (§C.2/#13),
   not the receipt time of only the trigger trade. A later cross-venue experiment
@@ -327,9 +327,10 @@ BTC ranges 2×+; dollar bars are homoscedastic).
 - **Ordering gotcha (data.md §5b, measured 2025-06-01):** Binance trade feeds are stored
   in `origin_time` order with monotonic `trade_id`; **Coinbase trades are NOT sorted by
   `origin_time` and `trade_id` is not monotonic** — the clock **must sort Coinbase trades
-  by `origin_time`** before accumulating. Total order is defined by `recon.events.order_key`
-  (honored by both the streaming production merge and the `merge_sorted` fixture oracle);
-  the sampler must not assume file order.
+  by `(origin_time, seq)`** before accumulating. Clock order is defined by
+  `bars.events.clock_order_key`; the separate reconstruction fold uses
+  `recon.events.order_key` and its `merge_sorted` fixture oracle. The sampler
+  must not assume file order.
 
 **Gate (E0.3):** median active-regime bar ≤ 2 s (so the 2 s horizon ≈ a few bars) +
 the **log-scale time-per-bar histogram** artifact. G0-BN threshold calibration and this gate
@@ -337,8 +338,9 @@ require #68's certified Binance trade volume; deferred Coinbase modes require th
 approved target data. The clock
 *code* and its determinism are testable now on synthetic/fixture trades.
 
-**Builds on:** `recon/events.py:Trade` + `order_key`; the streaming k-way merge
-(`recon/merge.py:merge_sorted` = fixture oracle only, §C.1).
+**Builds on:** `bars/events.py:ClockTrade` + `clock_order_key`; the reconstruction
+path's streaming k-way merge (`recon/merge.py:merge_sorted` = fixture oracle
+only, §C.1).
 
 ---
 
@@ -447,9 +449,10 @@ sources may not leak into or become prerequisites of `binance_single_venue`.
    `origin_time` + `received_time`; deferred CoinAPI uses `time_exchange_ns` +
    `time_coinapi_ns`). **Prerequisite (Codex P1):** the normalized
    `recon.events.Trade`/`Delta` keep only one `ts_engine` (`trades_from_df`/`deltas_from_df` drop
-   the other timestamp), so T1/T2 must build a **received-time-bearing event record/table** that
-   carries *both* origin (for ordering) and received (for gating). Then the read rule is **exact
-   and per-event, not a lag constant:**
+   the other timestamp), so T1/T2 use the built received-time-bearing
+   `bars.events.ClockTrade` and `bars.snapshot.BookDelta` records, which carry
+   *both* origin (for ordering) and received (for gating). The read rule is
+   therefore **exact and per-event, not a lag constant:**
    - **Decision time `t_event`** is on the box's received-time axis; every input is included
      **iff its `received_time ≤ t_event`** (ordered by `origin_time`, *gated* by
      `received_time`) — no median/constant approximation, so no delayed event leaks in.
@@ -585,6 +588,12 @@ sources may not leak into or become prerequisites of `binance_single_venue`.
   `horizon` tag — multi-horizon is native to the schema. A later protocol that
   adds a τ rung must rerun label/matrix production; it cannot edit only the
   manifest because the runner requires actual rows for every declared horizon.
+- **Classifier forecast scale:** `lgbm_clf` uses
+  `numpy.std(numpy.asarray(y_train_bps, dtype=numpy.float64),
+  dtype=numpy.float64, ddof=0) + numpy.float64(1e-9)` on that CPCV fold's
+  purged training rows, or on all frozen development rows for terminal refit.
+  The statistic is unweighted: uniqueness weights fit the classifier but do
+  not enter the bps scale.
 - **Vertical barrier = physical horizon** (§5.4 decoupling: input clock is notional, the
   *target* is fixed physical time). One matrix row per (bar, horizon) tag; the built
   runner groups by `horizon` and gates each rung independently
@@ -767,6 +776,12 @@ cross-cutting discipline).
   latency_drift_bps` and charge full realized cost. V1 has no second
   configurable latency or entry/exit model; changing that formula requires a
   reviewed cost/protocol version.
+- **G0-BN cost storage:** T8/T9 require manifest dtypes and Parquet/Arrow
+  physical types of float64/binary64 for `cost_bps`, `half_spread_bps`, and
+  `latency_drift_bps`; an inferred or explicit float32 downcast is invalid. The
+  materializer writes these explicit types and attests the physical schema so
+  #67's `rel_tol=abs_tol=1e-12` bps reconciliation is applied only to binary64
+  inputs.
 - **`half_spread_bps`** (per row) = ½·(target best_ask − best_bid)/mid from the **observable**
   target book at **`target_read_ts`** (`received_time ≤ t_event`, §B/§C.2 — the observable book,
   so cost is realistic and uses no future state; a **one-sided** book → drop the row, §E/#4).
@@ -956,9 +971,9 @@ builds; it never enters `build_id`.
 
 **ModelMatrix schema (one row per bar×horizon):** `feature_cols` (float, no NaN/inf) +
 `RESERVED` = `y_fwd_bps`(float bps), `label`(int ∈{-1,0,1}), `t_event`/`t_barrier`/
-`t_feature_start`/`t_available`(int64 ns), `cost_bps`/`half_spread_bps`(float ≥0),
+`t_feature_start`/`t_available`(int64 ns), `cost_bps`/`half_spread_bps`(float64 ≥0),
 `uniqueness`(float ∈(0,1]), `regime`(str), `horizon`(str tag) + opted-in
-`extra_cols`. G0-BN requires `latency_drift_bps` as a finite, non-negative
+`extra_cols`. G0-BN requires `latency_drift_bps` as a finite, non-negative float64
 diagnostic `extra_cols` entry; it is never a feature.
 
 ---
@@ -1050,6 +1065,9 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   tiny/weak fixture yields an ordinary G1 **fail**, not `g1_inconclusive` — that flag needs a
   LightGBM rung to pass the solo gate with PBO unavailable (`eval/study.py:70-72`). Assert a
   specific G1 outcome only with a deliberately-planted-signal fixture sized to pass solo.
+  G0-BN fixtures require float64 manifest and Parquet dtypes for all three cost
+  columns, survive a write/read round trip at the `1e-12` reconciliation, and
+  reject a float32 declaration or physical column.
 - **Mode isolation / manifest templates (P2):** a `binance_single_venue`
   fixture declares exactly one `BINANCE_FUTURES/BTC-USDT-PERP` venue and only
   certified/allowlisted/sealed Binance Futures L2 snapshot/delta and trade plus
@@ -1079,8 +1097,9 @@ tests — `tests/conftest.py:FIXTURES`, `tests/test_fixture_integration.py`).
   and `0.05/2` OOS tails, ≥20-day/`sum(u)>=100` sufficiency, trade-first then
   predictive-only selection, DSR nearest/even effective-trade rounding,
   canonical PBO columns with first-maximum IS and less-than-or-equal OOS ties,
-  all four verdicts, MCC degeneracy reasons, and proof that 60 s cannot select/
-  rescue.
+  exact unweighted float64 population classifier scaling (including a fixture
+  whose uniqueness weights would change a weighted scale), all four verdicts,
+  MCC degeneracy reasons, and proof that 60 s cannot select/rescue.
 - **Determinism (P3/#10):** two builds of the same fixture with **different injected
   `generated_at`** ⇒ **identical canonical logical rows and identical `build_id`** (the timestamp
   is excluded from the hash) — assert **logical-row equality**, not raw parquet bytes (which are
@@ -1149,8 +1168,8 @@ branch or holdout route. Suggested implementation branch names remain in
 | **T5** `feat/labels-triple-barrier` | **Built by #79/#80.** Triple-barrier with trailing EWMA barriers, physical horizons, selected target-venue mid, true-`t_event` `P0`, exact span, and unresolved-barrier policy. #69 still supplies evidenced barrier parameters. | T2 target anchor | `data/labels.py`, `tests/test_labels.py` | **Done**; parameters #69 |
 | **T6** `feat/labels-uniqueness-cv` | **Built by #75/#76.** Concurrency uniqueness per horizon, retained-lookback cap/embargo sizing, and the E0.4 leakage-control gate. | `data/cv.py:cpcv_splits`, `eval/synthetic.py:_concurrency_uniqueness`, `eval/runner.py:60` | `data/uniqueness.py`, `tests/test_uniqueness.py` | **Done** |
 | **T7** `feat/bars-cost` | **Built by #82/#84.** Per-row `cost_bps = 2*taker_fee_bps + base_slippage_bps + abs(true_t_event_mid/observable_mid-1)*1e4` under `abs_true_over_observable_mid_v1`, plus `half_spread_bps` from the observable target book and the separate `latency_drift_bps` diagnostic. The strict `CostAssumption` pins venue/product/source/version, scalar fee, scalar base slippage, and drift policy; G0-BN additionally freezes fee applicability/evidence and no-trade margin. One-sided book → drop; never reuse Coinbase costs. | `bars/cost.py`, G0-BN spec §3/§8 | `tests/test_bars_cost.py` | **Done**; operator values #69 |
-| **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit ordered `feature_cols`; staged identities; G0-BN requires `latency_drift_bps` as a typed non-feature diagnostic in `extra_cols`; emit exactly one source dict each with `name=partition_contract` and `name=g0bn_protocol`; holdout additionally requires exactly one `name=g0bn_holdout_plan` binding with stable-universe/transaction/plan/freeze pins. Development/rebuildable modes run `validate_frame` + `validate_matrix` before write; holdout formal validation is deferred until after the matrix-access burn. Generic manifest preflight recognizes bindings before load. | `eval/manifest.py`, `eval/matrix.py:validate_matrix`, #67-A/D | manifest writer + binding/isolation/round-trip/bad-row tests | Pre |
-| **T9** `feat/producer-orchestrator` | End-to-end day-partitioned materialization with explicit source modes, certified allowlists, source-specific replay, masks, and pre-label support cutoffs. It persists T7's realized `cost_bps`, observable `half_spread_bps`, and non-feature `latency_drift_bps` separately. Development may run normally. G0-BN holdout accepts only the exact frozen #68-custodian raw/normalized L2+trade allowlist plus matching durable `g0bn-raw-access-claim-v1`; no ranges/globs/fallbacks or precomputed January counts. It streams once, closes/fsyncs outputs, computes actual logical-row/matrix/manifest/build/count/schedule hashes, writes/fsyncs `g0bn-materialization-attestation-v1`, and never reopens a derived artifact. **Acceptance:** strict Binance isolation, no boundary crossing, all horizons survive, deterministic logical production, and read spies prove no source opens before raw burn and no derived output reopens in materialization. | T1–T8, #67-A/C/E, source certification/custody artifacts | `bars/produce.py` + isolation/two-burn/partition/determinism tests | Pre (synthetic fixtures) |
+| **T8** `feat/manifest-writer` | `eval.manifest.build_manifest`/`write_manifest`; explicit ordered `feature_cols`; staged identities; G0-BN requires `latency_drift_bps` as a typed non-feature diagnostic in `extra_cols` and exact float64 `dtypes` entries for it, `cost_bps`, and `half_spread_bps`; emit exactly one source dict each with `name=partition_contract` and `name=g0bn_protocol`; holdout additionally requires exactly one `name=g0bn_holdout_plan` binding with stable-universe/transaction/plan/freeze pins. Development/rebuildable modes run `validate_frame` + `validate_matrix` before write; holdout formal validation is deferred until after the matrix-access burn. Generic manifest preflight recognizes bindings before load. | `eval/manifest.py`, `eval/matrix.py:validate_matrix`, #67-A/D | manifest writer + binding/isolation/round-trip/bad-row tests | Pre |
+| **T9** `feat/producer-orchestrator` | End-to-end day-partitioned materialization with explicit source modes, certified allowlists, source-specific replay, masks, and pre-label support cutoffs. It persists T7's realized `cost_bps`, observable `half_spread_bps`, and non-feature `latency_drift_bps` separately as explicit Parquet/Arrow binary64 columns and attests the physical schema. Development may run normally. G0-BN holdout accepts only the exact frozen #68-custodian raw/normalized L2+trade allowlist plus matching durable `g0bn-raw-access-claim-v1`; no ranges/globs/fallbacks or precomputed January counts. It streams once, closes/fsyncs outputs, computes actual logical-row/matrix/manifest/build/count/schedule hashes, writes/fsyncs `g0bn-materialization-attestation-v1`, and never reopens a derived artifact. **Acceptance:** strict Binance isolation, no boundary crossing, all horizons survive, deterministic logical production, and read spies prove no source opens before raw burn and no derived output reopens in materialization. | T1–T8, #67-A/C/E, source certification/custody artifacts | `bars/produce.py` + isolation/two-burn/partition/determinism tests | Pre (synthetic fixtures) |
 | **T10 / #69** (operational; no worker branch) | Use November–December only for source/clock/label/calibration decisions; then seal the final v1 operator config **before** registering or executing any candidate. Run the exact 15-entry base ledger plus append-only execution history; log/count but never select any off-protocol identity; select only primary candidates; build outcome-blind `g0bn-holdout-plan-v1` then `g0bn-freeze-v1`; perform data-free refit/preflight; atomically burn raw access; invoke T9 once and attest actual hashes; atomically burn matrix access; only then validate and score with #67's observable decision-cost mask/full realized-cost charge, then emit PASS, PREDICTIVE_NOT_TRADEABLE, FAIL, or INCONCLUSIVE. Any failure after either burn is terminal. No τ rung and no legacy G0-XV identity. | T7–T9, #64, #68, all #67 slices | E0.3/E0.5 artifacts + terminal `g0bn-report-v1` or INCONCLUSIVE consumption record | **#69 only** |
 
 ---

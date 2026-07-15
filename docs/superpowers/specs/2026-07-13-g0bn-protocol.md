@@ -206,11 +206,11 @@ The schema has exactly these decision-bearing sections:
 | --- | --- |
 | `instrument` | Exact object in §2.1; no additional venue |
 | `source_certification` | Provider and exact L2/trade product strings; normalized schema/timestamp/sequence/gap policies; certification, custodian-seal, coverage, permission-policy, and development source-manifest SHA-256 strings; distinct custodian/operator identities; no January modeling hash |
-| `producer` | Producer entry point, repository commit/tree hash, ordered transform versions, received-time observability rule, staleness/lookback caps, partition-rule version, and logical-row/build-ID algorithm |
+| `producer` | Producer entry point, repository commit/tree hash, ordered transform versions, received-time observability rule, staleness/lookback caps, partition-rule version, logical-row/build-ID algorithm, and physical-schema hash algorithm |
 | `clock` | `kind=dollar`, Binance-perpetual reference stream, exact development schedule/hash, target bars/day, time cap, warm-up, coverage normalization, monotone watermark, and the frozen adaptive-threshold/OOS causal-update rule plus its exact development-end initial-state hash; no realized January schedule |
 | `features` | Ordered registry below; formula/version and development-end normalizer initial-state hash per feature; frozen causal OOS update rule; `max_lookback_ns`; no realized January state |
 | `labels` | Mid anchor; bps return formula; trailing EWMA barrier estimator and all parameters; TP/SL multipliers; unresolved-barrier policy; per-horizon uniqueness policy |
-| `costs` | Exact T7 `CostAssumption`: `venue=binance`, product/source/version identity, scalar one-way `taker_fee_bps`, scalar aggregate `base_slippage_bps`, and `drift_policy=abs_true_over_observable_mid_v1`; fee-tier applicability/evidence hash; two fee sides; two spread crossings; no-trade margin; observable decision-cost versus realized charged-cost rule |
+| `costs` | Exact T7 `CostAssumption`: `venue=binance`, product/source/version identity, scalar one-way `taker_fee_bps`, scalar aggregate `base_slippage_bps`, and `drift_policy=abs_true_over_observable_mid_v1`; fee-tier applicability/evidence hash; two fee sides; two spread crossings; no-trade margin; observable decision-cost versus realized charged-cost rule; binary64 cost-column storage and reconciliation tolerance |
 | `exclusions` | Outcome-blind rule version; exact included days; map of every excluded day to reason and evidence hash; staleness/gap/one-sided-book/lookback rules and drop policy |
 | `partition` | Exact nanosecond bounds; horizon map; `partition_guard_ns`; prefilter string; `schema=g0bn-partition-plan-v1` and its SHA-256; realized development counts; holdout count schema and sufficiency rules, but no realized holdout counts |
 | `cv` | Fixed §3.4 `n_groups`, `k`, split/grouping/forecast-collapse versions, expected per-row test multiplicity, `embargo_ns`, DSR effective-trade integerization, PBO column/tie/rank rules and blocks/minimum rows, and DSR/PBO definitions and thresholds |
@@ -364,9 +364,25 @@ Both LightGBM candidates fix `boosting_type=gbdt`, `num_leaves=31`,
 classification fixes `objective=multiclass`, `num_class=3`, and class order
 `[-1,0,1]`.
 
-For classifier CPCV, `training_y_std_bps` is computed only from that fold's
-purged training rows; the terminal refit uses all frozen development rows. It
-is never computed from a CPCV test fold or January.
+For classifier CPCV, let `y_train_bps` be the finite `y_fwd_bps` values in the
+canonical row order of that fold's purged training rows. Its scale is exactly:
+
+```text
+training_y_std_bps = numpy.std(
+    numpy.asarray(y_train_bps, dtype=numpy.float64),
+    dtype=numpy.float64,
+    ddof=0,
+) + numpy.float64(1e-9)
+```
+
+This is the unweighted binary64 population standard deviation: uniqueness
+weights fit the classifier but do not enter the scale, and there is no pandas
+sample-`std`, `ddof=1`, weighted, or float32 alternative. The terminal refit
+uses the same rule over all frozen development rows. The value is never
+computed from a CPCV test fold or January. The scale-rule ID
+`unweighted_population_float64_plus_1e-9_v1` enters the candidate definition
+and trial identity; the ordered split-ID-to-realized-scale list and the
+terminal-refit scale enter candidate result/provenance hashes.
 
 The two non-fitted candidates also carry full parameter objects and hashes:
 `persistence_zero` hashes `{"forecast_bps":0.0}` and `microprice_raw` hashes
@@ -540,8 +556,8 @@ protocol config and before `g0bn-freeze-v1`. It contains:
   parameters, expected dataset ID `binance_single_venue_g0bn_oos`, and logical
   build-ID algorithm;
 - expected v1 manifest bindings, horizon map, ordered features, reserved/extra
-  columns, output paths, streaming hash algorithms, validation/scoring sequence,
-  and drop-count schema;
+  columns, exact Arrow schema and schema-hash algorithm, output paths, streaming
+  hash algorithms, validation/scoring sequence, and drop-count schema;
 - the binding rule that `holdout_plan_sha256` itself enters the OOS logical
   build parameters and manifest binding, breaking any config/freeze/build
   identity cycle without guessing a build hash; and
@@ -707,19 +723,22 @@ The dedicated #69 runner performs, in order:
    raw/normalized objects and streams T9 once. It writes the OOS matrix and
    manifest whose build parameters bind `holdout_plan_sha256`; derives the
    frozen adaptive schedule/state causally; and computes the actual logical-row,
-   matrix-byte, manifest, build, count, and schedule hashes while producing the
-   artifacts. It does not reopen the derived parquet/footer or score outcomes.
+   matrix-byte, manifest, physical-schema, build, count, and schedule hashes
+   while producing the artifacts. It does not reopen the derived parquet/footer
+   or score outcomes.
 5. Close and fsync all derived outputs, then atomically write and fsync
-   `g0bn-materialization-attestation-v1` containing those actual hashes/counts
-   and the raw claim/plan bindings. A newly discovered bad source/day or any
-   materialization error is terminal INCONCLUSIVE, not a new exclusion.
+   `g0bn-materialization-attestation-v1` containing those actual hashes/counts,
+   the physical-schema hash, and the raw claim/plan bindings. A newly discovered
+   bad source/day or any materialization error is terminal INCONCLUSIVE, not a
+   new exclusion.
 6. Only now atomically create and fsync the matrix-access claim, pinning the
    attestation hash. Only after this second irreversible burn may the sole
    scorer first open the derived matrix/parquet/footer.
-7. Validate the attestation, source isolation, manifest, matrix values, exact
-   days, partition spans, horizon survival, duplicate decisions, logical build
-   ID, realized schedule/state hashes, and every frozen pin. Then score the
-   selected primary candidate plus `persistence_zero` at 2 s and 10 s, and all
+7. Validate the attestation, source isolation, manifest, physical schema/dtypes,
+   matrix values, exact days, partition spans, horizon survival, duplicate
+   decisions, logical build ID, realized schedule/state hashes, and every frozen
+   pin. Then score the selected primary candidate plus `persistence_zero` at 2 s
+   and 10 s, and all
    five frozen 60 s candidates as non-selective controls; compute the report and
    verdict in memory.
 8. Atomically replace and fsync the consumption journal with one `SCORED`
@@ -826,7 +845,12 @@ latency function or separate entry/exit slippage model: changing that formula
 requires a reviewed cost/protocol version rather than an extra runtime
 coefficient. T7's `cost_bps_i` remains the realized non-spread cost for
 compatibility, and T8/T9 must persist `latency_drift_bps_i` as a required,
-non-feature diagnostic. The dedicated G0-BN scorer derives
+non-feature diagnostic. Every G0-BN manifest's `dtypes` map pins `cost_bps`,
+`half_spread_bps`, and `latency_drift_bps` to `float64`; T9 supplies an explicit
+Parquet/Arrow binary64 (`double`) schema for all three, forbids downcasts, and
+includes the physical-schema hash in the materialization attestation. The
+scorer rejects any manifest or physical dtype mismatch before arithmetic and
+performs no float32 round trip. The dedicated G0-BN scorer derives
 `decision_cost_bps_i`, verifies both reconciliation identities above within the
 `math.isclose` policy `rel_tol=1e-12, abs_tol=1e-12` bps, and fails closed
 (terminal INCONCLUSIVE after either burn) on a missing, negative, non-finite,
@@ -983,8 +1007,9 @@ contains:
   partition/software hashes, both claim hashes, materialization-attestation
   hash, and the transaction history/state;
 - exact instrument, included/excluded days, source objects, raw seal, producer
-  version, actual OOS manifest/build/logical-row/matrix hashes, row/drop counts,
-  realized adaptive schedule/state hashes, and validation checks;
+  version, actual OOS manifest/build/logical-row/matrix/physical-schema hashes,
+  row/drop counts, realized adaptive schedule/state hashes, and validation
+  checks;
 - the complete append-only trial count/history hash, primary selected
   identities/definitions, the five unselected 60 s controls, full resolved
   model/preprocessing/code/version hashes, ordered features, horizon roles,
@@ -1084,7 +1109,8 @@ At minimum, #67's subissues include cheap tests for:
 3. exactly 15 base trial identities with IDs `persistence_zero`,
    `microprice_raw`, `ofi_ridge`, `lgbm_reg`, and `lgbm_clf` at each horizon;
    empty-feature persistence identity; ordered feature/preprocessing/parameter/
-   seed/code/version sensitivity;
+   seed/code/version sensitivity; and exact unweighted float64 population
+   classifier scaling with `ddof=0`, `+1e-9`, and weights proven not to enter;
 4. append-only G0-BN ledger behavior, exact-rerun idempotency, conflicting-result
    rejection, unique aborted/additional-variant counting with no replacement,
    and proof that
@@ -1124,7 +1150,8 @@ At minimum, #67's subissues include cheap tests for:
 12. exact decision/realized-cost reconciliation plus a causality test that
     mutates only `true_t_event_mid`/`latency_drift_bps` while holding forecasts,
     observable books, and frozen costs fixed: the trade mask/count must remain
-    byte-identical while realized net changes; and
+    byte-identical while realized net changes; float64 manifest/physical-schema
+    round trips at the `1e-12` tolerance and float32 inputs fail closed; and
 13. all four truth-table outcomes, full report schema/hash, and a check that no
     60 s metric can change the verdict.
 
