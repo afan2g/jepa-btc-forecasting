@@ -117,7 +117,8 @@ MICROPRICE_PARAMS = {"input": "microprice_dev", "input_unit": "bps", "multiplier
 CLASSIFIER_SCALE_RULE = "unweighted_population_float64_plus_1e-9_v1"
 DRIFT_POLICY = "abs_true_over_observable_mid_v1"
 
-L2_PRODUCT = "binance-futures/book_delta_v2"
+L2_SNAPSHOT_PRODUCT = "binance-futures/book_snapshot_v2"
+L2_DELTA_PRODUCT = "binance-futures/book_delta_v2"
 TRADE_PRODUCT = "binance-futures/trades_v1"
 
 GENERATED_AT = "2026-07-15T00:00:00Z"
@@ -256,7 +257,8 @@ def make_candidates() -> list:
 def make_source_certification(**over) -> dict:
     d = {
         "provider": "crypto-lake",
-        "l2_product": L2_PRODUCT,
+        "l2_snapshot_product": L2_SNAPSHOT_PRODUCT,
+        "l2_delta_product": L2_DELTA_PRODUCT,
         "trade_product": TRADE_PRODUCT,
         "raw_schema_version": "lake_raw_v2",
         "normalized_schema_version": "g0bn_normalized_v1",

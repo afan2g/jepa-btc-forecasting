@@ -50,7 +50,11 @@ OOS_DATASET_ID = "binance_single_venue_g0bn_oos"
 # These are part of the frozen v1 source declaration; if final #64 evidence pins
 # different native IDs they update here like the other section-12 freeze inputs.
 CERTIFIED_PROVIDER = "crypto-lake"
-CERTIFIED_L2_PRODUCT = "binance-futures/book_delta_v2"
+# The certified L2 source is snapshot + delta (both consumed by reconstruction), plus
+# trades — three distinct products, matching the T8 writer's G0BN_DATA_SOURCES. #93
+# reconciles these provider-path identities with writer.py's normalized source names.
+CERTIFIED_L2_SNAPSHOT_PRODUCT = "binance-futures/book_snapshot_v2"
+CERTIFIED_L2_DELTA_PRODUCT = "binance-futures/book_delta_v2"
 CERTIFIED_TRADE_PRODUCT = "binance-futures/trades_v1"
 
 # --- fixed instrument, windows, horizons, features, candidates (spec sections 2-4) ----
@@ -405,21 +409,24 @@ def _validate_instrument(path: str, obj):
 def _validate_source_certification(cert):
     path = "source_certification"
     _dict(path, cert, (
-        "provider", "l2_product", "trade_product", "raw_schema_version",
-        "normalized_schema_version", "timestamp_policy", "sequence_policy", "gap_policy",
-        "certification_sha256", "custodian_seal_sha256", "coverage_sha256",
-        "permission_policy_sha256", "development_source_manifest_sha256",
+        "provider", "l2_snapshot_product", "l2_delta_product", "trade_product",
+        "raw_schema_version", "normalized_schema_version", "timestamp_policy",
+        "sequence_policy", "gap_policy", "certification_sha256", "custodian_seal_sha256",
+        "coverage_sha256", "permission_policy_sha256", "development_source_manifest_sha256",
         "custodian_identity", "operator_identity",
     ))
-    for k in ("provider", "l2_product", "trade_product", "raw_schema_version",
-              "normalized_schema_version", "timestamp_policy", "sequence_policy",
-              "gap_policy", "custodian_identity", "operator_identity"):
+    for k in ("provider", "l2_snapshot_product", "l2_delta_product", "trade_product",
+              "raw_schema_version", "normalized_schema_version", "timestamp_policy",
+              "sequence_policy", "gap_policy", "custodian_identity", "operator_identity"):
         _str(f"{path}.{k}", cert[k])
-    # Pin the exact certified #64 provider and Binance products (spec section 2.1): a
-    # self-consistent certification cannot certify a CoinAPI/Coinbase provider fallback
-    # or a spot/other-asset product, and the two distinct L2/trade feeds cannot collapse.
+    # Pin the exact certified #64 provider and all three Binance products (spec §2.1: the
+    # L2 snapshot/seed + L2 delta + trades). A self-consistent certification cannot
+    # certify a CoinAPI/Coinbase provider fallback or a spot/other-asset product, leave
+    # the reconstruction seed product unpinned, or collapse the distinct feeds.
     _exact(f"{path}.provider", cert["provider"], CERTIFIED_PROVIDER)
-    _exact(f"{path}.l2_product", cert["l2_product"], CERTIFIED_L2_PRODUCT)
+    _exact(f"{path}.l2_snapshot_product", cert["l2_snapshot_product"],
+           CERTIFIED_L2_SNAPSHOT_PRODUCT)
+    _exact(f"{path}.l2_delta_product", cert["l2_delta_product"], CERTIFIED_L2_DELTA_PRODUCT)
     _exact(f"{path}.trade_product", cert["trade_product"], CERTIFIED_TRADE_PRODUCT)
     for k in ("certification_sha256", "custodian_seal_sha256", "coverage_sha256",
               "permission_policy_sha256", "development_source_manifest_sha256"):

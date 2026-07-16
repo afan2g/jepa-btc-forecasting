@@ -220,8 +220,10 @@ def test_instrument_extra_or_missing_field_rejected():
 
 
 @pytest.mark.parametrize("field,bad", [
-    ("l2_product", "coinbase/book_l2"),
-    ("l2_product", "binance-spot/book_delta_v2"),
+    ("l2_snapshot_product", "coinbase/book_snapshot"),
+    ("l2_snapshot_product", "binance-spot/book_snapshot_v2"),
+    ("l2_delta_product", "coinbase/book_l2"),
+    ("l2_delta_product", "binance-spot/book_delta_v2"),
     ("trade_product", "coinbase/trades"),
     ("trade_product", "binance-futures/funding_rate_v1"),
 ])
@@ -229,6 +231,16 @@ def test_source_certification_pins_exact_certified_products(field, bad):
     cfg = make_config(source_certification=fx.make_source_certification(**{field: bad}))
     with pytest.raises(ValueError, match=field):
         validate_protocol_config(with_sha(cfg))
+
+
+def test_source_certification_requires_all_three_l2_and_trade_products():
+    # The certified L2 source is snapshot + delta (both consumed by reconstruction),
+    # plus trades — three products, none swappable outside the protocol identity.
+    for missing in ("l2_snapshot_product", "l2_delta_product", "trade_product"):
+        cert = fx.make_source_certification()
+        cert.pop(missing)
+        with pytest.raises(ValueError, match=missing):
+            validate_protocol_config(with_sha(make_config(source_certification=cert)))
 
 
 @pytest.mark.parametrize("bad", ["coinapi", "coinbase", "cryptohftdata", "binance-direct"])
@@ -241,8 +253,8 @@ def test_source_certification_pins_the_certified_provider(bad):
 
 
 def test_source_certification_products_must_be_distinct():
-    # The two feeds cannot collapse into one (spec section 2.1 needs L2 and trades).
-    same = fx.make_source_certification(trade_product=fx.L2_PRODUCT)
+    # The three certified feeds cannot collapse (spec 2.1 needs snapshot, delta, trades).
+    same = fx.make_source_certification(trade_product=fx.L2_DELTA_PRODUCT)
     with pytest.raises(ValueError, match="trade_product"):
         validate_protocol_config(with_sha(make_config(source_certification=same)))
 
