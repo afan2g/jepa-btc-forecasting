@@ -6,8 +6,9 @@ inputs**: LightGBM (and later JEPA) training selects features explicitly from
 `feature_cols`, never by inferring "all non-reserved columns" (AGENTS.md coding
 standard). Code: `eval/manifest.py`; the publication path (G0-BN bindings,
 logical-row/build identity, development validate-then-write, blind holdout
-write) is `eval/writer.py` (T8). Tests: `tests/test_manifest.py`,
-`tests/test_g0bn_bindings.py`, `tests/test_writer.py`.
+write) is `eval/writer.py` (T8); the generic-runner holdout guard (67-D) is
+`eval/guard.py`. Tests: `tests/test_manifest.py`,
+`tests/test_g0bn_bindings.py`, `tests/test_writer.py`, `tests/test_guard.py`.
 
 ## Why
 
@@ -160,7 +161,9 @@ lag features upstream), and every declared horizon must be present in the
 frame. The result dict echoes `{dataset_id, build_id, generated_at,
 embargo_ns, max_lookback_ns, feature_cols}` under `"manifest"` so a run is
 reproducible from its own output. The `scripts/run_baseline.py` CLI accepts
-only v1 manifests (via `load_manifest`), and `run_from_manifest` refuses
+only v1 manifests (`validate_manifest`, run after the holdout preflight so a
+torn holdout-bound file still gets the stable guard refusal rather than a
+schema error), and `run_from_manifest` refuses
 non-versioned dicts with a migration error (including a full v1 manifest whose
 `manifest_version` key was lost to a typo).
 Note `gate` is optional at schema level but required by `run_from_manifest`
@@ -170,10 +173,15 @@ it and will consume the same manifest with
 for unsupervised pretraining; everything else still applies).
 
 **G0-BN holdout exception:** generic baseline APIs/CLIs are not transaction
-entry points. #67 adds a manifest-only preflight before any parquet loader. It
+entry points. `eval.guard.preflight_generic_manifest` (67-D) is the
+manifest-only preflight run before any parquet loader —
+`eval.guard.guarded_read_matrix` is the one authorized generic route from a
+matrix path to bytes, whatever loader the caller supplies. It
 rejects a `partition_contract.partition == holdout`, a
 `g0bn_holdout_plan` binding, `dataset_id == binance_single_venue_g0bn_oos`, or
-an ambiguous/missing partition binding on a G0-BN manifest. The in-memory
+an ambiguous/missing partition binding on a G0-BN manifest — each marker
+independently, before schema validation, so a torn or renamed-binding manifest
+cannot downgrade to a generic build. The in-memory
 `run_from_manifest(matrix, manifest)` rejects the same manifests immediately;
 callers are not authorized to preload one. There is no override flag. The
 dedicated `g0bn-one-shot-v1` scorer alone may call lower-level scoring
