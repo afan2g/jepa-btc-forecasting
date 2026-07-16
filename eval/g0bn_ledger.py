@@ -85,11 +85,16 @@ class G0BNLedger:
         self._lock_fd: int | None = None
         if path is not None:
             path = os.fspath(path)
+            # Lock FIRST, then check existence UNDER the lock: checking before
+            # locking would let two fresh binders race — the loser of the create
+            # race could bind an empty ledger over the winner's just-written
+            # history and replace it on its first record_* call.
+            self._acquire_lock(path)
             if os.path.exists(path):
+                self.close()
                 raise ValueError(f"ledger file {path!r} already exists; resume it "
                                  "with G0BNLedger.load(path) — binding a fresh "
                                  "ledger over an existing history would fork it")
-            self._acquire_lock(path)
             self._path = path
 
     @staticmethod
@@ -283,22 +288,47 @@ class G0BNLedger:
 
     # -------------------------------------------------------------------- persistence
     def save(self, path) -> None:
-        """Atomic fsynced write. The target path's writer lock is mandatory: our
-        own bound path is already held for our lifetime; any other target is
-        locked transiently, so a stale inspection snapshot (or any unbound
-        instance) can never replace a live writer's file and silently delete
-        append-only events."""
+        """Atomic fsynced write. The target path's writer lock is mandatory (our
+        own bound path is held for our lifetime; any other target is locked
+        transiently), and a non-owned EXISTING target is additionally reconciled
+        under that lock: its on-disk history must be a hash-chain prefix of this
+        instance's history. Together these stop both simultaneous clobbering and
+        the stale-snapshot case where a writer has already closed — append-only
+        events can never be silently deleted."""
         path_str = os.fspath(path)
         transient_fd = None
-        if self._path is None or (os.path.abspath(path_str)
-                                  != os.path.abspath(self._path)):
+        own_bound_path = (self._path is not None
+                          and os.path.abspath(path_str)
+                          == os.path.abspath(self._path))
+        if not own_bound_path:
             transient_fd = self._open_lock(path_str)
         try:
+            if not own_bound_path and os.path.exists(path_str):
+                self._require_extends(path_str)
             self._write_file(path_str)
         finally:
             if transient_fd is not None:
                 fcntl.flock(transient_fd, fcntl.LOCK_UN)
                 os.close(transient_fd)
+
+    def _require_extends(self, path: str) -> None:
+        """Refuse to replace an existing ledger unless its fully verified on-disk
+        history is a prefix of ours (hash chaining makes the head comparison
+        sufficient). Own-bound-path writes skip this: the exclusive lock has been
+        held since before the file was read, so the on-disk state is our own."""
+        on_disk = G0BNLedger._parse_file(path)
+        n_disk = len(on_disk._events)
+        diverged = n_disk > len(self._events)
+        if not diverged:
+            expected_head = (self._events[n_disk - 1]["sha256"] if n_disk
+                             else self.genesis_sha256())
+            diverged = on_disk.history_sha256() != expected_head
+        if diverged:
+            raise ValueError(
+                f"refusing to replace ledger {path!r}: its on-disk history is not "
+                "a prefix of this instance's history — overwriting would silently "
+                "delete append-only events (load the current file and re-apply "
+                "instead)")
 
     def _write_file(self, path: str) -> None:
         payload = {

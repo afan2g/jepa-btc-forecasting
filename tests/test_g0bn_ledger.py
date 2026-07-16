@@ -8,6 +8,7 @@ All identities are synthetic (tests/g0bn_protocol_fixtures.py); no vendor data.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -400,9 +401,13 @@ def test_bound_constructor_refuses_an_existing_file(tmp_path):
     path = tmp_path / "durable.json"
     led = G0BNLedger(path=path)
     led.record_start(_identity())
-    with pytest.raises(ValueError, match="exists"):
+    # While the writer is alive the lock (acquired BEFORE the existence check)
+    # fires first; after close, the under-lock existence check refuses the fork.
+    with pytest.raises(ValueError, match="lock"):
         G0BNLedger(path=path)
     led.close()
+    with pytest.raises(ValueError, match="exists"):
+        G0BNLedger(path=path)
     resumed = G0BNLedger.load(path)          # load is the resume path and stays bound
     resumed.record_abort(_identity(), error="resumed abort")
     resumed.close()
@@ -441,6 +446,45 @@ def test_inspection_snapshot_cannot_overwrite_a_live_ledger(tmp_path):
     assert len(G0BNLedger.load(path, bind=False).events()) == 2
     snapshot.save(tmp_path / "export.json")
     assert len(G0BNLedger.load(tmp_path / "export.json", bind=False).events()) == 1
+    led.close()
+
+
+def test_stale_snapshot_cannot_replace_a_closed_ledger(tmp_path):
+    # The transient lock alone only stops SIMULTANEOUS clobbering: once the live
+    # writer closes, a stale snapshot's save() must still be refused unless the
+    # on-disk history is a hash-chain prefix of the snapshot's own history.
+    path = tmp_path / "durable.json"
+    led = G0BNLedger(path=path)
+    ident = _identity()
+    led.record_start(ident)
+    snapshot = G0BNLedger.load(path, bind=False)
+    led.record_abort(ident, error="event recorded after the snapshot")
+    led.close()                                  # lock released
+    with pytest.raises(ValueError, match="append-only"):
+        snapshot.save(path)
+    assert len(G0BNLedger.load(path, bind=False).events()) == 2
+    # an up-to-date snapshot may rewrite idempotently (equal history = prefix)
+    current = G0BNLedger.load(path, bind=False)
+    current.save(path)
+    assert len(G0BNLedger.load(path, bind=False).events()) == 2
+
+
+def test_fresh_bind_acquires_the_lock_before_the_existence_check(tmp_path):
+    # Closes the create/create race: with the path lock held by someone else, a
+    # fresh bind must fail on CONTENTION even though no ledger file exists yet —
+    # proving the existence check happens under the lock, not before it.
+    import fcntl as _fcntl
+    path = tmp_path / "durable.json"
+    fd = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    _fcntl.flock(fd, _fcntl.LOCK_EX)
+    try:
+        with pytest.raises(ValueError, match="lock"):
+            G0BNLedger(path=path)
+    finally:
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
+        os.close(fd)
+    led = G0BNLedger(path=path)                  # free again -> binds normally
+    led.record_start(_identity())
     led.close()
 
 
