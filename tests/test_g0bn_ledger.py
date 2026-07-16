@@ -426,6 +426,24 @@ def test_concurrent_writers_are_locked_out(tmp_path):
     resumed.close()
 
 
+def test_inspection_snapshot_cannot_overwrite_a_live_ledger(tmp_path):
+    # save() must hold the target path's writer lock: a stale bind=False snapshot
+    # replacing the live file would silently delete append-only events.
+    path = tmp_path / "durable.json"
+    led = G0BNLedger(path=path)
+    ident = _identity()
+    led.record_start(ident)
+    snapshot = G0BNLedger.load(path, bind=False)
+    led.record_abort(ident, error="event the snapshot does not know about")
+    with pytest.raises(ValueError, match="lock"):
+        snapshot.save(path)
+    # the live history is intact and exporting to a FRESH path still works
+    assert len(G0BNLedger.load(path, bind=False).events()) == 2
+    snapshot.save(tmp_path / "export.json")
+    assert len(G0BNLedger.load(tmp_path / "export.json", bind=False).events()) == 1
+    led.close()
+
+
 def test_load_rejects_completed_event_with_null_result_hash(tmp_path):
     # A crafted 'completed' event with result_sha256: null against a nulled
     # identity record must not pass as None == None: a completion without a

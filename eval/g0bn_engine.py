@@ -108,14 +108,19 @@ PACKAGE_VERSIONS = {
 # ------------------------------------------------------------ runtime re-resolution
 
 def g0bn_candidate_code_sha256() -> str:
-    """The runtime identity of the candidate implementation: SHA-256 of THIS
-    module's source bytes. The config's per-candidate `candidate_code_sha256` must
-    pin exactly this value, so a modified checkout — even one keeping the pinned
-    package versions and estimator defaults — is a DIFFERENT trial, never a silent
-    reidentification (spec section 4.1). Deliberately uncached: the file is
-    re-read on every resolution so a mid-run source change cannot slip through."""
-    with open(__file__, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+    """The runtime identity of the candidate implementation surface: SHA-256 over
+    THIS module's source bytes plus data/cv.py — the CPCV split/purge/embargo
+    machinery the candidates execute under is part of what `candidate_code_sha256`
+    pins, so a modified splitter under an unchanged config is a DIFFERENT trial,
+    never a silent reidentification (spec sections 3.4 and 4.1). Deliberately
+    uncached: the files are re-read on every resolution so a mid-run source change
+    cannot slip through."""
+    import data.cv as _cv_module
+    digest = hashlib.sha256()
+    for source_path in (__file__, _cv_module.__file__):
+        with open(source_path, "rb") as f:
+            digest.update(f.read())
+    return digest.hexdigest()
 
 
 def verify_runtime_software(config: dict) -> None:

@@ -283,6 +283,24 @@ class G0BNLedger:
 
     # -------------------------------------------------------------------- persistence
     def save(self, path) -> None:
+        """Atomic fsynced write. The target path's writer lock is mandatory: our
+        own bound path is already held for our lifetime; any other target is
+        locked transiently, so a stale inspection snapshot (or any unbound
+        instance) can never replace a live writer's file and silently delete
+        append-only events."""
+        path_str = os.fspath(path)
+        transient_fd = None
+        if self._path is None or (os.path.abspath(path_str)
+                                  != os.path.abspath(self._path)):
+            transient_fd = self._open_lock(path_str)
+        try:
+            self._write_file(path_str)
+        finally:
+            if transient_fd is not None:
+                fcntl.flock(transient_fd, fcntl.LOCK_UN)
+                os.close(transient_fd)
+
+    def _write_file(self, path: str) -> None:
         payload = {
             "schema": LEDGER_SCHEMA,
             "identities": list(self._identities.values()),

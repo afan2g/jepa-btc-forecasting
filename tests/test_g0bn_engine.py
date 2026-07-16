@@ -464,6 +464,20 @@ def test_verify_rejects_installed_software_drift(bundle):
         verify_development_inputs(frame, manifest, config, identity)
 
 
+def test_candidate_code_identity_covers_engine_and_cv_sources():
+    # The runtime candidate-code identity must bind the CPCV split/purge/embargo
+    # machinery too: a modified data/cv.py under an unchanged config would
+    # otherwise alter gate behavior under the same canonical trial identity.
+    import hashlib
+    import data.cv
+    from eval.g0bn_engine import g0bn_candidate_code_sha256
+    expected = hashlib.sha256()
+    for module in (eng, data.cv):
+        with open(module.__file__, "rb") as f:
+            expected.update(f.read())
+    assert g0bn_candidate_code_sha256() == expected.hexdigest()
+
+
 def test_runtime_resolution_rejects_candidate_code_hash_drift():
     from tests.g0bn_protocol_fixtures import make_candidates
     # The 67-A fixture pins a synthetic code hash; the runtime gate must compare
