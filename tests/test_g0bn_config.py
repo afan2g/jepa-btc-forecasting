@@ -428,14 +428,35 @@ def test_lgbm_fixed_params_are_pinned_exactly(param, value):
         validate_protocol_config(with_sha(make_config(candidates=cands)))
 
 
-def test_extra_resolved_library_default_is_allowed_and_hash_bearing():
-    cfg = make_config()
+def test_fitted_model_params_must_be_the_complete_resolved_object():
+    # §4.1: model_params is the complete resolved get_params(deep=false) object; a
+    # non-overridden default (e.g. class_weight) may not be omitted, and no extra key
+    # may be present — nothing identity-bearing is left outside model_params_sha256.
     cands = fx.make_candidates()
-    cands[3]["model_params"]["class_weight"] = None  # future library default: allowed
+    del cands[3]["model_params"]["class_weight"]  # omit a resolved library default
     cands[3]["model_params_sha256"] = hash_obj(cands[3]["model_params"])
-    cfg2 = with_sha(make_config(candidates=cands))
-    validate_protocol_config(cfg2)
-    assert cfg2["sha256"] != cfg["sha256"]
+    with pytest.raises(ValueError, match="class_weight"):
+        validate_protocol_config(with_sha(make_config(candidates=cands)))
+    cands = fx.make_candidates()
+    cands[4]["model_params"]["bogus_param"] = 1  # extra key outside get_params
+    cands[4]["model_params_sha256"] = hash_obj(cands[4]["model_params"])
+    with pytest.raises(ValueError, match="bogus_param"):
+        validate_protocol_config(with_sha(make_config(candidates=cands)))
+
+
+def test_pinned_fitted_params_match_installed_get_params():
+    # Cross-contract: the pinned complete parameter objects must equal the installed
+    # pinned-version estimators' get_params(deep=False), so config validation stays in
+    # sync with the library and a version bump that adds a param is caught here.
+    from sklearn.linear_model import Ridge
+    from lightgbm import LGBMRegressor, LGBMClassifier
+    from eval.g0bn_config import (RIDGE_FIXED_PARAMS, LGBM_REG_FIXED_PARAMS,
+                                  LGBM_CLF_FIXED_PARAMS)
+    assert Ridge(**RIDGE_FIXED_PARAMS).get_params(deep=False) == RIDGE_FIXED_PARAMS
+    assert (LGBMRegressor(**LGBM_REG_FIXED_PARAMS).get_params(deep=False)
+            == LGBM_REG_FIXED_PARAMS)
+    assert (LGBMClassifier(**LGBM_CLF_FIXED_PARAMS).get_params(deep=False)
+            == LGBM_CLF_FIXED_PARAMS)
 
 
 def test_negative_zero_is_not_the_pinned_zero():
@@ -538,21 +559,6 @@ def test_candidate_params_reject_nested_physical_file_hash():
     cands[2]["preprocessing"]["matrix_file_sha256"] = "0" * 64
     cands[2]["preprocessing_sha256"] = hash_obj(cands[2]["preprocessing"])
     with pytest.raises(ValueError, match="file_sha256"):
-        validate_protocol_config(with_sha(make_config(candidates=cands)))
-
-
-def test_resolved_params_reject_negative_zero_in_opaque_subtree():
-    # -0.0 in a non-pinned resolved model-params default (opaque subtree) also drifts
-    # the hash; _scalar_tree must guard it like _exact/_num do for pinned/typed fields.
-    cands = fx.make_candidates()
-    cands[3]["model_params"]["extra_resolved_default"] = -0.0
-    cands[3]["model_params_sha256"] = hash_obj(cands[3]["model_params"])
-    with pytest.raises(ValueError, match="negative zero"):
-        validate_protocol_config(with_sha(make_config(candidates=cands)))
-    cands = fx.make_candidates()
-    cands[4]["model_params"]["another_default"] = -0.0
-    cands[4]["model_params_sha256"] = hash_obj(cands[4]["model_params"])
-    with pytest.raises(ValueError, match="negative zero"):
         validate_protocol_config(with_sha(make_config(candidates=cands)))
 
 

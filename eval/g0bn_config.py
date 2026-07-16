@@ -155,6 +155,10 @@ LGBM_FIXED_COMMON_PARAMS = {
     "verbosity": -1,
     "deterministic": True,
     "force_col_wise": True,
+    # Non-overridden LightGBM get_params(deep=false) default, pinned explicitly so the
+    # complete resolved parameter object is identity-bearing (spec §4.1) rather than
+    # left to an implicit library default outside model_params_sha256.
+    "class_weight": None,
 }
 LGBM_REG_FIXED_PARAMS = dict(LGBM_FIXED_COMMON_PARAMS, objective="regression")
 LGBM_CLF_FIXED_PARAMS = dict(LGBM_FIXED_COMMON_PARAMS, objective="multiclass", num_class=3)
@@ -799,11 +803,13 @@ def _validate_candidate(path, defn, candidate_id):
     if not isinstance(params, dict):
         _fail(mpath, "must be the complete resolved parameter object")
     if fitted:
-        for k, want in pins["fixed_params"].items():
-            if k not in params:
-                _fail(mpath, f"missing pinned parameter {k!r}")
-            _exact(f"{mpath}.{k}", params[k], want)
-        _scalar_tree(mpath, params)
+        # model_params must be the COMPLETE resolved get_params(deep=false) object for the
+        # pinned library version (spec §4.1: the config repeats every default rather than
+        # relying on implicit library defaults, so nothing identity-bearing is left
+        # outside model_params_sha256). Exact match — no missing default, no extra key.
+        # pins["fixed_params"] is verified equal to the installed estimator's get_params
+        # by a cross-contract regression test.
+        _exact(mpath, params, pins["fixed_params"])
         _exact(f"{path}.package", defn["package"], pins["package"])
         _str(f"{path}.package_version", defn["package_version"])
         _exact(f"{path}.estimator_class", defn["estimator_class"], pins["estimator_class"])

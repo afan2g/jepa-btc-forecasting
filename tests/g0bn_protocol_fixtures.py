@@ -107,6 +107,7 @@ LGBM_COMMON_PARAMS = {
     "verbosity": -1,
     "deterministic": True,
     "force_col_wise": True,
+    "class_weight": None,  # non-overridden get_params default, pinned for completeness
 }
 LGBM_REG_PARAMS = dict(LGBM_COMMON_PARAMS, objective="regression")
 LGBM_CLF_PARAMS = dict(LGBM_COMMON_PARAMS, objective="multiclass", num_class=3)
