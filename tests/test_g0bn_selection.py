@@ -749,6 +749,30 @@ def test_lift_and_net_replicates_hand_computed():
     assert reps[1] == (6.0 + 6.0 + 8.0) / 3.0
 
 
+def test_lift_replicates_use_separate_daily_sums_not_fused_rows():
+    # Spec 8.3 sequence: per day compute A_d = sum(u*y^2) and B_d = sum(u*(y-f)^2)
+    # SEPARATELY, then aggregate A_d - B_d. Fusing u*(y^2 - (y-f)^2) per row gives
+    # a different binary64 result under mixed magnitudes (here 4e8 vs
+    # 4.0000000136e8) and would not reproduce the pinned statistic.
+    from eval.g0bn_selection import _lift_replicates
+    y = np.array([1e8, 1.0, -1e8, 2.0])
+    f = np.array([1.0, 0.5, -1.0, 0.25])
+    u = np.array([1.0, 0.7, 1.0, 0.9])
+    day_pos = np.zeros(4, dtype=np.int64)
+    draw = np.array([[0], [0]])
+    reps, reason = _lift_replicates(draw, day_pos, 1, y, f, u)
+    assert reason is None
+    a = np.zeros(1)
+    np.add.at(a, day_pos, u * y * y)
+    b = np.zeros(1)
+    np.add.at(b, day_pos, u * (y - f) ** 2)
+    expected = (a - b)[0] / a[0]
+    assert reps[0] == expected and reps[1] == expected
+    fused = np.zeros(1)
+    np.add.at(fused, day_pos, u * (y * y - (y - f) ** 2))
+    assert reps[0] != fused[0] / a[0]      # the fused form is NOT the spec value
+
+
 def test_zero_persistence_denominator_invalidates_the_gate():
     # y identically zero at 2s: both the point lift and every resampled
     # persistence denominator are zero -> INCONCLUSIVE, never a division blowup.

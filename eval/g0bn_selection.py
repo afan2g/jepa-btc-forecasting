@@ -402,11 +402,16 @@ def _day_sums(day_pos: np.ndarray, n_days: int, values: np.ndarray) -> np.ndarra
 
 
 def _lift_replicates(draw, day_pos, n_days, y, f, u):
-    """Paired lift replicates: aggregate per-day A_d and (A_d - B_d) over the drawn
-    days with multiplicity and recompute L (model and persistence are never
-    resampled separately). Returns (replicates | None, reason | None)."""
+    """Paired lift replicates (spec 8.3 sequence, exactly): per day compute
+    A_d = sum(u*y^2) and B_d = sum(u*(y-f)^2) SEPARATELY on the same rows, then
+    aggregate A_d - B_d and A_d over the drawn days with multiplicity and
+    recompute L. Fusing u*(y^2 - (y-f)^2) per row would give a different binary64
+    result under mixed magnitudes and not reproduce the pinned statistic. Model
+    and persistence are never resampled separately. Returns
+    (replicates | None, reason | None)."""
     a_d = _day_sums(day_pos, n_days, u * y * y)
-    amb_d = _day_sums(day_pos, n_days, u * (y * y - (y - f) ** 2))
+    b_d = _day_sums(day_pos, n_days, u * (y - f) ** 2)
+    amb_d = a_d - b_d
     denom = a_d[draw].sum(axis=1)
     numer = amb_d[draw].sum(axis=1)
     if (denom == 0.0).any() or not np.isfinite(denom).all():

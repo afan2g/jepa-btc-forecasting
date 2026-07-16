@@ -488,6 +488,23 @@ def test_fresh_bind_acquires_the_lock_before_the_existence_check(tmp_path):
     led.close()
 
 
+def test_bound_path_is_normalized_against_chdir(tmp_path, monkeypatch):
+    # A relative bound path would re-resolve after chdir: persistence would write
+    # a DIFFERENT unlocked file while the locked original went stale.
+    monkeypatch.chdir(tmp_path)
+    led = G0BNLedger(path="relative.json")
+    ident = _identity()
+    led.record_start(ident)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    led.record_abort(ident, error="recorded after chdir")
+    led.close()
+    recovered = G0BNLedger.load(tmp_path / "relative.json", bind=False)
+    assert [e["event"] for e in recovered.events()] == ["started", "aborted"]
+    assert not (elsewhere / "relative.json").exists()
+
+
 def test_load_rejects_completed_event_with_null_result_hash(tmp_path):
     # A crafted 'completed' event with result_sha256: null against a nulled
     # identity record must not pass as None == None: a completion without a

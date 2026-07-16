@@ -84,7 +84,9 @@ class G0BNLedger:
         self._path: str | None = None
         self._lock_fd: int | None = None
         if path is not None:
-            path = os.fspath(path)
+            # Canonicalize BEFORE locking: a relative path would re-resolve after
+            # a later chdir, splitting the lifetime lock from the persisted file.
+            path = os.path.abspath(os.fspath(path))
             # Lock FIRST, then check existence UNDER the lock: checking before
             # locking would let two fresh binders race — the loser of the create
             # race could bind an empty ledger over the winner's just-written
@@ -295,11 +297,9 @@ class G0BNLedger:
         instance's history. Together these stop both simultaneous clobbering and
         the stale-snapshot case where a writer has already closed — append-only
         events can never be silently deleted."""
-        path_str = os.fspath(path)
+        path_str = os.path.abspath(os.fspath(path))
         transient_fd = None
-        own_bound_path = (self._path is not None
-                          and os.path.abspath(path_str)
-                          == os.path.abspath(self._path))
+        own_bound_path = self._path is not None and path_str == self._path
         if not own_bound_path:
             transient_fd = self._open_lock(path_str)
         try:
@@ -364,7 +364,7 @@ class G0BNLedger:
         check-then-write race with a live writer) and every later record_* call
         keeps persisting to the same file. `bind=False` is read-only inspection:
         no lock, not durable, never persists."""
-        path_str = os.fspath(path)
+        path_str = os.path.abspath(os.fspath(path))
         lock_fd = cls._open_lock(path_str) if bind else None
         try:
             ledger = cls._parse_file(path_str)
