@@ -289,7 +289,7 @@ def test_load_rejects_completed_event_with_stripped_result(tmp_path):
     payload["identities"][0]["result"] = None
     payload["identities"][0]["result_sha256"] = None
     path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="immutable result"):
+    with pytest.raises(ValueError, match="immutable non-null result"):
         G0BNLedger.load(path)
 
 
@@ -375,11 +375,13 @@ def test_path_bound_ledger_persists_every_event_immediately(tmp_path):
     ident = _identity()
     led.record_start(ident)
     # No explicit save(): a crash after this point must not lose the start.
-    recovered = G0BNLedger.load(path)
+    # (bind=False: read-only inspection that neither locks nor resumes.)
+    recovered = G0BNLedger.load(path, bind=False)
+    assert not recovered.is_durable()
     assert recovered.n_effective_trials() == 1
     assert [e["event"] for e in recovered.events()] == ["started"]
     led.record_abort(ident, error="synthetic crash evidence")
-    recovered = G0BNLedger.load(path)
+    recovered = G0BNLedger.load(path, bind=False)
     assert [e["event"] for e in recovered.events()] == ["started", "aborted"]
 
 
@@ -400,9 +402,67 @@ def test_bound_constructor_refuses_an_existing_file(tmp_path):
     led.record_start(_identity())
     with pytest.raises(ValueError, match="exists"):
         G0BNLedger(path=path)
+    led.close()
     resumed = G0BNLedger.load(path)          # load is the resume path and stays bound
     resumed.record_abort(_identity(), error="resumed abort")
-    assert len(G0BNLedger.load(path).events()) == 2
+    resumed.close()
+    assert len(G0BNLedger.load(path, bind=False).events()) == 2
+
+
+def test_concurrent_writers_are_locked_out(tmp_path):
+    # Two live writers on one path would let the last os.replace() silently
+    # discard the other's append-only events; the exclusive per-path lock makes
+    # the second binder fail closed instead.
+    path = tmp_path / "durable.json"
+    led = G0BNLedger(path=path)
+    led.record_start(_identity())
+    with pytest.raises(ValueError, match="lock"):
+        G0BNLedger.load(path)                    # second WRITER refused
+    inspect = G0BNLedger.load(path, bind=False)  # read-only inspection still fine
+    assert inspect.n_effective_trials() == 1
+    led.close()
+    resumed = G0BNLedger.load(path)              # lock released -> resume works
+    assert resumed.is_durable()
+    resumed.close()
+
+
+def test_load_rejects_completed_event_with_null_result_hash(tmp_path):
+    # A crafted 'completed' event with result_sha256: null against a nulled
+    # identity record must not pass as None == None: a completion without a
+    # pinned result is impossible evidence that a later real completion could
+    # silently supersede.
+    from eval.g0bn_ledger import LEDGER_SCHEMA
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_start(ident)
+    led.record_completion(ident, _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    payload["identities"][0]["result"] = None
+    payload["identities"][0]["result_sha256"] = None
+    prev = None
+    for event in payload["events"]:              # rebuild a VALID chain
+        if event["event"] == "completed":
+            event["payload"]["result_sha256"] = None
+        if prev is not None:
+            event["prev_sha256"] = prev
+        event["sha256"] = hash_obj({k: v for k, v in event.items()
+                                    if k != "sha256"})
+        prev = event["sha256"]
+    payload["history_sha256"] = prev
+    pairs = sorted((r["trial_id"], r["result_sha256"])
+                   for r in payload["identities"])
+    payload["identity_set_sha256"] = hash_obj(
+        {"schema": LEDGER_SCHEMA, "trials": [list(p) for p in pairs]})
+    payload["ledger_sha256"] = hash_obj({
+        "schema": LEDGER_SCHEMA,
+        "n_effective_trials": payload["n_effective_trials"],
+        "identity_set_sha256": payload["identity_set_sha256"],
+        "history_sha256": payload["history_sha256"]})
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="completed event"):
+        G0BNLedger.load(path)
 
 
 # ----------------------------------------------------------------- legacy isolation

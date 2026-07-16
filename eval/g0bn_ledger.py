@@ -22,6 +22,7 @@ a hash-chained ordered execution-event history (starts, aborts, completions).
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import math
 import os
@@ -81,13 +82,52 @@ class G0BNLedger:
         self._events: list[dict] = []
         self._protocol_config_sha256: str | None = None
         self._path: str | None = None
+        self._lock_fd: int | None = None
         if path is not None:
             path = os.fspath(path)
             if os.path.exists(path):
                 raise ValueError(f"ledger file {path!r} already exists; resume it "
                                  "with G0BNLedger.load(path) — binding a fresh "
                                  "ledger over an existing history would fork it")
+            self._acquire_lock(path)
             self._path = path
+
+    @staticmethod
+    def _open_lock(path: str) -> int:
+        """Exclusive per-path writer lock, held for the ledger's bound lifetime.
+        Without it, two live writers on one path would each autopersist their own
+        stale in-memory history and the last os.replace() would silently discard
+        the other's append-only events — a lost-update that undercounts effective
+        N. Contention fails closed; there is no waiting or stealing."""
+        fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise ValueError(
+                f"ledger {path!r} is write-locked by another live ledger instance "
+                "(fcntl lock contention); concurrent writers would silently "
+                "discard each other's events — close the other instance first, or "
+                "load read-only with bind=False") from None
+        return fd
+
+    def _acquire_lock(self, path: str) -> None:
+        self._lock_fd = self._open_lock(path)
+
+    def close(self) -> None:
+        """Release the writer lock and unbind. The in-memory history stays
+        readable, but the instance is no longer durable and no longer persists."""
+        if self._lock_fd is not None:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = None
+        self._path = None
+
+    def __del__(self):  # pragma: no cover - GC timing dependent
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def is_durable(self) -> bool:
         return self._path is not None
@@ -268,7 +308,30 @@ class G0BNLedger:
             raise
 
     @classmethod
-    def load(cls, path) -> "G0BNLedger":
+    def load(cls, path, *, bind: bool = True) -> "G0BNLedger":
+        """Load and fully verify a ledger file.
+
+        `bind=True` (default) RESUMES the ledger: the exclusive writer lock is
+        acquired BEFORE the file is read (a consistent snapshot — no
+        check-then-write race with a live writer) and every later record_* call
+        keeps persisting to the same file. `bind=False` is read-only inspection:
+        no lock, not durable, never persists."""
+        path_str = os.fspath(path)
+        lock_fd = cls._open_lock(path_str) if bind else None
+        try:
+            ledger = cls._parse_file(path_str)
+        except BaseException:
+            if lock_fd is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+            raise
+        if bind:
+            ledger._lock_fd = lock_fd
+            ledger._path = path_str
+        return ledger
+
+    @classmethod
+    def _parse_file(cls, path: str) -> "G0BNLedger":
         with open(path) as f:
             payload = json.load(f)
         if not isinstance(payload, dict) or payload.get("schema") != LEDGER_SCHEMA:
@@ -315,10 +378,16 @@ class G0BNLedger:
                                  "ledger)")
             if event["event"] == "completed":
                 rec = ledger._identities[event["trial_id"]]
-                if event["payload"].get("result_sha256") != rec["result_sha256"]:
-                    raise ValueError(f"ledger event {i} pins a completion result hash "
-                                     "that does not match the identity's immutable "
-                                     "result (tampered or corrupted ledger)")
+                pinned = event["payload"].get("result_sha256")
+                # A completion without a pinned non-null result hash is impossible
+                # evidence: None == None must not let a crafted completed event
+                # pass against a nulled identity record.
+                if (not isinstance(pinned, str)
+                        or rec["result_sha256"] is None
+                        or pinned != rec["result_sha256"]):
+                    raise ValueError(f"ledger completed event {i} does not pin the "
+                                     "identity's immutable non-null result hash "
+                                     "(tampered or corrupted ledger)")
                 completed_tids.add(event["trial_id"])
             event_tids.add(event["trial_id"])
             ledger._events.append(copy.deepcopy(event))
@@ -349,7 +418,4 @@ class G0BNLedger:
             if payload.get(field) != recomputed:
                 raise ValueError(f"ledger file {field} does not match its entries "
                                  "(tampered or corrupted ledger)")
-        # A loaded ledger stays bound to its file: resuming a run keeps every new
-        # event durably persisted under the same append-only history.
-        ledger._path = os.fspath(path)
         return ledger
