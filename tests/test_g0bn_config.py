@@ -860,6 +860,21 @@ def test_oos_pins(field, value):
         validate_protocol_config(with_sha(make_config(oos=oos)))
 
 
+def test_lock_path_template_derives_only_from_transaction_id():
+    # Spec 6.1/6.2: the owner lock / consumption paths derive ONLY from the stable
+    # transaction id, so a config change cannot create a different lock path for the
+    # same transaction and weaken the single-owner guarantee.
+    oos = fx.make_oos()
+    oos["lock"] = dict(oos["lock"], path_template="data/g0bn/consumption/owner.lock")
+    with pytest.raises(ValueError, match="path_template"):
+        validate_protocol_config(with_sha(make_config(oos=oos)))
+    oos = fx.make_oos()
+    oos["lock"] = dict(oos["lock"],
+                       path_template="data/g0bn/{universe_id}/{transaction_id}/owner.lock")
+    with pytest.raises(ValueError, match="path_template"):
+        validate_protocol_config(with_sha(make_config(oos=oos)))
+
+
 def test_oos_lock_contention_result_pinned():
     oos = fx.make_oos()
     oos["lock"]["contention_result"] = "steal_lock"

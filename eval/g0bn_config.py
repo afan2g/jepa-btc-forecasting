@@ -929,6 +929,16 @@ def _validate_oos(oos):
     lpath = f"{path}.lock"
     _dict(lpath, lock, ("path_template", "algorithm", "lifetime", "contention_result"))
     _str(f"{lpath}.path_template", lock["path_template"])
+    # The owner lock / consumption paths derive ONLY from the stable transaction id
+    # (spec 6.1/6.2), so a config change cannot create a different lock path for the
+    # same transaction and weaken the single-owner guarantee. Require exactly the
+    # {transaction_id} placeholder and no other identity placeholder.
+    lock_placeholders = set(re.findall(r"{([^{}]*)}", lock["path_template"]))
+    if lock_placeholders != {"transaction_id"}:
+        _fail(f"{lpath}.path_template",
+              "must contain exactly the {transaction_id} placeholder and no other "
+              f"identity placeholder (paths derive only from the stable transaction id); "
+              f"got placeholders {sorted(lock_placeholders)}")
     _exact(f"{lpath}.algorithm", lock["algorithm"], "fcntl_flock_LOCK_EX_LOCK_NB_v1")
     _exact(f"{lpath}.lifetime", lock["lifetime"], "held_until_terminal_journal_fsync_v1")
     _exact(f"{lpath}.contention_result", lock["contention_result"], CONTENTION_RESULT)

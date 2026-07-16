@@ -116,6 +116,16 @@ def test_transaction_id_rejects_malformed_universe_id():
             one_shot_transaction_id(bad)
 
 
+def test_transaction_id_rejects_foreign_universe_id():
+    # A well-formed but FOREIGN/stale 64-hex universe id must not mint a second
+    # transaction over the same January outcomes (spec 6.1: the transaction derives
+    # from the pinned universe only). The earlier malformed cases were caught by the
+    # hex format; this one is format-valid but not the pinned universe.
+    with pytest.raises(ValueError, match="holdout_universe_id"):
+        one_shot_transaction_id("0" * 64)
+    assert one_shot_transaction_id(G0BN_HOLDOUT_UNIVERSE_ID) == G0BN_TRANSACTION_ID
+
+
 # --- development data identity (logical build inputs; no physical file hashes) --------
 
 def test_data_identity_valid_and_chains():

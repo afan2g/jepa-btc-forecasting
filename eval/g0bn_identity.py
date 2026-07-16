@@ -95,10 +95,20 @@ def holdout_universe_id(universe: dict | None = None) -> str:
 
 
 def one_shot_transaction_id(universe_id: str | None = None) -> str:
-    """SHA-256 of exactly {"schema": "g0bn-one-shot-v1", "holdout_universe_id": ...}."""
+    """SHA-256 of exactly {"schema": "g0bn-one-shot-v1", "holdout_universe_id": ...}.
+
+    The universe id must be the pinned G0-BN holdout universe (spec 6.1): a foreign or
+    stale but well-formed 64-hex value cannot mint a second transaction/lock/consumption
+    path over the same January outcomes — it fails closed here rather than deriving a
+    fresh transaction that bypasses the exact-universe checks in holdout_universe_id()."""
     if universe_id is None:
         universe_id = G0BN_HOLDOUT_UNIVERSE_ID
     _sha256("holdout_universe_id", universe_id)
+    if universe_id != G0BN_HOLDOUT_UNIVERSE_ID:
+        _fail("holdout_universe_id",
+              f"must equal the pinned G0-BN holdout universe id {G0BN_HOLDOUT_UNIVERSE_ID} "
+              f"(spec 6.1); a foreign/stale universe cannot mint a second transaction "
+              f"over the same January outcomes")
     return hash_obj({"schema": ONE_SHOT_SCHEMA, "holdout_universe_id": universe_id})
 
 
