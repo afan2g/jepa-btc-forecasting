@@ -145,6 +145,14 @@ LGBM_CLF_FIXED_PARAMS = dict(LGBM_FIXED_COMMON_PARAMS, objective="multiclass", n
 PERSISTENCE_MODEL_PARAMS = {"forecast_bps": 0.0}
 MICROPRICE_MODEL_PARAMS = {"input": "microprice_dev", "input_unit": "bps", "multiplier": 1.0}
 
+# Exact preprocessing/stationarization contract per candidate (spec §4.1): fixed part
+# of the eligible ladder, so an altered preprocessing is a different (non-eligible)
+# trial. Fitted candidates share the producer's pinned causal stationarization with
+# no candidate-local scaling (explicit for ofi_ridge); non-fitted candidates use none.
+FITTED_PREPROCESSING = {"stationarization": "producer_pinned_causal_v1",
+                        "candidate_local_scaling": False}
+NONFITTED_PREPROCESSING = {"none": True}
+
 CLASSIFIER_SCALE_RULE = "unweighted_population_float64_plus_1e-9_v1"
 CLASS_ORDER = [-1, 0, 1]
 FORECAST_COLLAPSE_VERSION = "mean_repeated_test_forecasts_v1"
@@ -683,12 +691,14 @@ _CANDIDATE_PINS = {
     "persistence_zero": {
         "fitted": False,
         "prediction_transform": "constant_zero_bps_v1",
+        "preprocessing": NONFITTED_PREPROCESSING,
         "feature_cols": [],
         "model_params_exact": PERSISTENCE_MODEL_PARAMS,
     },
     "microprice_raw": {
         "fitted": False,
         "prediction_transform": "multiplier_times_input_bps_v1",
+        "preprocessing": NONFITTED_PREPROCESSING,
         "feature_cols": ["microprice_dev"],
         "model_params_exact": MICROPRICE_MODEL_PARAMS,
     },
@@ -698,6 +708,7 @@ _CANDIDATE_PINS = {
         "estimator_class": "sklearn.linear_model.Ridge",
         "target": "y_fwd_bps",
         "prediction_transform": "identity_bps_v1",
+        "preprocessing": FITTED_PREPROCESSING,
         "seed_and_thread_settings": {"random_state": None},
         "feature_cols": ["ofi_integrated"],
         "fixed_params": RIDGE_FIXED_PARAMS,
@@ -708,6 +719,7 @@ _CANDIDATE_PINS = {
         "estimator_class": "lightgbm.LGBMRegressor",
         "target": "y_fwd_bps",
         "prediction_transform": "identity_bps_v1",
+        "preprocessing": FITTED_PREPROCESSING,
         "seed_and_thread_settings": {"random_state": 0, "n_jobs": 1,
                                      "deterministic": True, "force_col_wise": True},
         "feature_cols": list(FEATURE_REGISTRY),
@@ -719,6 +731,7 @@ _CANDIDATE_PINS = {
         "estimator_class": "lightgbm.LGBMClassifier",
         "target": "label",
         "prediction_transform": "class_prob_spread_times_training_y_std_bps_v1",
+        "preprocessing": FITTED_PREPROCESSING,
         "seed_and_thread_settings": {"random_state": 0, "n_jobs": 1,
                                      "deterministic": True, "force_col_wise": True},
         "feature_cols": list(FEATURE_REGISTRY),
@@ -739,13 +752,7 @@ def _validate_candidate(path, defn, candidate_id):
     _exact(f"{path}.feature_cols", defn["feature_cols"], pins["feature_cols"])
 
     preprocessing = defn["preprocessing"]
-    if not isinstance(preprocessing, dict):
-        _fail(f"{path}.preprocessing", "must be a dict declaration")
-    _scalar_tree(f"{path}.preprocessing", preprocessing)
-    if candidate_id == "ofi_ridge" and preprocessing.get("candidate_local_scaling") is not False:
-        _fail(f"{path}.preprocessing.candidate_local_scaling",
-              "ofi_ridge must explicitly declare the absence of candidate-local scaling "
-              "(spec section 4.1)")
+    _exact(f"{path}.preprocessing", preprocessing, pins["preprocessing"])
     _sha256(f"{path}.preprocessing_sha256", defn["preprocessing_sha256"])
     if hash_obj(preprocessing) != defn["preprocessing_sha256"]:
         _fail(f"{path}.preprocessing_sha256", "does not match the preprocessing object")

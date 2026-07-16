@@ -488,17 +488,40 @@ def test_candidate_params_reject_nested_physical_file_hash():
 
 
 def test_resolved_params_reject_negative_zero_in_opaque_subtree():
-    # -0.0 in a non-pinned resolved default (opaque subtree) also drifts the hash;
-    # _scalar_tree must guard it like _exact/_num do for pinned/typed fields.
+    # -0.0 in a non-pinned resolved model-params default (opaque subtree) also drifts
+    # the hash; _scalar_tree must guard it like _exact/_num do for pinned/typed fields.
     cands = fx.make_candidates()
     cands[3]["model_params"]["extra_resolved_default"] = -0.0
     cands[3]["model_params_sha256"] = hash_obj(cands[3]["model_params"])
     with pytest.raises(ValueError, match="negative zero"):
         validate_protocol_config(with_sha(make_config(candidates=cands)))
     cands = fx.make_candidates()
-    cands[2]["preprocessing"]["shift"] = -0.0
-    cands[2]["preprocessing_sha256"] = hash_obj(cands[2]["preprocessing"])
+    cands[4]["model_params"]["another_default"] = -0.0
+    cands[4]["model_params_sha256"] = hash_obj(cands[4]["model_params"])
     with pytest.raises(ValueError, match="negative zero"):
+        validate_protocol_config(with_sha(make_config(candidates=cands)))
+
+
+def test_candidate_preprocessing_is_pinned_exactly():
+    # §4.1: the preprocessing/stationarization contract is a fixed part of the eligible
+    # ladder; an altered preprocessing must fail closed (become a non-eligible trial),
+    # not stay eligible under the base candidate_id.
+    cands = fx.make_candidates()
+    cands[3]["preprocessing"] = {"stationarization": "other_v2", "candidate_local_scaling": False}
+    cands[3]["preprocessing_sha256"] = hash_obj(cands[3]["preprocessing"])
+    with pytest.raises(ValueError, match="preprocessing"):
+        validate_protocol_config(with_sha(make_config(candidates=cands)))
+    # extra key in a fitted candidate's preprocessing
+    cands = fx.make_candidates()
+    cands[4]["preprocessing"]["scaler"] = "robust"
+    cands[4]["preprocessing_sha256"] = hash_obj(cands[4]["preprocessing"])
+    with pytest.raises(ValueError, match="preprocessing"):
+        validate_protocol_config(with_sha(make_config(candidates=cands)))
+    # non-fitted candidate preprocessing is pinned too
+    cands = fx.make_candidates()
+    cands[1]["preprocessing"] = {"none": True, "extra": 1}
+    cands[1]["preprocessing_sha256"] = hash_obj(cands[1]["preprocessing"])
+    with pytest.raises(ValueError, match="preprocessing"):
         validate_protocol_config(with_sha(make_config(candidates=cands)))
 
 
