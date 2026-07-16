@@ -334,6 +334,22 @@ def test_cli_rejects_full_holdout_manifest_with_guard_error_not_gate_error(
         run_baseline.main(str(tmp_path / "model_matrix.parquet"), manifest_path)
 
 
+@pytest.mark.parametrize("torn", [
+    {"dataset_id": G0BN_OOS_DATASET_ID},
+    {"sources": [holdout_plan_binding()]},
+    {"sources": [{"name": "partition_contract", "partition": "holdout"}]},
+], ids=["oos_dataset_id", "holdout_plan_binding", "partition_holdout"])
+def test_cli_torn_holdout_manifest_gets_guard_refusal_not_schema_error(
+        tmp_path, monkeypatch, torn):
+    # The raw marker scans run BEFORE schema validation on the path-based runner too: a
+    # torn manifest file naming any holdout marker surfaces the stable guard refusal,
+    # never an incidental missing-fields schema error (and never a loader call).
+    _forbid_loaders(monkeypatch)
+    manifest_path = _manifest_path(tmp_path, torn)
+    with pytest.raises(ValueError, match=GUARD_MSG):
+        run_baseline.main(str(tmp_path / "model_matrix.parquet"), manifest_path)
+
+
 def test_cli_dev_g0bn_fails_on_gate_before_any_loader(tmp_path, monkeypatch):
     # Development G0-BN passes the guard; the existing pre-read gate check still fires
     # before any parquet loader (loaders are poisoned).

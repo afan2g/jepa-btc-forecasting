@@ -5,19 +5,24 @@ The manifest must be a v1 feature manifest (docs/feature-manifest.md) and must i
 the pre-registered "gate" block. Legacy {feature_cols, embargo_ns, max_lookback_ns, gate}
 dicts are NOT accepted here: write a v1 manifest and pre-register it.
 """
-import sys, pathlib
+import json, sys, pathlib
 # Run as a bare script (`python scripts/run_baseline.py ...`): Python puts this file's
 # own dir (scripts/) on sys.path, not the repo root, so put the repo root first to make
 # the `eval` package importable. Harmless when already importable.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import pandas as pd
 from eval.guard import guarded_read_matrix, preflight_generic_manifest
-from eval.manifest import load_manifest
+from eval.manifest import validate_manifest
 from eval.runner import resolve_gate, run_from_manifest
 
 def main(matrix_path, manifest_path):
-    man = load_manifest(manifest_path)   # v1 schema-validated; fails before the parquet read
-    preflight_generic_manifest(man)      # 67-D holdout guard (#90): refuses holdout-bound
+    with open(manifest_path) as f:
+        man = json.load(f)
+    # 67-D holdout guard (#90): the raw marker scans reject BEFORE schema validation,
+    # so even a torn holdout-bound manifest file gets the stable refusal, never an
+    # incidental missing-fields error (and never a parquet read).
+    preflight_generic_manifest(man)
+    validate_manifest(man)               # v1 schema-validated; fails before the parquet read
     resolve_gate(man)                    # gate errors also surface before the parquet read
     m = guarded_read_matrix(matrix_path, man)   # guard re-runs at the read boundary itself
     res = run_from_manifest(m, man)
