@@ -63,6 +63,7 @@ from eval.g0bn_identity import base_trial_identities, trial_id as _trial_id
 from eval.hashing import canonical_json, hash_obj, split_hash
 from eval.manifest import manifest_sha256
 from eval.stats import deflated_sharpe
+import eval.stats
 from eval.writer import logical_row_sha256, ordered_manifest_columns
 
 DEVELOPMENT_RESULT_SCHEMA = "g0bn-development-result-v1"
@@ -85,6 +86,27 @@ _K_TEST_GROUPS = 2
 
 def _float(x) -> float:
     return float(np.float64(x))
+
+
+def _source_sha256(*files) -> str:
+    digest = hashlib.sha256()
+    for path in files:
+        with open(path, "rb") as f:
+            digest.update(f.read())
+    return digest.hexdigest()
+
+
+def g0bn_dsr_code_sha256() -> str:
+    """Runtime identity of the DSR implementation: this module (input assembly,
+    trade Sharpe, T rounding) plus eval.stats (the Bailey/Lopez de Prado formula).
+    The config's `cv.dsr.code_sha256` must pin exactly this value; a modified
+    metric implementation fails closed instead of scoring under stale provenance."""
+    return _source_sha256(__file__, eval.stats.__file__)
+
+
+def g0bn_pbo_code_sha256() -> str:
+    """Runtime identity of the G0-BN PBO implementation (this module)."""
+    return _source_sha256(__file__)
 
 
 # ------------------------------------------------------------------ cost split (8.2)
@@ -469,6 +491,18 @@ def development_selection(run, *, extra_forecasts: dict | None = None,
     dispersion, and the PBO columns, but can never be selected (spec section 4.2:
     recordable, immutable, counted — not eligible)."""
     config = validate_protocol_config(run.config)
+    # Fail fast on metric-implementation drift: the pinned DSR/PBO code hashes
+    # must match the RUNNING implementations before any statistic is computed.
+    running_dsr = g0bn_dsr_code_sha256()
+    if config["cv"]["dsr"]["code_sha256"] != running_dsr:
+        _fail("cv.dsr.code_sha256",
+              f"config pins {config['cv']['dsr']['code_sha256']} but the running "
+              f"DSR implementation hashes to {running_dsr}")
+    running_pbo = g0bn_pbo_code_sha256()
+    if config["cv"]["pbo"]["code_sha256"] != running_pbo:
+        _fail("cv.pbo.code_sha256",
+              f"config pins {config['cv']['pbo']['code_sha256']} but the running "
+              f"PBO implementation hashes to {running_pbo}")
     ledger = run.ledger
     extra_forecasts = dict(extra_forecasts or {})
     data_identity = run.data_identity

@@ -333,6 +333,78 @@ def test_load_rejects_wrong_schema(tmp_path):
         G0BNLedger.load(path)
 
 
+# -------------------------------------------------------- config immutability (3.1)
+
+def test_register_rejects_protocol_config_drift():
+    # Once any g0bn-trial-v1 identity is registered, the v1 protocol config is
+    # immutable: a later attempt under an edited config fails closed instead of
+    # becoming an ordinary new trial (spec section 3.1).
+    led = G0BNLedger()
+    led.record_start(_identity())
+    drifted = _identity(horizon="10s", protocol_config_sha256="a" * 64)
+    with pytest.raises(ValueError, match="config drift"):
+        led.record_start(drifted)
+    with pytest.raises(ValueError, match="config drift"):
+        led.record_abort(drifted, error="x")
+    with pytest.raises(ValueError, match="config drift"):
+        led.record_completion(drifted, _result())
+    assert led.n_effective_trials() == 1
+    assert led.protocol_config_sha256() == _identity()["protocol_config_sha256"]
+
+
+def test_load_rejects_mixed_config_ledger_file(tmp_path):
+    led = G0BNLedger()
+    led.record_completion(_identity(), _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    foreign = _identity(horizon="10s", protocol_config_sha256="b" * 64)
+    payload["identities"].append({"trial_id": trial_id(foreign), "identity": foreign,
+                                  "result": None, "result_sha256": None})
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="config drift"):
+        G0BNLedger.load(path)
+
+
+# ------------------------------------------------------------ durable persistence
+
+def test_path_bound_ledger_persists_every_event_immediately(tmp_path):
+    path = tmp_path / "durable.json"
+    led = G0BNLedger(path=path)
+    assert led.is_durable()
+    ident = _identity()
+    led.record_start(ident)
+    # No explicit save(): a crash after this point must not lose the start.
+    recovered = G0BNLedger.load(path)
+    assert recovered.n_effective_trials() == 1
+    assert [e["event"] for e in recovered.events()] == ["started"]
+    led.record_abort(ident, error="synthetic crash evidence")
+    recovered = G0BNLedger.load(path)
+    assert [e["event"] for e in recovered.events()] == ["started", "aborted"]
+
+
+def test_rejected_mutation_leaves_the_durable_file_unchanged(tmp_path):
+    path = tmp_path / "durable.json"
+    led = G0BNLedger(path=path)
+    ident = _identity()
+    led.record_completion(ident, _result())
+    before = path.read_text()
+    with pytest.raises(ValueError, match="DIFFERENT result"):
+        led.record_completion(ident, _result(n_rows=999))
+    assert path.read_text() == before
+
+
+def test_bound_constructor_refuses_an_existing_file(tmp_path):
+    path = tmp_path / "durable.json"
+    led = G0BNLedger(path=path)
+    led.record_start(_identity())
+    with pytest.raises(ValueError, match="exists"):
+        G0BNLedger(path=path)
+    resumed = G0BNLedger.load(path)          # load is the resume path and stays bound
+    resumed.record_abort(_identity(), error="resumed abort")
+    assert len(G0BNLedger.load(path).events()) == 2
+
+
 # ----------------------------------------------------------------- legacy isolation
 
 def test_never_imports_legacy_ledgers(tmp_path):

@@ -52,14 +52,54 @@ def _require_strict_json(path: str, obj) -> None:
         raise ValueError(f"{path} must be JSON-encodable; got {type(obj).__name__}")
 
 
-class G0BNLedger:
-    """Separate append-only G0-BN trial ledger. In-memory with atomic file
-    persistence; every mutation validates first and appends exactly one event, so a
-    rejected call leaves the ledger byte-identical."""
+def _fsync_dir(path) -> None:
+    fd = os.open(os.path.dirname(os.path.abspath(os.fspath(path))) or ".", os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
-    def __init__(self):
+
+class G0BNLedger:
+    """Separate append-only G0-BN trial ledger.
+
+    Bind a `path` to make the ledger DURABLE: every successful record_* call
+    atomically rewrites and fsyncs the file before returning, so a process crash
+    during a later candidate fit cannot erase an already-attempted identity from
+    effective N (spec section 4.2 — the attempt history is append-only evidence,
+    not best-effort state). A rejected call appends nothing and leaves the file
+    byte-identical. `run_g0bn_development` refuses an unbound ledger; the unbound
+    form exists for read-only reconciliation and unit tests.
+
+    The first registered identity pins the protocol config: once any
+    `g0bn-trial-v1` identity is registered, the v1 protocol config is immutable
+    and any identity under a different `protocol_config_sha256` fails closed
+    instead of registering as an ordinary new trial (spec section 3.1)."""
+
+    def __init__(self, path=None):
         self._identities: dict[str, dict] = {}   # trial_id -> record, first-seen order
         self._events: list[dict] = []
+        self._protocol_config_sha256: str | None = None
+        self._path: str | None = None
+        if path is not None:
+            path = os.fspath(path)
+            if os.path.exists(path):
+                raise ValueError(f"ledger file {path!r} already exists; resume it "
+                                 "with G0BNLedger.load(path) — binding a fresh "
+                                 "ledger over an existing history would fork it")
+            self._path = path
+
+    def is_durable(self) -> bool:
+        return self._path is not None
+
+    def protocol_config_sha256(self) -> str | None:
+        """The immutable protocol config this ledger is pinned to (None until the
+        first identity registers)."""
+        return self._protocol_config_sha256
+
+    def _persist(self) -> None:
+        if self._path is not None:
+            self.save(self._path)
 
     # ------------------------------------------------------------------ event plumbing
     def genesis_sha256(self) -> str:
@@ -86,6 +126,16 @@ class G0BNLedger:
         # Validation (exact g0bn-trial-v1 field set, embedded-hash consistency) runs
         # inside trial_id(); a legacy G0-CB/G0-XV identity shape fails here.
         tid = _trial_id(identity)
+        config_sha = identity["protocol_config_sha256"]
+        if self._protocol_config_sha256 is None:
+            self._protocol_config_sha256 = config_sha
+        elif config_sha != self._protocol_config_sha256:
+            raise ValueError(
+                f"protocol config drift fails closed (spec section 3.1): this ledger "
+                f"is pinned to config {self._protocol_config_sha256[:12]}... by its "
+                f"first registered trial, and the v1 config is immutable once any "
+                f"identity is registered; got {config_sha[:12]}... — an edited "
+                "config is a new protocol version, never a new trial")
         if tid not in self._identities:
             self._identities[tid] = {
                 "trial_id": tid,
@@ -101,6 +151,7 @@ class G0BNLedger:
         (it counts in effective N from this point, even if it later only aborts)."""
         tid = self._register_identity(identity)
         self._append_event(tid, "started", {}, recorded_at)
+        self._persist()
         return tid
 
     def record_abort(self, identity: dict, *, error: str,
@@ -112,6 +163,7 @@ class G0BNLedger:
                              "failure (aborted events are permanent evidence)")
         tid = self._register_identity(identity)
         self._append_event(tid, "aborted", {"error": error}, recorded_at)
+        self._persist()
         return tid
 
     def record_completion(self, identity: dict, result: dict, *,
@@ -138,6 +190,7 @@ class G0BNLedger:
         if rec["result_sha256"] is None:
             rec["result"] = result
             rec["result_sha256"] = rh
+        self._persist()
         return tid
 
     # --------------------------------------------------------------------- inspection
@@ -205,7 +258,10 @@ class G0BNLedger:
             with os.fdopen(fd, "w") as f:
                 json.dump(payload, f, indent=2, sort_keys=True, allow_nan=False)
                 f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)
+            _fsync_dir(path)
         except BaseException:
             if os.path.exists(tmp):
                 os.unlink(tmp)
@@ -293,4 +349,7 @@ class G0BNLedger:
             if payload.get(field) != recomputed:
                 raise ValueError(f"ledger file {field} does not match its entries "
                                  "(tampered or corrupted ledger)")
+        # A loaded ledger stays bound to its file: resuming a run keeps every new
+        # event durably persisted under the same append-only history.
+        ledger._path = os.fspath(path)
         return ledger

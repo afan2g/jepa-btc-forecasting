@@ -38,11 +38,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import sys
 from dataclasses import dataclass
 
 import lightgbm
 import numpy as np
 import pandas as pd
+import pyarrow
 import sklearn
 from lightgbm import LGBMClassifier, LGBMRegressor
 from sklearn.linear_model import Ridge
@@ -64,6 +66,7 @@ from eval.manifest import feature_list, manifest_sha256, validate_frame
 from eval.matrix import validate_matrix
 from eval.writer import (
     COST_ASSUMPTION_SOURCE,
+    G0BN_DATA_SOURCES,
     PARTITION_BINDING,
     PROTOCOL_BINDING,
     classify_manifest,
@@ -80,6 +83,11 @@ TEST_MULTIPLICITY = 5
 
 RESULT_SCHEMA = "g0bn-trial-result-v1"
 FORECAST_SERIES_SCHEMA = "g0bn-forecast-series-v1"
+# The development source-manifest identity: how G0-BN derives the config's
+# `development_source_manifest_sha256` evidence pin from a T8 manifest's Binance
+# source-object entries (ordered per-name hash lists), so a self-consistent
+# manifest backed by different/uncertified source objects fails closed.
+DEV_SOURCE_MANIFEST_SCHEMA = "g0bn-dev-source-manifest-v1"
 
 _DAY_NS = 86_400_000_000_000
 
@@ -99,6 +107,39 @@ PACKAGE_VERSIONS = {
 
 # ------------------------------------------------------------ runtime re-resolution
 
+def g0bn_candidate_code_sha256() -> str:
+    """The runtime identity of the candidate implementation: SHA-256 of THIS
+    module's source bytes. The config's per-candidate `candidate_code_sha256` must
+    pin exactly this value, so a modified checkout — even one keeping the pinned
+    package versions and estimator defaults — is a DIFFERENT trial, never a silent
+    reidentification (spec section 4.1). Deliberately uncached: the file is
+    re-read on every resolution so a mid-run source change cannot slip through."""
+    with open(__file__, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def verify_runtime_software(config: dict) -> None:
+    """Compare the config's pinned software versions to the RUNNING environment
+    (spec section 3.2: the config repeats values and code compares runtime-resolved
+    values to it). The repository commit/tree pins are deliberately NOT checked
+    here — git state is the 67-E one-shot runner's pre-burn self-verification
+    (spec section 6.3 step 1), where the operator supplies the checkout evidence."""
+    installed = {
+        "python_version": ".".join(str(v) for v in sys.version_info[:3]),
+        "numpy_version": np.__version__,
+        "pandas_version": pd.__version__,
+        "scikit_learn_version": sklearn.__version__,
+        "lightgbm_version": lightgbm.__version__,
+        "pyarrow_version": pyarrow.__version__,
+    }
+    for key, running in installed.items():
+        if config["software"][key] != running:
+            _fail(f"software.{key}",
+                  f"config pins {config['software'][key]!r} but the running "
+                  f"environment resolves {running!r}; a software change is a "
+                  "different build and must not execute under stale provenance")
+
+
 def resolve_runtime_candidate(defn: dict):
     """Re-validate a candidate definition and re-resolve its runtime instantiation.
 
@@ -112,6 +153,13 @@ def resolve_runtime_candidate(defn: dict):
         _fail("candidate definition", "must be a candidate definition dict")
     cid = defn["candidate_id"]
     _validate_candidate(f"candidates[{cid!r}]", defn, cid)
+    running_code = g0bn_candidate_code_sha256()
+    if defn["candidate_code_sha256"] != running_code:
+        _fail(f"candidates[{cid!r}].candidate_code_sha256",
+              f"pinned {defn['candidate_code_sha256']} but the running candidate "
+              f"implementation hashes to {running_code}; a code change is a "
+              "DIFFERENT trial and must never silently reidentify this one "
+              "(spec section 4.1)")
     if not defn["fitted"]:
         return None
     installed = PACKAGE_VERSIONS.get(defn["package"])
@@ -290,7 +338,11 @@ def cpcv_candidate_forecasts(defn: dict, rows: pd.DataFrame, *, embargo_ns: int)
 # ------------------------------------------------------------- input verification
 
 def _named_sources(manifest: dict) -> dict:
-    return {s["name"]: s for s in manifest["sources"] if isinstance(s, dict)}
+    named: dict = {}
+    for s in manifest["sources"]:
+        if isinstance(s, dict):
+            named.setdefault(s["name"], []).append(s)
+    return named
 
 
 def verify_development_inputs(frame: pd.DataFrame, manifest: dict, config: dict,
@@ -301,6 +353,7 @@ def verify_development_inputs(frame: pd.DataFrame, manifest: dict, config: dict,
     sorted by t_event (the producer's unique (t_event, horizon) invariant makes that
     order total)."""
     validate_protocol_config(config)
+    verify_runtime_software(config)
     development_data_identity(data_identity)
     if data_identity["partition_plan_sha256"] != config["partition"]["sha256"]:
         _fail("partition_plan_sha256",
@@ -320,11 +373,11 @@ def verify_development_inputs(frame: pd.DataFrame, manifest: dict, config: dict,
               f"development build {data_identity['development_build_id']}")
 
     named = _named_sources(manifest)
-    partition_binding = named[PARTITION_BINDING]
+    partition_binding = named[PARTITION_BINDING][0]
     if partition_binding["partition_plan_sha256"] != config["partition"]["sha256"]:
         _fail("partition_contract.partition_plan_sha256",
               "manifest partition binding does not pin the config's partition plan")
-    protocol_binding = named[PROTOCOL_BINDING]
+    protocol_binding = named[PROTOCOL_BINDING][0]
     if protocol_binding["protocol_config_sha256"] != config["sha256"]:
         _fail("g0bn_protocol.protocol_config_sha256",
               f"manifest pins protocol config "
@@ -339,7 +392,28 @@ def verify_development_inputs(frame: pd.DataFrame, manifest: dict, config: dict,
         _fail("g0bn_protocol.horizon_roles_sha256",
               "manifest horizon-role pin does not match the config's section-2.3 "
               "roles")
-    manifest_cost = {k: v for k, v in named[COST_ASSUMPTION_SOURCE].items()
+    # The manifest's ACTUAL evidence entries must reconcile with the certified
+    # config — not just the copies inside the protocol binding. The T8 writer
+    # validates these entries by allowlisted name and hex shape only; content
+    # binding against the #64 evidence is this gate's job (spec section 2.1).
+    cert_entry = named["source_certification"][0]
+    if cert_entry["sha256"] != cert_sha:
+        _fail("source_certification",
+              f"manifest source_certification entry pins {cert_entry['sha256']}, "
+              f"not the config's certified #64 evidence {cert_sha}")
+    source_map = {name: sorted(entry["sha256"] for entry in named.get(name, []))
+                  for name in G0BN_DATA_SOURCES}
+    dev_source_manifest_sha256 = hash_obj({"schema": DEV_SOURCE_MANIFEST_SCHEMA,
+                                           "sources": source_map})
+    expected_sources = config["source_certification"][
+        "development_source_manifest_sha256"]
+    if dev_source_manifest_sha256 != expected_sources:
+        _fail("sources",
+              f"the manifest's Binance source-object hashes derive development "
+              f"source-manifest {dev_source_manifest_sha256}, not the config's "
+              f"certified evidence pin {expected_sources}; a manifest backed by "
+              "different or uncertified source objects fails closed")
+    manifest_cost = {k: v for k, v in named[COST_ASSUMPTION_SOURCE][0].items()
                      if k != "name"}
     if manifest_cost != config["costs"]["cost_assumption"]:
         _fail("cost_assumption",
@@ -426,7 +500,16 @@ def run_g0bn_development(frame: pd.DataFrame, manifest: dict, config: dict,
     Per-trial infrastructure failures are recorded as aborted events (the unique
     identity still counts in effective N) and execution continues; a conflicting
     completion result propagates — a deterministic protocol must reproduce results
-    exactly, so non-determinism is a run failure, never a silent abort."""
+    exactly, so non-determinism is a run failure, never a silent abort.
+
+    The ledger must be path-bound (durable): every start is persisted BEFORE its
+    fit and every terminal event immediately after, so a process crash cannot
+    erase attempted identities from effective N (spec section 4.2)."""
+    if not ledger.is_durable():
+        _fail("ledger", "run_g0bn_development requires a path-bound durable ledger "
+                        "(G0BNLedger(path=...) or G0BNLedger.load(path)); an "
+                        "in-memory ledger would lose attempted identities on a "
+                        "crash and undercount effective N (spec section 4.2)")
     horizon_rows = verify_development_inputs(frame, manifest, config, data_identity)
     definitions = {d["candidate_id"]: d for d in config["candidates"]}
     embargo_ns = config["cv"]["embargo_ns"]

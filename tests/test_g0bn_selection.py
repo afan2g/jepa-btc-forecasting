@@ -46,6 +46,7 @@ from tests.g0bn_dev_fixtures import (
     dev_data_identity,
     dev_manifest,
     dev_matrix,
+    durable_ledger,
 )
 
 
@@ -341,7 +342,7 @@ def test_pbo_rejects_non_finite_input():
 @pytest.fixture(scope="module")
 def strong_run():
     frame, manifest, config, identity = dev_bundle()
-    ledger = G0BNLedger()
+    ledger = durable_ledger()
     run = run_g0bn_development(frame, manifest, config, identity, ledger)
     return run, development_selection(run)
 
@@ -350,7 +351,7 @@ def strong_run():
 def weak_run():
     frame, manifest, config, identity = dev_bundle(signal_bps=2.0, noise_bps=0.5,
                                                    seed=23)
-    ledger = G0BNLedger()
+    ledger = durable_ledger()
     run = run_g0bn_development(frame, manifest, config, identity, ledger)
     return run, development_selection(run)
 
@@ -457,7 +458,8 @@ def test_no_signal_blocks_the_freeze():
         shuffled.loc[idx, "label"] = label
     manifest2 = dev_manifest(config, shuffled)
     identity2 = dev_data_identity(config, manifest2, shuffled)
-    run = run_g0bn_development(shuffled, manifest2, config, identity2, G0BNLedger())
+    run = run_g0bn_development(shuffled, manifest2, config, identity2,
+                               durable_ledger())
     result = development_selection(run)
     assert result["freeze_blocked"] is True
     for tag in ("2s", "10s"):
@@ -471,7 +473,7 @@ def test_insufficient_days_block_eligibility():
     frame = dev_matrix(config, days=config["exclusions"]["included_days"][:10])
     manifest = dev_manifest(config, frame)
     identity = dev_data_identity(config, manifest, frame)
-    run = run_g0bn_development(frame, manifest, config, identity, G0BNLedger())
+    run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
     result = development_selection(run)
     assert result["freeze_blocked"] is True
     for tag in ("2s", "10s"):
@@ -498,6 +500,23 @@ def test_selection_rejects_tampered_forecasts(strong_run):
     tampered.forecasts[tid] = run.forecasts[tid] + 100.0   # free performance
     with pytest.raises(ValueError, match="forecast"):
         development_selection(tampered)
+
+
+def test_selection_rejects_metric_code_hash_drift(strong_run):
+    # The config's DSR/PBO code pins must match the RUNNING metric implementation
+    # (checked fail-fast, before any statistic is computed).
+    run, _ = strong_run
+    for block, pattern in (("dsr", "dsr"), ("pbo", "pbo")):
+        config = copy.deepcopy(run.config)
+        config["cv"][block]["code_sha256"] = "7" * 64
+        config["sha256"] = hash_obj(config, exclude_keys=("sha256", "generated_at"))
+        patched = DevelopmentRun(
+            config=config, data_identity=run.data_identity, manifest=run.manifest,
+            horizon_rows=run.horizon_rows, identities=run.identities,
+            forecasts=run.forecasts, split_scales=run.split_scales,
+            aborted=run.aborted, ledger=run.ledger)
+        with pytest.raises(ValueError, match=pattern):
+            development_selection(patched)
 
 
 def test_selection_rejects_tampered_row_content(strong_run):
@@ -740,7 +759,7 @@ def test_zero_persistence_denominator_invalidates_the_gate():
     frame.loc[idx, "label"] = np.resize(np.array([-1, 0, 1]), len(idx))
     manifest = dev_manifest(config, frame)
     identity = dev_data_identity(config, manifest, frame)
-    run = run_g0bn_development(frame, manifest, config, identity, G0BNLedger())
+    run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
     result = development_selection(run)
     assert result["freeze_blocked"] is True
     sel = result["selection"]["2s"]
@@ -761,7 +780,7 @@ def test_insufficient_uniqueness_sum_blocks_eligibility():
     frame = dev_matrix(config, rows_per_day=2)   # 24 days but sum(u) ~ 36 < 100
     manifest = dev_manifest(config, frame)
     identity = dev_data_identity(config, manifest, frame)
-    run = run_g0bn_development(frame, manifest, config, identity, G0BNLedger())
+    run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
     result = development_selection(run)
     for tag in ("2s", "10s"):
         block = result["horizons"][tag]

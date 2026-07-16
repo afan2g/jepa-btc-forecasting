@@ -10,7 +10,9 @@ vendor data, no real market data, no January values.
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 
 import lightgbm
 import numpy as np
@@ -19,6 +21,9 @@ import pyarrow
 import sklearn
 
 from eval.g0bn_config import validate_protocol_config
+from eval.g0bn_engine import DEV_SOURCE_MANIFEST_SCHEMA, g0bn_candidate_code_sha256
+from eval.g0bn_ledger import G0BNLedger
+from eval.g0bn_selection import g0bn_dsr_code_sha256, g0bn_pbo_code_sha256
 from eval.hashing import hash_obj
 from eval.manifest import manifest_sha256
 from eval.matrix import RESERVED
@@ -30,13 +35,39 @@ from tests.g0bn_protocol_fixtures import (
     dev_days,
     make_candidates,
     make_config,
+    make_cv,
     make_exclusions,
     make_software,
+    make_source_certification,
     sha_hex,
 )
 
 DAY_NS = 86_400_000_000_000
 N_INCLUDED_DAYS = 24
+
+# Synthetic Binance source-object evidence: the manifest's data-source entries and
+# the config's development_source_manifest_sha256 pin are derived from the SAME
+# constants, mirroring how a real config pins the certified #64/#68 evidence.
+DEV_SOURCE_SHAS = {
+    "binance_futures_l2_snapshot": sha_hex("src-l2-snapshot"),
+    "binance_futures_l2_delta": sha_hex("src-l2-delta"),
+    "binance_futures_trades": sha_hex("src-trades"),
+}
+
+
+def dev_source_manifest_sha256() -> str:
+    return hash_obj({"schema": DEV_SOURCE_MANIFEST_SCHEMA,
+                     "sources": {name: [sha] for name, sha in
+                                 DEV_SOURCE_SHAS.items()}})
+
+
+def durable_ledger() -> G0BNLedger:
+    """A path-bound ledger on a fresh temp file (run_g0bn_development requires
+    durability; the file lives outside the repo and is disposable test state)."""
+    fd, path = tempfile.mkstemp(prefix="g0bn-test-ledger-", suffix=".json")
+    os.close(fd)
+    os.unlink(path)
+    return G0BNLedger(path=path)
 
 
 def included_days(n: int = N_INCLUDED_DAYS) -> list:
@@ -68,10 +99,13 @@ def runtime_software(**over) -> dict:
 
 
 def runtime_candidates() -> list:
-    """67-A spec-literal candidate definitions with package_version resolved to the
-    installed libraries (the identity-bearing pinned version IS the installed one)."""
+    """67-A spec-literal candidate definitions with package_version AND the
+    candidate implementation hash resolved to the installed runtime (the
+    identity-bearing pins ARE the running environment's values)."""
     candidates = make_candidates()
+    running_code = g0bn_candidate_code_sha256()
     for defn in candidates:
+        defn["candidate_code_sha256"] = running_code
         if defn.get("package") == "scikit-learn":
             defn["package_version"] = sklearn.__version__
         elif defn.get("package") == "lightgbm":
@@ -79,10 +113,21 @@ def runtime_candidates() -> list:
     return candidates
 
 
+def runtime_cv(**over) -> dict:
+    cv = make_cv()
+    cv["dsr"] = dict(cv["dsr"], code_sha256=g0bn_dsr_code_sha256())
+    cv["pbo"] = dict(cv["pbo"], code_sha256=g0bn_pbo_code_sha256())
+    cv.update(over)
+    return cv
+
+
 def dev_config(**over) -> dict:
     over.setdefault("candidates", runtime_candidates())
     over.setdefault("software", runtime_software())
     over.setdefault("exclusions", dev_exclusions())
+    over.setdefault("cv", runtime_cv())
+    over.setdefault("source_certification", make_source_certification(
+        development_source_manifest_sha256=dev_source_manifest_sha256()))
     return validate_protocol_config(make_config(**over))
 
 
@@ -151,9 +196,8 @@ def dev_manifest(config: dict, frame: pd.DataFrame, *,
     and whose build_id derives from the frame's canonical logical rows."""
     cert = config["source_certification"]
     sources = [
-        {"name": "binance_futures_l2_snapshot", "sha256": sha_hex("src-l2-snapshot")},
-        {"name": "binance_futures_l2_delta", "sha256": sha_hex("src-l2-delta")},
-        {"name": "binance_futures_trades", "sha256": sha_hex("src-trades")},
+        {"name": name, "sha256": sha} for name, sha in DEV_SOURCE_SHAS.items()
+    ] + [
         {"name": "source_certification", "sha256": cert["certification_sha256"]},
         dict(config["costs"]["cost_assumption"], name="cost_assumption"),
         {"name": "partition_contract", "schema": "g0bn-partition-plan-v1",

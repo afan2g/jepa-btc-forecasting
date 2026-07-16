@@ -35,6 +35,7 @@ from tests.g0bn_dev_fixtures import (
     dev_bundle,
     dev_data_identity,
     dev_manifest,
+    durable_ledger,
     horizon_roles_sha256,
     runtime_candidates,
 )
@@ -427,6 +428,57 @@ def test_verify_rejects_partition_prefilter_violation(bundle):
         verify_development_inputs(frame, manifest, config, identity)
 
 
+def test_verify_rejects_uncertified_source_certification_entry(bundle):
+    # The manifest's actual source_certification ENTRY must equal the config's
+    # certified evidence hash — not just the copy inside the protocol binding.
+    frame, manifest, config, _ = bundle
+    man = copy.deepcopy(manifest)
+    for s in man["sources"]:
+        if s.get("name") == "source_certification":
+            s["sha256"] = "9" * 64
+    with pytest.raises(ValueError, match="source_certification"):
+        verify_development_inputs(frame, man, config,
+                                  dev_data_identity(config, man, frame))
+
+
+def test_verify_rejects_uncertified_source_object_hashes(bundle):
+    # Every Binance source-object hash in the manifest must reconcile with the
+    # config's development source-manifest evidence pin.
+    frame, manifest, config, _ = bundle
+    man = copy.deepcopy(manifest)
+    for s in man["sources"]:
+        if s.get("name") == "binance_futures_l2_delta":
+            s["sha256"] = "8" * 64
+    with pytest.raises(ValueError, match="source"):
+        verify_development_inputs(frame, man, config,
+                                  dev_data_identity(config, man, frame))
+
+
+def test_verify_rejects_installed_software_drift(bundle):
+    from tests.g0bn_dev_fixtures import dev_config, runtime_software
+    frame, _, _, _ = bundle
+    config = dev_config(software=runtime_software(numpy_version="0.0.0"))
+    manifest = dev_manifest(config, frame)
+    identity = dev_data_identity(config, manifest, frame)
+    with pytest.raises(ValueError, match="numpy"):
+        verify_development_inputs(frame, manifest, config, identity)
+
+
+def test_runtime_resolution_rejects_candidate_code_hash_drift():
+    from tests.g0bn_protocol_fixtures import make_candidates
+    # The 67-A fixture pins a synthetic code hash; the runtime gate must compare
+    # against the RUNNING candidate implementation and refuse the mismatch.
+    defn = make_candidates()[2]
+    with pytest.raises(ValueError, match="candidate_code_sha256"):
+        resolve_runtime_candidate(defn)
+
+
+def test_run_requires_a_durable_ledger(bundle):
+    frame, manifest, config, identity = bundle
+    with pytest.raises(ValueError, match="durable"):
+        run_g0bn_development(frame, manifest, config, identity, G0BNLedger())
+
+
 def test_verify_requires_rows_for_every_ladder_horizon(bundle):
     frame, _, config, _ = bundle
     sub = frame[frame["horizon"] != "60s"].reset_index(drop=True)
@@ -441,7 +493,7 @@ def test_verify_requires_rows_for_every_ladder_horizon(bundle):
 @pytest.fixture(scope="module")
 def dev_run(bundle):
     frame, manifest, config, identity = bundle
-    ledger = G0BNLedger()
+    ledger = durable_ledger()
     run = run_g0bn_development(frame, manifest, config, identity, ledger)
     return run, ledger
 
@@ -476,7 +528,7 @@ def test_run_results_pin_forecast_hashes(dev_run):
 def test_rerun_is_idempotent_and_deterministic(dev_run, bundle):
     run, ledger = dev_run
     frame, manifest, config, identity = bundle
-    ledger2 = G0BNLedger()
+    ledger2 = durable_ledger()
     run2 = run_g0bn_development(frame, manifest, config, identity, ledger2)
     assert ledger2.identity_set_sha256() == ledger.identity_set_sha256()
     for tid in run.forecasts:
@@ -493,7 +545,7 @@ def test_canonical_ordering_row_shuffle_does_not_change_results(dev_run, bundle)
     run, ledger = dev_run
     frame, manifest, config, identity = bundle
     shuffled = frame.sample(frac=1.0, random_state=3).reset_index(drop=True)
-    ledger3 = G0BNLedger()
+    ledger3 = durable_ledger()
     run3 = run_g0bn_development(shuffled, manifest, config, identity, ledger3)
     assert ledger3.identity_set_sha256() == ledger.identity_set_sha256()
 
@@ -526,7 +578,7 @@ def test_conflicting_prior_completion_fails_the_run_not_an_abort(bundle):
     # reproduce is non-determinism/tampering: the run must fail closed, never
     # downgrade the conflict to an aborted event.
     frame, manifest, config, identity = bundle
-    ledger = G0BNLedger()
+    ledger = durable_ledger()
     poisoned = base_trial_identities(config, identity)[0]
     ledger.record_completion(poisoned, {
         "schema": "g0bn-trial-result-v1", "n_rows": 1,
@@ -552,7 +604,7 @@ def test_infrastructure_abort_is_recorded_and_counted(bundle, monkeypatch):
             raise MemoryError("synthetic infrastructure failure")
 
     monkeypatch.setitem(eng.ESTIMATOR_CLASSES, "lightgbm.LGBMRegressor", _Dies)
-    ledger = G0BNLedger()
+    ledger = durable_ledger()
     run = run_g0bn_development(frame, manifest, config, identity, ledger)
     assert ledger.n_effective_trials() == 15          # aborted identities still count
     assert len(ledger.scored_trial_ids()) == 12       # lgbm_reg aborted at 3 horizons
