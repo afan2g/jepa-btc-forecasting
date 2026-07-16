@@ -117,9 +117,9 @@ MICROPRICE_PARAMS = {"input": "microprice_dev", "input_unit": "bps", "multiplier
 CLASSIFIER_SCALE_RULE = "unweighted_population_float64_plus_1e-9_v1"
 DRIFT_POLICY = "abs_true_over_observable_mid_v1"
 
-L2_SNAPSHOT_PRODUCT = "binance-futures/book_snapshot_v2"
-L2_DELTA_PRODUCT = "binance-futures/book_delta_v2"
-TRADE_PRODUCT = "binance-futures/trades_v1"
+L2_SNAPSHOT_PRODUCT = "book"
+L2_DELTA_PRODUCT = "book_delta_v2"
+TRADE_PRODUCT = "trades"
 
 GENERATED_AT = "2026-07-15T00:00:00Z"
 

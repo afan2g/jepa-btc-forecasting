@@ -233,6 +233,23 @@ def test_source_certification_pins_exact_certified_products(field, bad):
         validate_protocol_config(with_sha(cfg))
 
 
+def test_certified_products_match_the_repo_acquisition_contract():
+    # The certified products must be the repo's actual Lake products (the strict config
+    # has to validate against the real #64/#68 source declaration, not invented names):
+    # book (snapshot seed), book_delta_v2 (deltas), trades.
+    import ingest.lake_binance as lb
+    from eval.g0bn_config import (
+        CERTIFIED_L2_SNAPSHOT_PRODUCT,
+        CERTIFIED_L2_DELTA_PRODUCT,
+        CERTIFIED_TRADE_PRODUCT,
+    )
+    assert CERTIFIED_L2_SNAPSHOT_PRODUCT == lb.SEED_PRODUCT == "book"
+    assert CERTIFIED_L2_DELTA_PRODUCT == "book_delta_v2"
+    assert CERTIFIED_TRADE_PRODUCT == "trades"
+    assert CERTIFIED_L2_DELTA_PRODUCT in lb.FEEDS
+    assert CERTIFIED_TRADE_PRODUCT in lb.FEEDS
+
+
 def test_source_certification_requires_all_three_l2_and_trade_products():
     # The certified L2 source is snapshot + delta (both consumed by reconstruction),
     # plus trades — three products, none swappable outside the protocol identity.

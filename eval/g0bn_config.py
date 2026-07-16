@@ -51,11 +51,13 @@ OOS_DATASET_ID = "binance_single_venue_g0bn_oos"
 # different native IDs they update here like the other section-12 freeze inputs.
 CERTIFIED_PROVIDER = "crypto-lake"
 # The certified L2 source is snapshot + delta (both consumed by reconstruction), plus
-# trades — three distinct products, matching the T8 writer's G0BN_DATA_SOURCES. #93
-# reconciles these provider-path identities with writer.py's normalized source names.
-CERTIFIED_L2_SNAPSHOT_PRODUCT = "binance-futures/book_snapshot_v2"
-CERTIFIED_L2_DELTA_PRODUCT = "binance-futures/book_delta_v2"
-CERTIFIED_TRADE_PRODUCT = "binance-futures/trades_v1"
+# trades — three distinct products. These are the repo's actual #64/#68 Crypto Lake
+# native product IDs (ingest/lake_binance.py SEED_PRODUCT/FEEDS; docs/data.md §4.1):
+# `book` seeds book_delta_v2 reconstruction. #93 reconciles these native product IDs
+# with the T8 writer's normalized source names (binance_futures_l2_snapshot/delta/trades).
+CERTIFIED_L2_SNAPSHOT_PRODUCT = "book"
+CERTIFIED_L2_DELTA_PRODUCT = "book_delta_v2"
+CERTIFIED_TRADE_PRODUCT = "trades"
 
 # --- fixed instrument, windows, horizons, features, candidates (spec sections 2-4) ----
 
