@@ -144,6 +144,16 @@ def test_data_identity_requires_exact_field_set():
         development_data_identity(missing)
 
 
+def test_development_build_id_must_be_a_canonical_hex_build_id():
+    # G0-BN build_id is a 64-hex hash (eval.writer build_id_for / _hex64_field), so a
+    # non-hex label can't reconcile with any writer-validated manifest/freeze.
+    with pytest.raises(ValueError, match="development_build_id"):
+        development_data_identity(
+            make_data_identity(development_build_id="g0bn-dev-build-0001"))
+    with pytest.raises(ValueError, match="development_build_id"):
+        validate_trial_identity(make_trial_identity(development_build_id="not-hex-build"))
+
+
 def test_data_identity_field_validation():
     with pytest.raises(ValueError, match="development_dataset_id"):
         development_data_identity(make_data_identity(development_dataset_id="g0xv_dev"))
@@ -282,7 +292,7 @@ def test_trial_id_is_sensitive_to_every_identity_field():
         ("software_versions_sha256", "1" * 64),
         ("protocol_config_sha256", "1" * 64),
         ("source_certification_sha256", "1" * 64),
-        ("development_build_id", "g0bn-dev-build-0002"),
+        ("development_build_id", "2" * 64),
         ("development_manifest_sha256", "1" * 64),
         ("development_logical_row_sha256", "1" * 64),
         ("partition_plan_sha256", "1" * 64),

@@ -831,6 +831,11 @@ def _validate_candidates(candidates):
     if not isinstance(candidates, list) or len(candidates) != len(CANDIDATE_IDS):
         _fail(path, f"must be exactly the {len(CANDIDATE_IDS)} ordered section-4.1 "
                     f"candidate definitions")
+    # The one ordered feature registry has a single formula per feature; a feature
+    # consumed by multiple candidates (e.g. ofi_integrated by ofi_ridge and lgbm_reg)
+    # must carry the SAME formula hash across the ladder, else trial identities would
+    # record contradictory formula provenance for one shared matrix column.
+    feature_formula_hashes: dict = {}
     for i, defn in enumerate(candidates):
         cpath = f"{path}[{i}]"
         if not isinstance(defn, dict) or defn.get("candidate_id") != CANDIDATE_IDS[i]:
@@ -838,6 +843,13 @@ def _validate_candidates(candidates):
                   f"must equal {CANDIDATE_IDS[i]!r} (the pinned ladder order); "
                   f"got {defn.get('candidate_id') if isinstance(defn, dict) else defn!r}")
         _validate_candidate(cpath, defn, CANDIDATE_IDS[i])
+        for feat, sha in defn["feature_formula_sha256s"].items():
+            if feat in feature_formula_hashes and feature_formula_hashes[feat] != sha:
+                _fail(f"{cpath}.feature_formula_sha256s[{feat!r}]",
+                      f"formula hash {sha} disagrees with {feature_formula_hashes[feat]} "
+                      f"used by an earlier candidate; a feature has one formula across "
+                      f"the ladder")
+            feature_formula_hashes.setdefault(feat, sha)
 
 
 def _validate_selection(sel):

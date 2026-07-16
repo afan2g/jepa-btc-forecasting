@@ -612,7 +612,7 @@ def make_data_identity(config=None, **over) -> dict:
     plan_sha = (config or {"partition": make_partition()})["partition"]["sha256"]
     d = {
         "development_dataset_id": DEV_DATASET_ID,
-        "development_build_id": "g0bn-dev-build-0001",
+        "development_build_id": sha_hex("dev-build-0001"),
         "development_manifest_sha256": sha_hex("dev-manifest"),
         "development_logical_row_sha256": sha_hex("dev-logical-rows"),
         "partition_plan_sha256": plan_sha,
@@ -629,7 +629,7 @@ def make_trial_identity(**over) -> dict:
         "protocol_config_sha256": sha_hex("protocol-config"),
         "source_certification_sha256": hash_obj(make_source_certification()),
         "development_dataset_id": DEV_DATASET_ID,
-        "development_build_id": "g0bn-dev-build-0001",
+        "development_build_id": sha_hex("dev-build-0001"),
         "development_manifest_sha256": sha_hex("dev-manifest"),
         "development_logical_row_sha256": sha_hex("dev-logical-rows"),
         "partition_plan_sha256": make_partition()["sha256"],

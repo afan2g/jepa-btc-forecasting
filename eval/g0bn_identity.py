@@ -133,7 +133,7 @@ def development_data_identity(identity: dict) -> dict:
         _fail("development_dataset_id",
               f"must equal {DEV_DATASET_ID!r} (G0-BN trials are development-only; "
               f"got {identity['development_dataset_id']!r})")
-    _str("development_build_id", identity["development_build_id"])
+    _sha256("development_build_id", identity["development_build_id"])
     _sha256("development_manifest_sha256", identity["development_manifest_sha256"])
     _sha256("development_logical_row_sha256", identity["development_logical_row_sha256"])
     _sha256("partition_plan_sha256", identity["partition_plan_sha256"])
@@ -194,7 +194,7 @@ def validate_trial_identity(identity: dict) -> dict:
         _fail("development_dataset_id",
               f"must equal {DEV_DATASET_ID!r} (trials never bind OOS/holdout data); "
               f"got {identity['development_dataset_id']!r}")
-    _str("development_build_id", identity["development_build_id"])
+    _sha256("development_build_id", identity["development_build_id"])
     if identity["candidate_id"] not in CANDIDATE_IDS:
         _fail("candidate_id", f"must be one of {CANDIDATE_IDS}; "
                               f"got {identity['candidate_id']!r}")

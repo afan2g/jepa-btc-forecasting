@@ -494,6 +494,15 @@ def test_candidate_inputs_are_pinned():
         validate_protocol_config(with_sha(make_config(candidates=cands)))
 
 
+def test_reused_feature_formula_hashes_must_be_consistent_across_candidates():
+    # The single ordered feature registry has one formula per feature; ofi_ridge and
+    # lgbm_reg both consume ofi_integrated, so its formula hash must agree across them.
+    cands = fx.make_candidates()
+    cands[3]["feature_formula_sha256s"]["ofi_integrated"] = fx.sha_hex("divergent-ofi")
+    with pytest.raises(ValueError, match="ofi_integrated|formula"):
+        validate_protocol_config(with_sha(make_config(candidates=cands)))
+
+
 def test_candidate_hash_consistency_enforced():
     cands = fx.make_candidates()
     cands[3]["model_params"]["learning_rate"] = 0.05  # unchanged value, stale hash below
