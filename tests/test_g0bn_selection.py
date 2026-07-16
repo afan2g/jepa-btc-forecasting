@@ -489,7 +489,7 @@ def test_insufficient_days_block_eligibility():
 def test_selection_rejects_tampered_forecasts(strong_run):
     run, _ = strong_run
     tampered = DevelopmentRun(
-        config=run.config, data_identity=run.data_identity,
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
         forecasts=dict(run.forecasts), split_scales=run.split_scales,
         aborted=run.aborted, ledger=run.ledger)
@@ -500,10 +500,60 @@ def test_selection_rejects_tampered_forecasts(strong_run):
         development_selection(tampered)
 
 
+def test_selection_rejects_tampered_row_content(strong_run):
+    # The forecast hash covers only (t_event, forecasts): mutating y/cost/
+    # uniqueness while preserving t_event would pass every ledger check, so
+    # selection must re-bind the actual rows to the pinned logical-row hash.
+    run, _ = strong_run
+    rows = {tag: df.copy() for tag, df in run.horizon_rows.items()}
+    rows["2s"].loc[3, "y_fwd_bps"] += 5.0
+    tampered = DevelopmentRun(
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
+        horizon_rows=rows, identities=run.identities,
+        forecasts=run.forecasts, split_scales=run.split_scales,
+        aborted=run.aborted, ledger=run.ledger)
+    with pytest.raises(ValueError, match="logical"):
+        development_selection(tampered)
+
+
+def test_selection_rejects_stale_collapse_version_results(strong_run):
+    # A completed result whose collapse_version is not the mandatory
+    # mean_repeated_test_forecasts_v1 (or whose schema is foreign) must not enter
+    # dispersion/PBO even when its series hash matches.
+    run, _ = strong_run
+    base = next(t for t, i in run.identities.items()
+                if i["horizon"] == "2s" and i["candidate_id"] == "ofi_ridge")
+    rows = run.horizon_rows["2s"]
+    series = rows["y_fwd_bps"].to_numpy(np.float64).copy()
+    for field, value in (("collapse_version", "median_of_test_forecasts_v0"),
+                         ("schema", "g0xv-trial-result-v1")):
+        variant = dict(copy.deepcopy(run.identities[base]), variant="probe",
+                       variant_params={"k": field})
+        led = G0BNLedger()
+        for tid, ident in run.identities.items():
+            led.record_completion(ident, run.ledger.result_for(tid))
+        result = {
+            "schema": "g0bn-trial-result-v1", "n_rows": int(len(rows)),
+            "forecasts_sha256": forecast_series_sha256(
+                rows["t_event"].to_numpy(np.int64), "2s", series),
+            "collapse_version": "mean_repeated_test_forecasts_v1",
+            "split_scales": None}
+        result[field] = value
+        led.record_completion(variant, result)
+        patched = DevelopmentRun(
+            config=run.config, data_identity=run.data_identity,
+            manifest=run.manifest, horizon_rows=run.horizon_rows,
+            identities=run.identities, forecasts=run.forecasts,
+            split_scales=run.split_scales, aborted=run.aborted, ledger=led)
+        with pytest.raises(ValueError, match="collapse|schema"):
+            development_selection(patched,
+                                  extra_forecasts={hash_obj(variant): series})
+
+
 def test_selection_rejects_missing_scored_forecasts(strong_run):
     run, _ = strong_run
     crippled = DevelopmentRun(
-        config=run.config, data_identity=run.data_identity,
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
         forecasts=dict(run.forecasts), split_scales=run.split_scales,
         aborted=run.aborted, ledger=run.ledger)
@@ -533,7 +583,7 @@ def test_selection_rejects_wrong_length_extra_forecasts(strong_run):
         "collapse_version": "mean_repeated_test_forecasts_v1",
         "split_scales": None})
     patched = DevelopmentRun(
-        config=run.config, data_identity=run.data_identity,
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
         forecasts=run.forecasts, split_scales=run.split_scales,
         aborted=run.aborted, ledger=led)
@@ -562,7 +612,7 @@ def _run_with_variant(run, variant_forecasts):
         "collapse_version": "mean_repeated_test_forecasts_v1",
         "split_scales": None})
     patched = DevelopmentRun(
-        config=run.config, data_identity=run.data_identity,
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
         forecasts=run.forecasts, split_scales=run.split_scales,
         aborted=run.aborted, ledger=led)
@@ -608,7 +658,7 @@ def test_aborted_variant_increases_n_trials_and_nothing_else(strong_run):
     led.record_start(variant)
     led.record_abort(variant, error="killed")
     patched = DevelopmentRun(
-        config=run.config, data_identity=run.data_identity,
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
         forecasts=run.forecasts, split_scales=run.split_scales,
         aborted=run.aborted, ledger=led)
@@ -644,7 +694,7 @@ def test_60s_metrics_cannot_select_or_rescue(strong_run):
         else:
             led.record_completion(ident, run.ledger.result_for(tid))
     patched = DevelopmentRun(
-        config=run.config, data_identity=run.data_identity,
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
         forecasts=forecasts, split_scales=run.split_scales,
         aborted=run.aborted, ledger=led)
@@ -742,7 +792,7 @@ def test_selection_rejects_foreign_development_identity(strong_run):
         "collapse_version": "mean_repeated_test_forecasts_v1",
         "split_scales": None})
     patched = DevelopmentRun(
-        config=run.config, data_identity=run.data_identity,
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
         forecasts=run.forecasts, split_scales=run.split_scales,
         aborted=run.aborted, ledger=led)
@@ -766,7 +816,7 @@ def test_off_ladder_horizon_trial_counts_in_n_trials_only(strong_run):
         "collapse_version": "mean_repeated_test_forecasts_v1",
         "split_scales": None})
     patched = DevelopmentRun(
-        config=run.config, data_identity=run.data_identity,
+        config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
         forecasts=run.forecasts, split_scales=run.split_scales,
         aborted=run.aborted, ledger=led)

@@ -246,6 +246,7 @@ class G0BNLedger:
                                  "without its result (tampered or corrupted ledger)")
         prev = ledger.genesis_sha256()
         completed_tids = set()
+        event_tids = set()
         for i, event in enumerate(payload.get("events", [])):
             body = {k: v for k, v in event.items() if k != "sha256"}
             expected = dict(body)
@@ -263,8 +264,17 @@ class G0BNLedger:
                                      "that does not match the identity's immutable "
                                      "result (tampered or corrupted ledger)")
                 completed_tids.add(event["trial_id"])
+            event_tids.add(event["trial_id"])
             ledger._events.append(copy.deepcopy(event))
             prev = event["sha256"]
+        # Every registration path appends an event, so an identity record with no
+        # event at all is fabricated: it would inflate effective N (and therefore
+        # the DSR n_trials benchmark) without any append-only execution evidence.
+        eventless = [tid for tid in ledger._identities if tid not in event_tids]
+        if eventless:
+            raise ValueError(f"ledger identity records with no execution event in "
+                             f"the history: {[t[:12] for t in eventless[:3]]} "
+                             "(tampered or corrupted ledger)")
         # Every pinned result must be witnessed by at least one completed event in
         # the chained history: a crafted identity record carrying a result that no
         # execution event ever produced is a fabricated outcome, not a record.

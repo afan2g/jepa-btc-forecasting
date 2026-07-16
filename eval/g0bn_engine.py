@@ -403,9 +403,12 @@ def verify_development_inputs(frame: pd.DataFrame, manifest: dict, config: dict,
 class DevelopmentRun:
     """In-memory outcome of one development execution pass: the ledger holds the
     durable identity/event/result records; forecasts stay in memory for the
-    selection stage (which re-verifies them against the ledger result hashes)."""
+    selection stage, which re-verifies them against the ledger result hashes AND
+    re-binds the carried rows to the pinned logical-row identity (the manifest is
+    kept for that recomputation)."""
     config: dict
     data_identity: dict
+    manifest: dict
     horizon_rows: dict
     identities: dict
     forecasts: dict
@@ -457,6 +460,7 @@ def run_g0bn_development(frame: pd.DataFrame, manifest: dict, config: dict,
         forecasts[tid] = fc
         split_scales[tid] = scales
     return DevelopmentRun(config=config, data_identity=data_identity,
-                          horizon_rows=horizon_rows, identities=identities,
-                          forecasts=forecasts, split_scales=split_scales,
-                          aborted=aborted, ledger=ledger)
+                          manifest=manifest, horizon_rows=horizon_rows,
+                          identities=identities, forecasts=forecasts,
+                          split_scales=split_scales, aborted=aborted,
+                          ledger=ledger)

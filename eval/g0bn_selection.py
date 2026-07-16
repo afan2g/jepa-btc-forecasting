@@ -51,16 +51,19 @@ from eval.g0bn_config import (
     BOOTSTRAP_KIND,
     CANDIDATE_IDS,
     DSR_ROUNDING_RULE,
+    FORECAST_COLLAPSE_VERSION,
     PBO_IS_TIE_RULE,
     PBO_OOS_RANK_RULE,
     SELECTABLE_CANDIDATE_IDS,
     _fail,
     validate_protocol_config,
 )
-from eval.g0bn_engine import forecast_series_sha256
+from eval.g0bn_engine import RESULT_SCHEMA, forecast_series_sha256
 from eval.g0bn_identity import base_trial_identities, trial_id as _trial_id
 from eval.hashing import canonical_json, hash_obj, split_hash
+from eval.manifest import manifest_sha256
 from eval.stats import deflated_sharpe
+from eval.writer import logical_row_sha256, ordered_manifest_columns
 
 DEVELOPMENT_RESULT_SCHEMA = "g0bn-development-result-v1"
 PBO_INPUT_SCHEMA = "g0bn-pbo-input-v1"
@@ -482,6 +485,25 @@ def development_selection(run, *, extra_forecasts: dict | None = None,
     if unknown:
         _fail("extra_forecasts", f"trials not present in the ledger: {unknown[:3]}")
 
+    # Re-bind the rows this call actually scores to the pinned development data
+    # identity. The ledger forecast hashes cover only (t_event, forecast) bytes,
+    # so a carried DevelopmentRun with mutated reserved columns (y_fwd_bps,
+    # costs, uniqueness) would otherwise pass every ledger check and corrupt
+    # lift/net/DSR/PBO and the freeze choice.
+    if manifest_sha256(run.manifest) != data_identity["development_manifest_sha256"]:
+        _fail("manifest", "the run's manifest does not match the pinned "
+                          "development manifest hash")
+    scored_frame = pd.concat([run.horizon_rows[tag] for tag in ladder_tags],
+                             ignore_index=True)
+    scored_lrh = logical_row_sha256(scored_frame,
+                                    ordered_manifest_columns(run.manifest))
+    if scored_lrh != data_identity["development_logical_row_sha256"]:
+        _fail("horizon_rows",
+              f"the rows entering selection hash to logical rows {scored_lrh}, "
+              f"not the pinned development_logical_row_sha256 "
+              f"{data_identity['development_logical_row_sha256']} — refusing to "
+              "score mutated or foreign rows")
+
     # ---- reconcile every successfully scored ladder-horizon trial with the ledger
     scored_by_tag: dict = {tag: [] for tag in ladder_tags}
     forecast_map: dict = {}
@@ -516,6 +538,15 @@ def development_selection(run, *, extra_forecasts: dict | None = None,
         if not np.isfinite(forecasts).all():
             _fail("forecasts", f"trial {tid[:12]}... forecasts must be finite")
         result = ledger.result_for(tid)
+        if result.get("schema") != RESULT_SCHEMA:
+            _fail("ledger", f"scored trial {tid[:12]}... carries result schema "
+                            f"{result.get('schema')!r}; only {RESULT_SCHEMA!r} "
+                            "results may enter selection")
+        if result.get("collapse_version") != FORECAST_COLLAPSE_VERSION:
+            _fail("ledger", f"scored trial {tid[:12]}... was collapsed under "
+                            f"{result.get('collapse_version')!r}; section 3.4 "
+                            f"mandates {FORECAST_COLLAPSE_VERSION!r} for every "
+                            "series entering lift/net/DSR/PBO")
         if result.get("n_rows") != len(rows):
             _fail("forecasts", f"trial {tid[:12]}... result n_rows does not match "
                                f"the common row universe at {tag}")

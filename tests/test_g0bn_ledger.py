@@ -293,6 +293,34 @@ def test_load_rejects_completed_event_with_stripped_result(tmp_path):
         G0BNLedger.load(path)
 
 
+def test_load_rejects_identity_with_no_execution_event(tmp_path):
+    # Every real registration appends an event, so an identity record with zero
+    # started/aborted/completed events is fabricated — even when the crafted file
+    # recomputes every summary hash, it must not inflate effective N.
+    from eval.g0bn_ledger import LEDGER_SCHEMA
+    led = G0BNLedger()
+    led.record_completion(_identity(), _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    extra = _identity(horizon="60s", horizon_role="control-only")
+    payload["identities"].append({"trial_id": trial_id(extra), "identity": extra,
+                                  "result": None, "result_sha256": None})
+    pairs = sorted((r["trial_id"], r["result_sha256"])
+                   for r in payload["identities"])
+    payload["identity_set_sha256"] = hash_obj(
+        {"schema": LEDGER_SCHEMA, "trials": [list(p) for p in pairs]})
+    payload["n_effective_trials"] += 1
+    payload["ledger_sha256"] = hash_obj({
+        "schema": LEDGER_SCHEMA,
+        "n_effective_trials": payload["n_effective_trials"],
+        "identity_set_sha256": payload["identity_set_sha256"],
+        "history_sha256": payload["history_sha256"]})
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="no execution event"):
+        G0BNLedger.load(path)
+
+
 def test_load_rejects_wrong_schema(tmp_path):
     led = G0BNLedger()
     led.record_completion(_identity(), _result())
