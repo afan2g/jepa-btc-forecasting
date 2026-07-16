@@ -117,9 +117,13 @@ MICROPRICE_PARAMS = {"input": "microprice_dev", "input_unit": "bps", "multiplier
 CLASSIFIER_SCALE_RULE = "unweighted_population_float64_plus_1e-9_v1"
 DRIFT_POLICY = "abs_true_over_observable_mid_v1"
 
+# Crypto Lake native vendor product IDs (source_certification.*_product).
 L2_SNAPSHOT_PRODUCT = "book"
 L2_DELTA_PRODUCT = "book_delta_v2"
 TRADE_PRODUCT = "trades"
+# Normalized internal producer stream identity (clock.reference_stream) — a different
+# layer from the native product ID above; matches the T8 writer's manifest bar_clock.
+NORMALIZED_TRADE_STREAM = "binance_futures_trades"
 
 GENERATED_AT = "2026-07-15T00:00:00Z"
 
@@ -299,7 +303,9 @@ def make_producer(**over) -> dict:
 def make_clock(**over) -> dict:
     d = {
         "kind": "dollar",
-        "reference_stream": TRADE_PRODUCT,
+        # Normalized internal producer stream identity (NOT the native vendor product
+        # ID TRADE_PRODUCT="trades") — matches the T8 writer's manifest bar_clock.
+        "reference_stream": NORMALIZED_TRADE_STREAM,
         "development_schedule_sha256": sha_hex("dev-schedule"),
         "target_bars_per_day": 5000,
         "time_cap_ns": 60_000_000_000,

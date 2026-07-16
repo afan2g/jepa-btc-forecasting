@@ -276,13 +276,29 @@ def test_source_certification_products_must_be_distinct():
         validate_protocol_config(with_sha(make_config(source_certification=same)))
 
 
-def test_clock_reference_stream_must_be_the_certified_trade_product():
-    # Spec 2.1/3.2: the bar clock is driven by the single certified Binance-perp
-    # trade product; a Coinbase/spot reference stream must fail closed.
-    for bad in ("coinbase-spot/trades", "binance-spot/trades_v1"):
+def test_clock_reference_stream_pinned_to_the_normalized_stream():
+    # The bar clock is pinned to the normalized producer stream identity
+    # ("binance_futures_trades"), matching the T8 writer's manifest bar_clock. Any
+    # other value fails closed — including a Coinbase/spot stream AND the native
+    # vendor product ID "trades" (no aliasing between the two naming layers).
+    from eval.g0bn_config import NORMALIZED_TRADE_STREAM
+    assert NORMALIZED_TRADE_STREAM == "binance_futures_trades"
+    for bad in ("coinbase-spot/trades", "binance-spot/trades_v1", "trades",
+                "book_delta_v2"):
         cfg = make_config(clock=fx.make_clock(reference_stream=bad))
         with pytest.raises(ValueError, match="reference_stream"):
             validate_protocol_config(with_sha(cfg))
+    # the normalized stream validates
+    validate_protocol_config(fx.make_config())
+
+
+def test_clock_reference_stream_matches_the_merged_writer_manifest_contract():
+    # Cross-contract regression: the locally-defined normalized stream must equal the
+    # merged T8 writer's manifest constant, so config and manifest reconcile at the
+    # freeze/pre-burn comparison. (g0bn_config keeps no runtime eval.writer import.)
+    from eval.g0bn_config import NORMALIZED_TRADE_STREAM
+    from eval.writer import G0BN_CLOCK_REFERENCE_STREAM
+    assert NORMALIZED_TRADE_STREAM == G0BN_CLOCK_REFERENCE_STREAM
 
 
 def test_repository_object_ids_use_one_declared_format():

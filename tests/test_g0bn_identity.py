@@ -198,15 +198,34 @@ def test_trial_identity_rejects_negative_zero_in_subtree():
         validate_trial_identity(make_trial_identity(variant_params=poisoned))
 
 
+def test_off_ladder_horizon_is_recordable_but_distinct_and_not_eligible():
+    # §4.2: an off-ladder horizon (e.g. an accidental tau rung) mints a valid, DISTINCT,
+    # recordable trial identity that counts toward N/DSR — but it is NOT eligible for
+    # v1 selection (base_trial_identities never emits it).
+    off = make_trial_identity(horizon="30s", horizon_role="exploratory")
+    assert validate_trial_identity(off) is off          # recordable (not rejected)
+    base_2s = trial_id(make_trial_identity(horizon="2s", horizon_role="primary"))
+    assert trial_id(off) != base_2s                      # distinct identity
+    # ... and the eligible ladder is still exactly the 15 base trials — no off-ladder.
+    from g0bn_protocol_fixtures import make_config, make_data_identity
+    config = make_config()
+    identities = base_trial_identities(config, make_data_identity(config))
+    assert len(identities) == 15
+    assert all(i["horizon"] in ("2s", "10s", "60s") for i in identities)
+    assert "30s" not in {i["horizon"] for i in identities}
+
+
 def test_trial_identity_field_validation():
     with pytest.raises(ValueError, match="schema"):
         validate_trial_identity(make_trial_identity(schema="g0xv-trial-v1"))
     with pytest.raises(ValueError, match="candidate_id"):
         validate_trial_identity(make_trial_identity(candidate_id="magic_extra_model"))
     with pytest.raises(ValueError, match="horizon"):
-        validate_trial_identity(make_trial_identity(horizon="30s"))
+        validate_trial_identity(make_trial_identity(horizon=""))  # non-empty required
     with pytest.raises(ValueError, match="horizon_role"):
-        validate_trial_identity(make_trial_identity(horizon="60s"))  # role stays primary
+        validate_trial_identity(make_trial_identity(horizon="60s"))  # base role stays primary
+    with pytest.raises(ValueError, match="horizon_role"):
+        validate_trial_identity(make_trial_identity(horizon="2s", horizon_role=""))
     with pytest.raises(ValueError, match="development_dataset_id"):
         validate_trial_identity(
             make_trial_identity(development_dataset_id="binance_single_venue_g0bn_oos"))

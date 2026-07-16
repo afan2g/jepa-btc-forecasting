@@ -59,6 +59,17 @@ CERTIFIED_L2_SNAPSHOT_PRODUCT = "book"
 CERTIFIED_L2_DELTA_PRODUCT = "book_delta_v2"
 CERTIFIED_TRADE_PRODUCT = "trades"
 
+# The normalized INTERNAL producer stream identity that drives the bar clock — a
+# DIFFERENT layer from the Crypto Lake native vendor product ID above. The manifest's
+# bar_clock (produced by the T8 writer, eval.writer.G0BN_CLOCK_REFERENCE_STREAM) uses
+# this normalized name, so the config's clock.reference_stream is pinned to it (not to
+# the native `trades` product) — otherwise no config/manifest pair could satisfy both
+# validators at the freeze/pre-burn comparison. A cross-contract test asserts this
+# equals eval.writer.G0BN_CLOCK_REFERENCE_STREAM; #93 owns the complete native-vendor↔
+# normalized three-source/artifact reconciliation. Defined locally to keep
+# eval.g0bn_config free of a runtime eval.writer import.
+NORMALIZED_TRADE_STREAM = "binance_futures_trades"
+
 # --- fixed instrument, windows, horizons, features, candidates (spec sections 2-4) ----
 
 INSTRUMENT = {
@@ -461,7 +472,7 @@ def _validate_producer(prod):
                     "object format (both 40-hex or both 64-hex)")
 
 
-def _validate_clock(clock, source_certification):
+def _validate_clock(clock):
     path = "clock"
     _dict(path, clock, (
         "kind", "reference_stream", "development_schedule_sha256", "target_bars_per_day",
@@ -469,14 +480,11 @@ def _validate_clock(clock, source_certification):
         "adaptive_threshold_update_rule", "development_end_state_sha256",
     ))
     _exact(f"{path}.kind", clock["kind"], "dollar")
-    _str(f"{path}.reference_stream", clock["reference_stream"])
-    # Spec 2.1/3.2: the single certified Binance-perpetual trade product drives the
-    # bar clock; any other reference stream is a source-isolation violation.
-    if clock["reference_stream"] != source_certification.get("trade_product"):
-        _fail(f"{path}.reference_stream",
-              f"must equal source_certification.trade_product "
-              f"({source_certification.get('trade_product')!r}); "
-              f"got {clock['reference_stream']!r}")
+    # The bar clock is driven by the certified Binance-perpetual own-trade stream, named
+    # by its normalized producer stream identity (spec 2.1/3.2). Pinned exactly to the
+    # normalized stream so the config matches the T8 writer's manifest bar_clock; any
+    # other value (a foreign venue, or even the native `trades` product ID) fails closed.
+    _exact(f"{path}.reference_stream", clock["reference_stream"], NORMALIZED_TRADE_STREAM)
     _sha256(f"{path}.development_schedule_sha256", clock["development_schedule_sha256"])
     _int(f"{path}.target_bars_per_day", clock["target_bars_per_day"], minimum=1)
     _int(f"{path}.time_cap_ns", clock["time_cap_ns"], minimum=1)
@@ -996,7 +1004,7 @@ def validate_protocol_config(config: dict) -> dict:
     _validate_instrument("instrument", config["instrument"])
     _validate_source_certification(config["source_certification"])
     _validate_producer(config["producer"])
-    _validate_clock(config["clock"], config["source_certification"])
+    _validate_clock(config["clock"])
     _validate_features(config["features"])
     _validate_labels(config["labels"])
     _validate_costs(config["costs"])

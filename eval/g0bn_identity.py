@@ -188,12 +188,18 @@ def validate_trial_identity(identity: dict) -> dict:
     if identity["candidate_id"] not in CANDIDATE_IDS:
         _fail("candidate_id", f"must be one of {CANDIDATE_IDS}; "
                               f"got {identity['candidate_id']!r}")
-    if identity["horizon"] not in HORIZON_ROLES:
-        _fail("horizon", f"must be one of {tuple(HORIZON_ROLES)}; "
-                         f"got {identity['horizon']!r}")
-    if identity["horizon_role"] != HORIZON_ROLES[identity["horizon"]]:
+    # An off-ladder horizon (e.g. an accidental data-derived tau rung attempted after
+    # v1 trials start) is still a valid, RECORDABLE trial identity that counts toward
+    # effective N / DSR provenance (spec §4.2); it is simply not eligible for v1
+    # selection (base_trial_identities never emits it). So accept a non-empty
+    # off-ladder horizon/role, but keep exact role consistency for the three base
+    # horizons. Eligibility is enforced at enumeration/selection, not here.
+    _str("horizon", identity["horizon"])
+    _str("horizon_role", identity["horizon_role"])
+    if (identity["horizon"] in HORIZON_ROLES
+            and identity["horizon_role"] != HORIZON_ROLES[identity["horizon"]]):
         _fail("horizon_role", f"must equal {HORIZON_ROLES[identity['horizon']]!r} for "
-                              f"horizon {identity['horizon']!r}; "
+                              f"base horizon {identity['horizon']!r}; "
                               f"got {identity['horizon_role']!r}")
     for k in ("preprocessing", "model_params", "seed_and_thread_settings",
               "variant_params"):
