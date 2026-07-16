@@ -1,0 +1,319 @@
+"""Append-only G0-BN attempt ledger tests (issue #88, slice 67-B; spec section 4.2).
+
+Covers spec section 11 item 4: append-only behavior, exact-rerun idempotency,
+conflicting-result rejection, unique aborted/additional-variant counting with no
+replacement, and structural rejection of legacy G0-CB/G0-XV ledger content.
+All identities are synthetic (tests/g0bn_protocol_fixtures.py); no vendor data.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from eval.g0bn_identity import trial_id
+from eval.g0bn_ledger import LEDGER_SCHEMA, G0BNLedger
+from eval.hashing import hash_obj
+from eval.ledger import TrialLedger, trial_identity as legacy_trial_identity
+from tests.g0bn_protocol_fixtures import make_trial_identity, sha_hex
+
+
+def _identity(**over) -> dict:
+    return make_trial_identity(**over)
+
+
+def _result(tag: str = "r0", **over) -> dict:
+    d = {
+        "schema": "g0bn-trial-result-v1",
+        "n_rows": 240,
+        "forecasts_sha256": sha_hex(f"forecasts-{tag}"),
+        "collapse_version": "mean_repeated_test_forecasts_v1",
+        "split_scales": None,
+    }
+    d.update(over)
+    return d
+
+
+# --------------------------------------------------------------- registration / counting
+
+def test_schema_constant_is_spec_literal():
+    assert LEDGER_SCHEMA == "g0bn-ledger-v1"
+
+
+def test_completion_registers_unique_identity_and_result():
+    led = G0BNLedger()
+    ident = _identity()
+    tid = led.record_start(ident)
+    assert tid == trial_id(ident)
+    assert led.record_completion(ident, _result()) == tid
+    assert led.n_effective_trials() == 1
+    assert led.scored_trial_ids() == [tid]
+    assert led.result_for(tid) == _result()
+    assert led.identity_for(tid) == ident
+
+
+def test_effective_n_counts_unique_identities_not_executions():
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_start(ident)
+    led.record_completion(ident, _result())
+    # A second full execution of the SAME identity is an idempotent execution event.
+    led.record_start(ident)
+    led.record_completion(ident, _result())
+    assert led.n_effective_trials() == 1
+    assert len(led.events()) == 4  # every execution event is recorded, append-only
+
+
+def test_exact_rerun_must_reproduce_existing_result_hash():
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_completion(ident, _result())
+    events_before = len(led.events())
+    with pytest.raises(ValueError, match="DIFFERENT result"):
+        led.record_completion(ident, _result(n_rows=241))
+    # Conflict appends nothing and replaces nothing (no silent overwrite).
+    assert len(led.events()) == events_before
+    assert led.result_for(trial_id(ident)) == _result()
+    assert led.n_effective_trials() == 1
+
+
+def test_aborted_only_identity_counts_once_in_effective_n():
+    led = G0BNLedger()
+    ident = _identity(horizon="10s")
+    led.record_start(ident)
+    tid = led.record_abort(ident, error="lightgbm segfault (infrastructure)")
+    assert led.n_effective_trials() == 1
+    assert led.result_for(tid) is None
+    assert led.scored_trial_ids() == []
+    # A second abort of the same identity still counts once.
+    led.record_abort(ident, error="oom")
+    assert led.n_effective_trials() == 1
+
+
+def test_retry_after_abort_may_complete_under_same_identity():
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_start(ident)
+    led.record_abort(ident, error="transient")
+    led.record_start(ident)
+    tid = led.record_completion(ident, _result())
+    assert led.n_effective_trials() == 1
+    assert led.result_for(tid) == _result()
+
+
+def test_changed_variant_is_a_new_immutable_trial():
+    led = G0BNLedger()
+    base = _identity()
+    led.record_completion(base, _result())
+    variant = _identity(variant="alpha_sweep", variant_params={"alpha": 2.0})
+    vid = led.record_completion(variant, _result("variant"))
+    assert vid != trial_id(base)
+    assert led.n_effective_trials() == 2
+    # The base result is untouched (no replacement of prior history).
+    assert led.result_for(trial_id(base)) == _result()
+
+
+def test_off_ladder_horizon_is_recordable_and_counted():
+    led = G0BNLedger()
+    off = _identity(horizon="5s", horizon_role="exploratory")
+    led.record_abort(off, error="not run")
+    assert led.n_effective_trials() == 1
+
+
+def test_distinct_identities_across_horizons_count_separately():
+    led = G0BNLedger()
+    for horizon, role in (("2s", "primary"), ("10s", "primary"), ("60s", "control-only")):
+        led.record_completion(_identity(horizon=horizon, horizon_role=role),
+                              _result(horizon))
+    assert led.n_effective_trials() == 3
+
+
+# --------------------------------------------------------------------------- validation
+
+def test_invalid_identity_is_rejected():
+    led = G0BNLedger()
+    bad = _identity()
+    bad.pop("cv_sha256")
+    with pytest.raises(ValueError):
+        led.record_start(bad)
+    assert led.n_effective_trials() == 0
+
+
+def test_non_finite_result_values_are_rejected():
+    led = G0BNLedger()
+    with pytest.raises(ValueError, match="finite"):
+        led.record_completion(_identity(), _result(extra=float("nan")))
+    assert led.n_effective_trials() == 0
+
+
+def test_abort_requires_a_non_empty_error():
+    led = G0BNLedger()
+    with pytest.raises(ValueError, match="error"):
+        led.record_abort(_identity(), error="   ")
+
+
+def test_result_must_be_a_dict():
+    led = G0BNLedger()
+    with pytest.raises(ValueError, match="dict"):
+        led.record_completion(_identity(), [1, 2, 3])
+
+
+# ------------------------------------------------------------------------- event chain
+
+def test_events_are_hash_chained_in_order():
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_start(ident)
+    led.record_abort(ident, error="transient")
+    led.record_completion(ident, _result())
+    events = led.events()
+    assert [e["event"] for e in events] == ["started", "aborted", "completed"]
+    assert [e["ordinal"] for e in events] == [0, 1, 2]
+    prev = led.genesis_sha256()
+    for e in events:
+        assert e["prev_sha256"] == prev
+        assert e["sha256"] == hash_obj({k: v for k, v in e.items() if k != "sha256"})
+        prev = e["sha256"]
+    assert led.history_sha256() == events[-1]["sha256"]
+
+
+def test_ledger_hash_covers_history_and_identity_result_set():
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_completion(ident, _result())
+    h1 = led.ledger_sha256()
+    ids1 = led.identity_set_sha256()
+    # An idempotent rerun changes the ordered event history but not the identity set.
+    led.record_completion(ident, _result())
+    assert led.identity_set_sha256() == ids1
+    assert led.ledger_sha256() != h1
+
+
+# -------------------------------------------------------------------------- persistence
+
+def test_save_load_round_trip(tmp_path):
+    led = G0BNLedger()
+    a = _identity()
+    b = _identity(horizon="10s")
+    led.record_start(a)
+    led.record_completion(a, _result("a"))
+    led.record_start(b)
+    led.record_abort(b, error="died")
+    path = tmp_path / "g0bn_ledger.json"
+    led.save(path)
+    loaded = G0BNLedger.load(path)
+    assert loaded.ledger_sha256() == led.ledger_sha256()
+    assert loaded.history_sha256() == led.history_sha256()
+    assert loaded.n_effective_trials() == 2
+    assert loaded.events() == led.events()
+    assert loaded.result_for(trial_id(a)) == _result("a")
+    assert loaded.result_for(trial_id(b)) is None
+
+
+def test_load_rejects_tampered_result(tmp_path):
+    led = G0BNLedger()
+    led.record_completion(_identity(), _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    payload["identities"][0]["result"]["n_rows"] = 999
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        G0BNLedger.load(path)
+
+
+def test_load_rejects_tampered_event_chain(tmp_path):
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_start(ident)
+    led.record_completion(ident, _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    payload["events"][0]["event"] = "completed"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        G0BNLedger.load(path)
+
+
+def test_load_rejects_tampered_identity(tmp_path):
+    led = G0BNLedger()
+    led.record_completion(_identity(), _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    payload["identities"][0]["identity"]["horizon"] = "10s"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        G0BNLedger.load(path)
+
+
+def test_load_rejects_wrong_schema(tmp_path):
+    led = G0BNLedger()
+    led.record_completion(_identity(), _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    payload["schema"] = "g0xv-ledger-v1"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="schema"):
+        G0BNLedger.load(path)
+
+
+# ----------------------------------------------------------------- legacy isolation
+
+def test_never_imports_legacy_ledgers(tmp_path):
+    # No import path exists at all (spec section 4.2: never imports G0-CB/G0-XV entries).
+    assert not hasattr(G0BNLedger, "import_history")
+    legacy = TrialLedger()
+    legacy.register(
+        legacy_trial_identity(protocol="g0cb", arm="baseline", dataset_id="ds",
+                              build_id="b1", feature_cols=["f"], config="ridge",
+                              horizon="2s"),
+        {"net_pnl": 1.0},
+    )
+    path = tmp_path / "legacy.json"
+    legacy.save(path)
+    with pytest.raises(ValueError):
+        G0BNLedger.load(path)
+
+
+def test_legacy_ledger_identity_shape_is_rejected():
+    led = G0BNLedger()
+    legacy_shape = legacy_trial_identity(
+        protocol="g0xv", arm="cross", dataset_id="ds", build_id="b1",
+        feature_cols=["f"], config="lgbm_reg", horizon="2s")
+    with pytest.raises(ValueError):
+        led.record_start(legacy_shape)
+
+
+def test_entries_are_deep_copies_not_aliases():
+    led = G0BNLedger()
+    ident = _identity()
+    result = _result()
+    led.record_completion(ident, result)
+    result["n_rows"] = 999          # caller-side mutation must not reach the ledger
+    stored = led.result_for(trial_id(ident))
+    assert stored["n_rows"] == 240
+    stored["n_rows"] = 1            # reader-side mutation must not reach the ledger
+    assert led.result_for(trial_id(ident))["n_rows"] == 240
+    got = led.identity_for(trial_id(ident))
+    got["horizon"] = "60s"
+    assert led.identity_for(trial_id(ident))["horizon"] == "2s"
+
+
+def test_registration_order_is_preserved_and_hash_is_order_sensitive():
+    a = _identity()
+    b = _identity(horizon="10s")
+    led_ab = G0BNLedger()
+    led_ab.record_completion(a, _result("a"))
+    led_ab.record_completion(b, _result("b"))
+    led_ba = G0BNLedger()
+    led_ba.record_completion(b, _result("b"))
+    led_ba.record_completion(a, _result("a"))
+    assert led_ab.trial_ids() == list(reversed(led_ba.trial_ids()))
+    # The canonical identity/result SET hash is order-independent...
+    assert led_ab.identity_set_sha256() == led_ba.identity_set_sha256()
+    # ...while the ordered event history hash is order-sensitive (spec section 4.2
+    # hashes both).
+    assert led_ab.history_sha256() != led_ba.history_sha256()
