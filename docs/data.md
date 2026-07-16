@@ -122,6 +122,20 @@ coverage/schema/timestamp evidence recorded in §5. Those measurements do **not*
 a reviewed fallback) before #68 may plan the 92-day acquisition. No text in this section authorizes
 a Crypto Lake pull while that gate is open.
 
+> **#64 probe outcome (2026-07-16, measured).** Stage-2 reconstruction certified the local
+> `2026-04-01` Crypto Lake smoke (all nine units; perp/spot top-K CERTIFIED; 0 off-tick across
+> ~174M prices; full-day cross-engine byte-identical), and the certified perp top-K frame reproduced
+> **bit-for-bit** on this branch. A bounded, user-approved CryptoHFTData probe (one preregistered
+> object, `binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst`, 19.7 MB, anonymous free tier,
+> $0) validated as genuine Binance-futures L2 (5,743,827 rows, correct schema/identity, >99.99%
+> in-hour) but is **delta-only** — the hourly partition carries no snapshot event — so the
+> preregistered fail-closed replay refused (`missing_initial_snapshot`) and the independent
+> cross-source comparison was **not executable**. The preregistered routing is therefore
+> **`lake_go` on internal certification only** (fallback none), recorded in `experiments/evidence_64/`
+> (`chd_probe_2026-04-01_12.json`). Independent parity remains **unproven**: it needs contiguous
+> snapshot-bearing CryptoHFTData hours (`binance_futures/2026-04-01` hours 00..12), which is a
+> **separate bounded approval**. #64 stays open on that question; this note authorizes no acquisition.
+
 **Coinbase — decision pending #65; prior hybrid retained as fallback evidence.** The previously
 specified Crypto Lake + CoinAPI design remains implemented, measured fallback infrastructure, not
 the currently approved acquisition route. Crypto Lake's Coinbase has a 33-day coverage hole and
@@ -1350,8 +1364,13 @@ Other open items:
       `2026-04-01`): byte-identical certified top-K parquet per instrument (equal sha256,
       identical quality/seed/classification blocks and raw-input identities) — perp 109.3M
       deltas, python 84,153 s (23.4 h) vs native 19.7 s at scale 10; spot 33.9M deltas,
-      python 13,731 s (3.8 h) vs native 7.9 s at scale 100.* Still open in the amended order: #64 bounded
-      source certification; #68 minimal 92-day futures L2+trades acquisition; #67
+      python 13,731 s (3.8 h) vs native 7.9 s at scale 100.* *#64 bounded probe executed 2026-07-16:
+      Stage-2 CERTIFIED and reproduced bit-for-bit; the approved single mid-day CryptoHFTData hour
+      validated as genuine but delta-only (no snapshot), so the fail-closed replay refused
+      (`missing_initial_snapshot`) and routing recorded `lake_go` on internal certification only —
+      independent parity still pending a separate bounded expansion (hours 00..12).* Still open in the
+      amended order: #64 independent-parity confirmation (or reviewed acceptance of internal-only
+      certification); #68 minimal 92-day futures L2+trades acquisition; #67
       Binance-only producer/evaluator mode; #69 G0-BN; only after PASS, the
       deferred spot/state/Coinbase/cross-venue and remaining-archive stages.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.

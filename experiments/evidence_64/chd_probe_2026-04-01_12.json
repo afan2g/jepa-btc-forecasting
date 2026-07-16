@@ -1,0 +1,78 @@
+{
+  "issue": 64,
+  "step": "chd_probe",
+  "generated_utc": "2026-07-16",
+  "preregistration_content_sha256": "208e365fa15f1df9fdf5562bf2df76701e3b3ae1b256d31730acac035ac39c26",
+  "prereg_commit": "0239d40afe6f22e623d26e330c1df74c53257778",
+  "approval_provenance": "aaron-2026-07-16-issue64-hour12-probe-approved",
+  "provenance_note": "Bounded, user-approved CryptoHFTData probe for issue #64: exactly one preregistered hourly object fetched under the request_bounds.probe caps (1 object, <=3 attempts, 120 s/attempt, 512 MiB cumulative fail-closed), then the preregistered offline chd-validate / chd-replay / decide pipeline run under /tmp/jepa-expensive-compute.lock. Only permitted_april_metrics were computed; no raw market rows appear here (aggregate counts, hashes, reason codes, and fixed integrity metrics only). No expansion was requested or performed (expansion_approved_by absent).",
+  "probe": {
+    "object": "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
+    "url": "https://api.cryptohftdata.com/download?file=binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
+    "store_dest": "data/raw/chd/binance_futures/dt=2026-04-01/hour=12/BTCUSDT_orderbook.parquet.zst (gitignored)",
+    "exchange": "binance_futures",
+    "symbol": "BTCUSDT",
+    "data_type": "orderbook",
+    "date": "2026-04-01",
+    "hour_utc": 12
+  },
+  "fetch": {
+    "pass": true,
+    "attempts": 1,
+    "bytes": 19743899,
+    "total_bytes": 19743899,
+    "byte_cap": 536870912,
+    "timeout_s": 120,
+    "secs": 2.183,
+    "object_sha256": "dff90e761a3bc53be7391f9f33bc846e9988cc4422664e3217001d2c8f0e9acb",
+    "failure": null
+  },
+  "validate": {
+    "pass": true,
+    "rows": 5743827,
+    "partition_axis": "received_time",
+    "event_type_rows": {"update": 5743827},
+    "in_hour_fraction": {"received_time": 1.0, "event_time": 0.9999380204173977},
+    "has_order_count": true,
+    "transaction_time_non_null": 5743827,
+    "extra_columns": [],
+    "parquet_sha256": "96b1293731c74637fe213f9ba8fe3c086123964633e9039e3095e11e7de93495"
+  },
+  "replay": {
+    "chd_verdict": "inconclusive",
+    "pass": false,
+    "refusal": "missing_initial_snapshot",
+    "detail": "window contains no valid snapshot and no carried state",
+    "hours": [12],
+    "k": 10,
+    "price_scale": 10
+  },
+  "comparison": {
+    "executable": false,
+    "reason": "no CryptoHFTData top-K frame was produced — the fail-closed replay refused (missing_initial_snapshot), so there is nothing to compare against the certified Lake frame"
+  },
+  "decision": {
+    "decision": "lake_go",
+    "detail": "Crypto Lake approved on internal certification only; independent validation not executable (CryptoHFTData window unavailable or refused fail-closed); fallback none",
+    "inputs": {"lake_verdict": "certified", "chd_verdict": "inconclusive", "comparison_pass": null, "n_chd_reports": 1},
+    "final_source_decision_report_hash": "8801badb6fbec532e24baefa50404763dde7532be990b646064ad13969195539"
+  },
+  "lake_reproducibility": {
+    "lake_topk_perp_frame_sha256": "8358f8523cffc9703217de697dec36bfadb7082f0be0c50396f1f0cfa74c078a",
+    "matches_index_64_pin": true,
+    "perp_conformance_scale": 10,
+    "spot_conformance_scale": 100,
+    "note": "the native replay-conformance regenerated the certified perp top-K frame BIT-FOR-BIT versus the index_64 pin, and tick-scale re-derived perp scale 10 / spot 100 under the current preregistration content hash — an independent reproduction of the Lake certification on this branch"
+  },
+  "vendor_calls": {"requests": 1, "bytes": 19743899, "cost_usd": 0.0},
+  "ignored_reports_sha256": {
+    "fetch_binance_futures_2026-04-01_12_BTCUSDT_orderbook.parquet.zst.json": "e9e336991bf11dcf70881d6304835daec8110198ae42e47daf32d739235f2678",
+    "chd_validate_binance_futures_2026-04-01_12.json": "9385d697fbbc3a39e7898437a45da9803acd39f221264f1266cdf1ff41e993a8",
+    "chd_replay_binance_futures_2026-04-01_12_1h.json": "b5e59e6622178c570ed49ca9daa8aa90fe91b55b71e4cfec6816f373f8720a3a",
+    "final_source_decision.json": "aa9248c0690aeaa597c4651c41afbfac804db2365bd45aea380f429bcc6cc5be",
+    "tick_scale.json": "3df8fd4ba33241026721a3c7d3f3b7ecd45797b30232df3c904187374ee96456",
+    "replay_conformance_binance-perp.json": "923672908b324bb11ad1aec7864cfe7820caf763209e267f650419c967977ea4",
+    "frames/lake_topk_perp_2026-04-01.parquet": "8358f8523cffc9703217de697dec36bfadb7082f0be0c50396f1f0cfa74c078a"
+  },
+  "interpretation": "The probe object is genuine, well-formed Binance-futures BTCUSDT hour-12 L2 data (5,743,827 rows, correct schema/identity, >99.99% in-hour on both time axes). It carries ONLY 'update' events and no snapshot, because CryptoHFTData emits the L2 snapshot at capture/stream start rather than in every hourly partition. The preregistered fail-closed replayer therefore refuses to reconstruct hour 12 in isolation (missing_initial_snapshot). Independent cross-source validation is NOT executable from a single mid-day hour; it requires contiguous snapshot-bearing hours (the preregistered expansion window binance_futures/2026-04-01 hours 00..12), which is a SEPARATE bounded approval and was not granted. This outcome does not weaken the Lake certification — the certified perp frame reproduced bit-for-bit — it means the probe alone could not serve as the independent validator, so the preregistered routing is lake_go on internal certification only, fallback none."
+}
