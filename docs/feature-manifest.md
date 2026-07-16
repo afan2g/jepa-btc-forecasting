@@ -4,7 +4,10 @@ The feature manifest is the versioned, self-describing record of a bar/feature
 dataset build. It is the **single source of truth for which columns are model
 inputs**: LightGBM (and later JEPA) training selects features explicitly from
 `feature_cols`, never by inferring "all non-reserved columns" (AGENTS.md coding
-standard). Code: `eval/manifest.py`. Tests: `tests/test_manifest.py`.
+standard). Code: `eval/manifest.py`; the publication path (G0-BN bindings,
+logical-row/build identity, development validate-then-write, blind holdout
+write) is `eval/writer.py` (T8). Tests: `tests/test_manifest.py`,
+`tests/test_g0bn_bindings.py`, `tests/test_writer.py`.
 
 ## Why
 

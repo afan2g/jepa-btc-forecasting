@@ -6,11 +6,13 @@ leakage). See docs/feature-manifest.md."""
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 
 import pandas as pd
 
-from eval.matrix import RESERVED
+from eval.hashing import hash_obj
+from eval.matrix import RESERVED, TIMING_COLS
 
 MANIFEST_VERSION = 1
 
@@ -28,7 +30,7 @@ LEAKY_NAME_PATTERNS = ("fwd", "future", "forward", "barrier", "label", "target",
 
 VENUE_ROLES = ("signal", "target")
 
-_TIMING_COLS = ("t_event", "t_barrier", "t_feature_start", "t_available")
+_TIMING_COLS = TIMING_COLS
 # Required in the frame even when targets are optional: the timing/horizon checks need them.
 _STRUCTURAL_COLS = frozenset(_TIMING_COLS) | {"horizon"}
 
@@ -292,6 +294,63 @@ def load_manifest(path) -> dict:
     with open(path) as f:
         man = json.load(f)
     return validate_manifest(man)
+
+
+def build_manifest(*, dataset_id, build_id, bar_clock, feature_cols, target_cols,
+                   venues, horizons, sources, generated_at, max_lookback_ns, embargo_ns,
+                   reserved_cols=None, extra_cols=None, dtypes=None,
+                   availability_lag_ns=None, as_of_ns=None, gate=None) -> dict:
+    """Assemble and validate a v1 manifest from EXPLICIT parts (plan §H: the producer
+    writes an explicit manifest, never inferred columns). reserved_cols defaults to the
+    full core registry; optional keys are emitted only when supplied, so the output is
+    exactly the declared contract with no implicit fields."""
+    man = {
+        "manifest_version": MANIFEST_VERSION,
+        "dataset_id": dataset_id,
+        "build_id": build_id,
+        "bar_clock": bar_clock,
+        "time": {"unit": "ns", "timezone": "UTC"},
+        "feature_cols": list(feature_cols),
+        "target_cols": list(target_cols),
+        "reserved_cols": list(RESERVED) if reserved_cols is None else list(reserved_cols),
+        "venues": list(venues),
+        "horizons": dict(horizons),
+        "sources": list(sources),
+        "generated_at": generated_at,
+        "max_lookback_ns": max_lookback_ns,
+        "embargo_ns": embargo_ns,
+    }
+    optional = {"extra_cols": extra_cols, "dtypes": dtypes,
+                "availability_lag_ns": availability_lag_ns, "as_of_ns": as_of_ns,
+                "gate": gate}
+    for key, val in optional.items():
+        if val is not None:
+            man[key] = val
+    return validate_manifest(man)
+
+
+def manifest_sha256(manifest: dict) -> str:
+    """Canonical manifest content hash: eval.hashing canonical JSON with the top-level
+    `generated_at` excluded (the G0-BN artifact-hash rule, and §I's only field allowed
+    to differ between otherwise-identical builds)."""
+    validate_manifest(manifest)
+    return hash_obj(manifest, exclude_keys=("generated_at",))
+
+
+def write_manifest(manifest: dict, path, *, exclusive: bool = False,
+                   fsync: bool = False) -> str:
+    """Serialize a validated manifest as sorted-key JSON (plan §H) and return its
+    canonical content hash — computed from the dict, never by re-reading the file.
+    exclusive/fsync are the blind-holdout freshness/durability knobs (T8 writer):
+    exclusive refuses an existing path, fsync makes the file contents durable."""
+    sha = manifest_sha256(manifest)
+    with open(path, "x" if exclusive else "w", encoding="utf-8") as f:
+        json.dump(manifest, f, sort_keys=True, indent=2, allow_nan=False)
+        f.write("\n")
+        if fsync:
+            f.flush()
+            os.fsync(f.fileno())
+    return sha
 
 
 def unsafe_infer_feature_cols(df: pd.DataFrame, *, extra_cols: tuple = ()) -> list[str]:

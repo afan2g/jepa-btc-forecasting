@@ -8,7 +8,10 @@ RESERVED = (
     "cost_bps", "half_spread_bps", "uniqueness", "regime", "horizon",
 )
 
-_TIMING = ("t_event", "t_barrier", "t_feature_start", "t_available")
+# The four int64-nanosecond timing columns every ModelMatrix row carries; the single
+# registry eval.manifest and eval.writer consume (no drifting private copies).
+TIMING_COLS = ("t_event", "t_barrier", "t_feature_start", "t_available")
+_TIMING = TIMING_COLS
 # Numeric study inputs beyond the features. NaN/pd.NA here fails open in the plain
 # comparisons below (Series.all() skips NA) or corrupts PnL/weights downstream.
 _NUMERIC = ("y_fwd_bps", "cost_bps", "half_spread_bps", "uniqueness")
