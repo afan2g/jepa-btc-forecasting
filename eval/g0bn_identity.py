@@ -32,6 +32,7 @@ from eval.g0bn_config import (
     TRIAL_SCHEMA,
     UNIVERSE_SCHEMA,
     _dict,
+    _exact,
     _fail,
     _int,
     _scalar_tree,
@@ -77,18 +78,20 @@ def holdout_universe_id(universe: dict | None = None) -> str:
     if universe is None:
         universe = holdout_universe()
     _dict("holdout universe", universe, _UNIVERSE_FIELDS)
-    validated = holdout_universe(
-        universe["instrument"],
-        holdout_start_ns=universe["holdout_start_ns"],
-        holdout_end_ns=universe["holdout_end_ns"],
-    )
     if universe["schema"] != UNIVERSE_SCHEMA:
         _fail("holdout universe schema", f"must equal {UNIVERSE_SCHEMA!r}; "
                                          f"got {universe['schema']!r}")
     if universe["protocol_id"] != PROTOCOL_ID:
         _fail("holdout universe protocol_id", f"must equal {PROTOCOL_ID!r}; "
                                               f"got {universe['protocol_id']!r}")
-    return hash_obj(validated)
+    # The stable universe is EXACTLY the G0-BN BTC-USDT perpetual + fixed bounds
+    # (spec 6.1): an out-of-protocol instrument or window must fail before it derives a
+    # separate transaction/lock/consumption path, not silently mint a second identity.
+    _exact("holdout universe.instrument", universe["instrument"], INSTRUMENT)
+    _exact("holdout universe.holdout_start_ns", universe["holdout_start_ns"],
+           HOLDOUT_START_NS)
+    _exact("holdout universe.holdout_end_ns", universe["holdout_end_ns"], HOLDOUT_END_NS)
+    return hash_obj(universe)
 
 
 def one_shot_transaction_id(universe_id: str | None = None) -> str:
@@ -230,7 +233,10 @@ def base_trial_identities(config: dict, data_identity: dict) -> list:
               "development data identity does not bind the config's partition plan "
               f"({data_identity['partition_plan_sha256']} != "
               f"{config['partition']['sha256']})")
-    source_certification_sha256 = hash_obj(config["source_certification"])
+    # Bind the trial to the explicit #64 source-certification artifact hash (spec §2.1
+    # "source-certification hash"), not a hash of the whole config section, so trial /
+    # manifest-binding / freeze reconciliation all reference the same evidence hash.
+    source_certification_sha256 = config["source_certification"]["certification_sha256"]
     software_versions_sha256 = hash_obj(config["software"])
     cv_sha256 = hash_obj(config["cv"])
     label_sha256 = hash_obj(config["labels"])

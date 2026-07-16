@@ -74,21 +74,22 @@ def test_default_universe_object_is_exactly_the_spec_object():
     assert holdout_universe() == spec_universe_object()
 
 
-def test_universe_id_changes_only_with_documented_identity_inputs():
-    base = holdout_universe_id()
-    # Documented inputs change the ID ...
+def test_universe_id_rejects_out_of_protocol_instrument_or_window():
+    # The stable universe is EXACTLY the G0-BN BTC-USDT perpetual + fixed bounds
+    # (spec 6.1); an out-of-protocol instrument/window must fail rather than mint a
+    # separate transaction/lock/consumption path.
     other_instrument = dict(INSTRUMENT, symbol="ETH-USDT-PERP", native_symbol="ETHUSDT",
                             base_asset="ETH")
-    assert holdout_universe_id(holdout_universe(instrument=other_instrument)) != base
-    assert holdout_universe_id(
-        holdout_universe(holdout_start_ns=HOLDOUT_START_NS + 86_400_000_000_000)
-    ) != base
-    assert holdout_universe_id(
-        holdout_universe(holdout_end_ns=HOLDOUT_END_NS + 86_400_000_000_000)
-    ) != base
-    # ... and nothing else exists to change it: the identity object has exactly
-    # these fields, so pilot/config/freeze/source/plan/build/result values cannot
-    # mint a second transaction over the same outcomes.
+    with pytest.raises(ValueError, match="instrument"):
+        holdout_universe_id(holdout_universe(instrument=other_instrument))
+    with pytest.raises(ValueError, match="holdout_start_ns"):
+        holdout_universe_id(
+            holdout_universe(holdout_start_ns=HOLDOUT_START_NS + 86_400_000_000_000))
+    with pytest.raises(ValueError, match="holdout_end_ns"):
+        holdout_universe_id(
+            holdout_universe(holdout_end_ns=HOLDOUT_END_NS + 86_400_000_000_000))
+    # The identity object has exactly these five fields, so pilot/config/freeze/source/
+    # plan/build/result values cannot mint a second transaction over the same outcomes.
     assert set(holdout_universe()) == {
         "schema", "protocol_id", "instrument", "holdout_start_ns", "holdout_end_ns",
     }
@@ -289,10 +290,13 @@ def test_base_trial_enumeration_is_exactly_the_15_spec_trials():
         assert ident["development_dataset_id"] == DEV_DATASET_ID
     zero = [i for i in identities if i["candidate_id"] == "persistence_zero"]
     assert all(i["feature_cols"] == [] for i in zero)  # empty-feature persistence identity
-    # Section hashes must bind the RIGHT config sections (not swapped/stale).
+    # Section hashes must bind the RIGHT config sections (not swapped/stale); the
+    # source certification binds the explicit #64 artifact hash, not the section hash.
     from eval.hashing import hash_obj
     for ident in identities:
-        assert ident["source_certification_sha256"] == hash_obj(
+        assert ident["source_certification_sha256"] == \
+            config["source_certification"]["certification_sha256"]
+        assert ident["source_certification_sha256"] != hash_obj(
             config["source_certification"])
         assert ident["software_versions_sha256"] == hash_obj(config["software"])
         assert ident["cv_sha256"] == hash_obj(config["cv"])
