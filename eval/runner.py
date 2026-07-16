@@ -2,6 +2,7 @@
 RESOLVED config is returned so every run is reproducible from its own output."""
 from __future__ import annotations
 import pandas as pd
+from eval.guard import preflight_generic_manifest
 from eval.manifest import feature_list, target_list, validate_frame
 from eval.study import run_study
 
@@ -30,6 +31,9 @@ def run_from_manifest(matrix: pd.DataFrame, manifest: dict) -> dict:
             "run_from_manifest requires a v1 feature manifest (add manifest_version=1; "
             "see docs/feature-manifest.md); legacy {feature_cols, embargo_ns, "
             "max_lookback_ns, gate} dicts are no longer accepted")
+    # 67-D holdout guard (#90, spec §7): the manifest alone decides, BEFORE the frame
+    # is touched — callers are never authorized to preload a holdout matrix.
+    preflight_generic_manifest(manifest)
     # v1+ manifests are schema-validated and checked against the matrix up front.
     validate_frame(matrix, manifest)
     feats = feature_list(manifest)               # validated copy, manifest order

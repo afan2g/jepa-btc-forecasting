@@ -11,13 +11,15 @@ import sys, pathlib
 # the `eval` package importable. Harmless when already importable.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import pandas as pd
+from eval.guard import guarded_read_matrix, preflight_generic_manifest
 from eval.manifest import load_manifest
 from eval.runner import resolve_gate, run_from_manifest
 
 def main(matrix_path, manifest_path):
     man = load_manifest(manifest_path)   # v1 schema-validated; fails before the parquet read
+    preflight_generic_manifest(man)      # 67-D holdout guard (#90): refuses holdout-bound
     resolve_gate(man)                    # gate errors also surface before the parquet read
-    m = pd.read_parquet(matrix_path)
+    m = guarded_read_matrix(matrix_path, man)   # guard re-runs at the read boundary itself
     res = run_from_manifest(m, man)
     ident = res["manifest"]
     print(f"manifest: {ident['dataset_id']} / {ident['build_id']} "
