@@ -163,6 +163,15 @@ BOOTSTRAP_KIND = "paired_utc_day_circular_moving_block"
 CONTENTION_RESULT = "transaction_already_running"
 SELECTION_RANKING_RULE = "trade_eligible_net_lift_then_predictive_lift_v1"
 SELECTION_TIE_RULE = "earlier_ladder_order_v1"
+SELECTION_ATTEMPT_ACCOUNTING = "unique_canonical_identity_v1"
+
+# Fixed G0-BN label semantics (spec §3.2): log-mid bps return, trailing EWMA barriers,
+# vertical-barrier fallback, per-horizon uniqueness. The EWMA half-life and TP/SL
+# multipliers are operator-supplied (§12) and validated for type/presence, not pinned.
+LABEL_RETURN_FORMULA = "log_mid_ratio_bps_v1"
+LABEL_BARRIER_ESTIMATOR = "trailing_ewma_vol_v1"
+LABEL_UNRESOLVED_BARRIER_POLICY = "vertical_barrier_return_v1"
+LABEL_UNIQUENESS_POLICY = "per_horizon_concurrency_v1"
 
 COMPONENT_COST_FIELDS = (
     "gross_bps", "fee_bps", "decision_cost_bps", "decision_total_cost_bps",
@@ -496,13 +505,16 @@ def _validate_labels(labels):
         "tp_multiplier", "sl_multiplier", "unresolved_barrier_policy", "uniqueness_policy",
     ))
     _exact(f"{path}.mid_anchor", labels["mid_anchor"], "true_t_event_mid")
-    _str(f"{path}.return_formula", labels["return_formula"])
-    _str(f"{path}.barrier_estimator", labels["barrier_estimator"])
+    _exact(f"{path}.return_formula", labels["return_formula"], LABEL_RETURN_FORMULA)
+    _exact(f"{path}.barrier_estimator", labels["barrier_estimator"],
+           LABEL_BARRIER_ESTIMATOR)
     _int(f"{path}.ewma_half_life_ns", labels["ewma_half_life_ns"], minimum=1)
     _num(f"{path}.tp_multiplier", labels["tp_multiplier"], positive=True)
     _num(f"{path}.sl_multiplier", labels["sl_multiplier"], positive=True)
-    _str(f"{path}.unresolved_barrier_policy", labels["unresolved_barrier_policy"])
-    _str(f"{path}.uniqueness_policy", labels["uniqueness_policy"])
+    _exact(f"{path}.unresolved_barrier_policy", labels["unresolved_barrier_policy"],
+           LABEL_UNRESOLVED_BARRIER_POLICY)
+    _exact(f"{path}.uniqueness_policy", labels["uniqueness_policy"],
+           LABEL_UNIQUENESS_POLICY)
 
 
 def _validate_costs(costs):
@@ -819,7 +831,8 @@ def _validate_selection(sel):
     _exact(f"{path}.tie_rule", sel["tie_rule"], SELECTION_TIE_RULE)
     _exact(f"{path}.eligible_candidate_ids", sel["eligible_candidate_ids"],
            list(SELECTABLE_CANDIDATE_IDS))
-    _str(f"{path}.attempt_accounting_policy", sel["attempt_accounting_policy"])
+    _exact(f"{path}.attempt_accounting_policy", sel["attempt_accounting_policy"],
+           SELECTION_ATTEMPT_ACCOUNTING)
 
 
 def _validate_verdict_thresholds(vt):

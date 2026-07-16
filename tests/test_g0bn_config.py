@@ -684,6 +684,29 @@ def test_embargo_must_equal_max_lookback():
         validate_protocol_config(with_sha(make_config(cv=cv)))
 
 
+@pytest.mark.parametrize("field,bad", [
+    ("return_formula", "arithmetic_return_v1"),
+    ("barrier_estimator", "fixed_bps_barrier_v1"),
+    ("unresolved_barrier_policy", "drop_row_v1"),
+    ("uniqueness_policy", "uniform_v1"),
+])
+def test_label_semantics_are_pinned(field, bad):
+    # §3.2 fixes G0-BN target semantics (log-mid bps return, trailing EWMA barriers);
+    # alternate label semantics must not validate as g0bn-v1. The EWMA half-life and
+    # TP/SL multipliers stay operator values (§12), not pinned here.
+    labels = fx.make_labels(**{field: bad})
+    with pytest.raises(ValueError, match=field):
+        validate_protocol_config(with_sha(make_config(labels=labels)))
+
+
+def test_attempt_accounting_policy_is_pinned():
+    # §4.2 fixes effective N as unique canonical trial identities; an execution-count
+    # policy would disagree with the ledger/DSR trial count.
+    sel = fx.make_selection(attempt_accounting_policy="execution_count_v1")
+    with pytest.raises(ValueError, match="attempt_accounting_policy"):
+        validate_protocol_config(with_sha(make_config(selection=sel)))
+
+
 def test_selection_rules_are_pinned():
     with pytest.raises(ValueError, match="ranking_rule"):
         validate_protocol_config(with_sha(make_config(
