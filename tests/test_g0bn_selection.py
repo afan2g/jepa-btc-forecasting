@@ -660,6 +660,167 @@ def test_60s_metrics_cannot_select_or_rescue(strong_run):
     assert "60s" not in result["selection"]
 
 
+def test_lift_and_net_replicates_hand_computed():
+    from eval.g0bn_selection import _daily_mean_replicates, _lift_replicates
+    day_pos = np.array([0, 0, 1, 2])
+    y = np.array([1.0, 2.0, 3.0, 4.0])
+    f = np.array([0.5, 1.0, 2.0, 5.0])
+    u = np.array([1.0, 0.5, 1.0, 2.0])
+    draw = np.array([[0, 1, 2], [2, 2, 0]])
+    # A_d = sum u*y^2 per day; B_d = sum u*(y-f)^2 per day (hand-computed):
+    # A = [3.0, 9.0, 32.0]; B = [0.75, 1.0, 2.0]; A-B = [2.25, 8.0, 30.0]
+    reps, reason = _lift_replicates(draw, day_pos, 3, y, f, u)
+    assert reason is None
+    assert reps[0] == (2.25 + 8.0 + 30.0) / (3.0 + 9.0 + 32.0)
+    assert reps[1] == (30.0 + 30.0 + 2.25) / (32.0 + 32.0 + 3.0)
+    net = np.array([10.0, -2.0, 4.0, 6.0])   # day sums [8.0, 4.0, 6.0]
+    reps, reason = _daily_mean_replicates(draw, day_pos, 3, net)
+    assert reason is None
+    assert reps[0] == (8.0 + 4.0 + 6.0) / 3.0
+    assert reps[1] == (6.0 + 6.0 + 8.0) / 3.0
+
+
+def test_zero_persistence_denominator_invalidates_the_gate():
+    # y identically zero at 2s: both the point lift and every resampled
+    # persistence denominator are zero -> INCONCLUSIVE, never a division blowup.
+    frame, _, config, _ = dev_bundle(seed=41)
+    idx = frame.index[frame["horizon"] == "2s"]
+    frame.loc[idx, "y_fwd_bps"] = 0.0
+    # labels planted independently of y so the classifier still sees 3 classes
+    frame.loc[idx, "label"] = np.resize(np.array([-1, 0, 1]), len(idx))
+    manifest = dev_manifest(config, frame)
+    identity = dev_data_identity(config, manifest, frame)
+    run = run_g0bn_development(frame, manifest, config, identity, G0BNLedger())
+    result = development_selection(run)
+    assert result["freeze_blocked"] is True
+    sel = result["selection"]["2s"]
+    assert sel["selected_candidate_id"] is None
+    for cid in ("microprice_raw", "ofi_ridge", "lgbm_reg", "lgbm_clf"):
+        cand = result["horizons"]["2s"]["candidates"][cid]
+        assert cand["predictive_eligible"] is False
+        assert "lift_point_invalid:zero_persistence_denominator" in cand["reasons"]
+        assert ("lift_bootstrap_invalid:"
+                "zero_or_nonfinite_resampled_persistence_denominator"
+                in cand["reasons"])
+    # the untouched 10s horizon still selects normally
+    assert result["selection"]["10s"]["selected_candidate_id"] is not None
+
+
+def test_insufficient_uniqueness_sum_blocks_eligibility():
+    config = dev_config()
+    frame = dev_matrix(config, rows_per_day=2)   # 24 days but sum(u) ~ 36 < 100
+    manifest = dev_manifest(config, frame)
+    identity = dev_data_identity(config, manifest, frame)
+    run = run_g0bn_development(frame, manifest, config, identity, G0BNLedger())
+    result = development_selection(run)
+    for tag in ("2s", "10s"):
+        block = result["horizons"][tag]
+        assert block["sufficiency"]["n_valid_days"] >= 20
+        assert block["sufficiency"]["uniqueness_sum"] < 100
+        assert block["sufficiency"]["sufficient"] is False
+        for cid in ("microprice_raw", "ofi_ridge", "lgbm_reg", "lgbm_clf"):
+            cand = block["candidates"][cid]
+            if not cand.get("scored", True):
+                continue
+            assert cand["predictive_eligible"] is False
+            assert "insufficient_uniqueness_sum" in cand["reasons"]
+            assert "insufficient_valid_days" not in cand["reasons"]
+
+
+def test_selection_rejects_foreign_development_identity(strong_run):
+    run, _ = strong_run
+    base = next(t for t, i in run.identities.items()
+                if i["horizon"] == "2s" and i["candidate_id"] == "ofi_ridge")
+    foreign = copy.deepcopy(run.identities[base])
+    foreign["development_build_id"] = "c" * 64
+    led = G0BNLedger()
+    for tid, ident in run.identities.items():
+        led.record_completion(ident, run.ledger.result_for(tid))
+    led.record_completion(foreign, {
+        "schema": "g0bn-trial-result-v1", "n_rows": 1,
+        "forecasts_sha256": "1" * 64,
+        "collapse_version": "mean_repeated_test_forecasts_v1",
+        "split_scales": None})
+    patched = DevelopmentRun(
+        config=run.config, data_identity=run.data_identity,
+        horizon_rows=run.horizon_rows, identities=run.identities,
+        forecasts=run.forecasts, split_scales=run.split_scales,
+        aborted=run.aborted, ledger=led)
+    with pytest.raises(ValueError, match="foreign"):
+        development_selection(patched)
+
+
+def test_off_ladder_horizon_trial_counts_in_n_trials_only(strong_run):
+    run, baseline_result = strong_run
+    base = next(t for t, i in run.identities.items()
+                if i["horizon"] == "2s" and i["candidate_id"] == "ofi_ridge")
+    off = copy.deepcopy(run.identities[base])
+    off["horizon"] = "5s"
+    off["horizon_role"] = "exploratory"
+    led = G0BNLedger()
+    for tid, ident in run.identities.items():
+        led.record_completion(ident, run.ledger.result_for(tid))
+    led.record_completion(off, {
+        "schema": "g0bn-trial-result-v1", "n_rows": 7,
+        "forecasts_sha256": "2" * 64,
+        "collapse_version": "mean_repeated_test_forecasts_v1",
+        "split_scales": None})
+    patched = DevelopmentRun(
+        config=run.config, data_identity=run.data_identity,
+        horizon_rows=run.horizon_rows, identities=run.identities,
+        forecasts=run.forecasts, split_scales=run.split_scales,
+        aborted=run.aborted, ledger=led)
+    result = development_selection(patched)   # no forecasts required for "5s"
+    assert result["ledger"]["n_effective_trials"] == 16
+    for tag in ("2s", "10s", "60s"):
+        assert result["horizons"][tag]["pbo"]["column_trial_ids"] == \
+            baseline_result["horizons"][tag]["pbo"]["column_trial_ids"]
+    for tag in ("2s", "10s"):
+        cand = result["horizons"][tag]["candidates"]["microprice_raw"]
+        assert cand["dsr_provenance"]["n_trials"] == 16
+        assert result["selection"][tag]["selected_candidate_id"] == \
+            baseline_result["selection"][tag]["selected_candidate_id"]
+
+
+def test_weak_run_includes_degenerate_persistence_sharpe_in_dispersion(weak_run):
+    run, result = weak_run
+    for tag in ("2s", "10s", "60s"):
+        block = result["horizons"][tag]
+        persistence = block["candidates"]["persistence_zero"]
+        assert persistence["trade_sharpe"] == 0.0
+        assert persistence["trade_sharpe_reason"] == "fewer_than_two_traded_rows"
+        # the degenerate 0.0 is a FINITE Sharpe and enters the dispersion
+        sharpes = np.array([block["candidates"][c]["trade_sharpe"]
+                            for c in block["candidates"]], dtype=np.float64)
+        expected = float(np.std(sharpes[np.isfinite(sharpes)],
+                                dtype=np.float64) + 1e-9)
+        assert persistence["dsr_provenance"]["sr_trials_std"] == expected
+
+
+def test_eligibility_boundaries_fail_on_exact_zero_lower_bounds():
+    from eval.g0bn_selection import _candidate_reasons, _trade_reasons
+    sufficiency = {"n_valid_days": 24, "uniqueness_sum": 150.0,
+                   "min_valid_days": 20, "min_uniqueness_sum": 100,
+                   "sufficient": True}
+    pbo_block = {"available": True, "value": 0.1, "threshold": 0.5}
+    # a lower bound of exactly zero fails the strictly-positive rule
+    reasons = _candidate_reasons(sufficiency, pbo_block, 0.4, None, 0.0, None, True)
+    assert reasons == ["lift_lower_bound_not_positive"]
+    thresholds = {"min_trades": 30, "min_effective_trades": 10,
+                  "dsr_threshold": 0.95}
+    metrics = {"net_lower_bound": 0.0, "n_trades": 30, "effective_trades": 10.0}
+    reasons = _trade_reasons(metrics, 0.96, thresholds)
+    assert reasons == ["net_lower_bound_not_positive"]
+    # PBO exactly at the threshold is NOT below it
+    pbo_at = {"available": True, "value": 0.5, "threshold": 0.5}
+    assert _candidate_reasons(sufficiency, pbo_at, 0.4, None, 0.1, None,
+                              True) == ["pbo_not_below_threshold"]
+    # DSR exactly at the threshold fails the strict > rule
+    assert _trade_reasons({"net_lower_bound": 0.1, "n_trades": 30,
+                           "effective_trades": 10.0}, 0.95,
+                          thresholds) == ["dsr_not_above_threshold"]
+
+
 def test_selection_uses_unrounded_tuples_and_ladder_order_ties():
     from eval.g0bn_selection import rank_selectable
     entries = [

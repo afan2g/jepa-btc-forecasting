@@ -223,7 +223,12 @@ class G0BNLedger:
         for rec in payload.get("identities", []):
             # Re-validates every identity as g0bn-trial-v1 and re-derives its id, so
             # tampered identities and legacy entry shapes both fail closed.
+            before = len(ledger._identities)
             tid = ledger._register_identity(rec["identity"])
+            if len(ledger._identities) == before:
+                raise ValueError(f"ledger file contains duplicate identity records "
+                                 f"for trial {tid[:12]}... (a crafted duplicate could "
+                                 "silently supersede an earlier result)")
             if tid != rec.get("trial_id"):
                 raise ValueError(f"ledger identity record claims trial_id "
                                  f"{rec.get('trial_id')!r} but its identity hashes to "
@@ -240,6 +245,7 @@ class G0BNLedger:
                 raise ValueError("ledger identity record carries a result_sha256 "
                                  "without its result (tampered or corrupted ledger)")
         prev = ledger.genesis_sha256()
+        completed_tids = set()
         for i, event in enumerate(payload.get("events", [])):
             body = {k: v for k, v in event.items() if k != "sha256"}
             expected = dict(body)
@@ -256,8 +262,20 @@ class G0BNLedger:
                     raise ValueError(f"ledger event {i} pins a completion result hash "
                                      "that does not match the identity's immutable "
                                      "result (tampered or corrupted ledger)")
+                completed_tids.add(event["trial_id"])
             ledger._events.append(copy.deepcopy(event))
             prev = event["sha256"]
+        # Every pinned result must be witnessed by at least one completed event in
+        # the chained history: a crafted identity record carrying a result that no
+        # execution event ever produced is a fabricated outcome, not a record.
+        unwitnessed = [tid for tid, rec in ledger._identities.items()
+                       if rec["result_sha256"] is not None
+                       and tid not in completed_tids]
+        if unwitnessed:
+            raise ValueError(f"ledger identity records carry results with no "
+                             f"completed event in the history: "
+                             f"{[t[:12] for t in unwitnessed[:3]]} (tampered or "
+                             "corrupted ledger)")
         for field in ("n_effective_trials", "identity_set_sha256", "history_sha256",
                       "ledger_sha256"):
             recomputed = getattr(ledger, field)() if field != "n_effective_trials" \

@@ -58,7 +58,7 @@ from eval.g0bn_config import (
     validate_protocol_config,
 )
 from eval.g0bn_engine import forecast_series_sha256
-from eval.g0bn_identity import trial_id as _trial_id
+from eval.g0bn_identity import base_trial_identities, trial_id as _trial_id
 from eval.hashing import canonical_json, hash_obj, split_hash
 from eval.stats import deflated_sharpe
 
@@ -92,6 +92,13 @@ def decision_costs(rows: pd.DataFrame, config: dict) -> dict:
     binary64 policy. Fails closed on any missing, negative, non-finite, or
     inconsistent component."""
     assumption = config["costs"]["cost_assumption"]
+    for name, value in (("taker_fee_bps", assumption["taker_fee_bps"]),
+                        ("base_slippage_bps", assumption["base_slippage_bps"]),
+                        ("no_trade_margin_bps",
+                         config["costs"]["no_trade_margin_bps"])):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(value) or value < 0:
+            _fail(name, f"must be a finite non-negative number; got {value!r}")
     fee_bps = 2.0 * float(assumption["taker_fee_bps"])
     decision_cost_bps = fee_bps + float(assumption["base_slippage_bps"])
     drift = rows["latency_drift_bps"].to_numpy(np.float64)
@@ -119,6 +126,10 @@ def decision_costs(rows: pd.DataFrame, config: dict) -> dict:
     spread_bps = 2.0 * half_spread
     decision_total = decision_cost_bps + spread_bps
     realized_total = cost + spread_bps
+    # The second section-8.2 identity. With realized_total DERIVED from cost_bps
+    # (development has no independent realized-total column), this reduces
+    # algebraically to the first identity; it is kept as written so the 67-F OOS
+    # scorer, which reads independent columns, inherits the exact two-check shape.
     if not _isclose(realized_total, decision_total + drift).all():
         _fail("realized_total_cost_bps", "does not reconcile with "
                                          "decision_total_cost_bps + latency_drift_bps")
@@ -246,7 +257,13 @@ def g0bn_pbo(net_matrix, weights, column_trial_ids) -> dict:
     """Exact G0-BN CSCV PBO (spec section 3.4) over the common chronologically
     ordered CPCV-OOS net matrix. Columns must already be in canonical order (the
     five base identities in ladder order, then ascending trial ids); this function
-    records the tie rules and the canonical input hash as provenance."""
+    records the tie rules and the canonical input hash as provenance.
+
+    A non-finite entry RAISES rather than returning available=False: only
+    successfully scored identities enter PBO and their nets are finite by
+    construction (finite collapsed forecasts, finite y, reconciled costs), so a
+    non-finite value here is upstream tampering/integrity failure, not a
+    small-sample availability condition."""
     M = np.asarray(net_matrix, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)
     ids = list(column_trial_ids)
@@ -513,7 +530,7 @@ def development_selection(run, *, extra_forecasts: dict | None = None,
         scored_by_tag[tag].append(tid)
 
     # ---- base-ladder reconciliation against the ledger
-    base_ids = base_trial_identities_cached(config, data_identity)
+    base_ids = base_trial_identities(config, data_identity)
     base_tid_by = {(i["horizon"], i["candidate_id"]): _trial_id(i)
                    for i in base_ids}
     missing_base = [tid for tid in base_tid_by.values()
@@ -565,7 +582,12 @@ def development_selection(run, *, extra_forecasts: dict | None = None,
                                                    weights)
         sharpes = np.asarray([sharpe_by[tid][0] for tid in ordered_scored],
                              dtype=np.float64)
-        sr_trials_std = _float(np.std(sharpes, dtype=np.float64) + 1e-9) \
+        # Spec 3.4: the population std of the FINITE trade Sharpes at this horizon.
+        # weighted_trade_sharpe reports degenerate series as a finite 0.0, so the
+        # filter is a no-op today; it is applied literally so a future degenerate
+        # representation cannot silently change the DSR benchmark.
+        finite_sharpes = sharpes[np.isfinite(sharpes)]
+        sr_trials_std = _float(np.std(finite_sharpes, dtype=np.float64) + 1e-9) \
             if ordered_scored else None
 
         pbo_block = dict(g0bn_pbo(
@@ -757,10 +779,3 @@ def development_selection(run, *, extra_forecasts: dict | None = None,
                                        exclude_keys=("result_sha256",
                                                      "generated_at"))
     return result
-
-
-def base_trial_identities_cached(config: dict, data_identity: dict):
-    """Thin indirection over eval.g0bn_identity.base_trial_identities (kept separate
-    so selection never mutates the enumeration contract)."""
-    from eval.g0bn_identity import base_trial_identities
-    return base_trial_identities(config, data_identity)

@@ -248,6 +248,51 @@ def test_load_rejects_tampered_identity(tmp_path):
         G0BNLedger.load(path)
 
 
+def test_load_rejects_result_without_completed_event(tmp_path):
+    # A crafted identity record carrying a result no execution event ever produced
+    # is a fabricated outcome; the load-path invariant must catch it even before
+    # the summary hashes are compared.
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_start(ident)                      # started, never completed
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    fabricated = _result("fabricated")
+    payload["identities"][0]["result"] = fabricated
+    payload["identities"][0]["result_sha256"] = hash_obj(fabricated)
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="no completed event"):
+        G0BNLedger.load(path)
+
+
+def test_load_rejects_duplicate_identity_records(tmp_path):
+    led = G0BNLedger()
+    led.record_completion(_identity(), _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    payload["identities"].append(json.loads(json.dumps(payload["identities"][0])))
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="duplicate identity"):
+        G0BNLedger.load(path)
+
+
+def test_load_rejects_completed_event_with_stripped_result(tmp_path):
+    led = G0BNLedger()
+    ident = _identity()
+    led.record_start(ident)
+    led.record_completion(ident, _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    payload["identities"][0]["result"] = None
+    payload["identities"][0]["result_sha256"] = None
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="immutable result"):
+        G0BNLedger.load(path)
+
+
 def test_load_rejects_wrong_schema(tmp_path):
     led = G0BNLedger()
     led.record_completion(_identity(), _result())

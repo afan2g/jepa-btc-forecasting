@@ -205,11 +205,32 @@ def test_class_prob_spread_maps_classes_and_fills_missing_with_zero():
     proba = np.array([[0.2, 0.5, 0.3], [0.6, 0.3, 0.1]])
     f = class_prob_spread(proba, np.array([-1, 0, 1]), 10.0)
     assert np.allclose(f, [(0.3 - 0.2) * 10.0, (0.1 - 0.6) * 10.0])
-    # A purged training fold missing a class yields fewer proba columns; the
-    # missing class has probability exactly 0.0.
+    # Defensive narrow-proba handling: a class absent from classes_ has
+    # probability exactly 0.0 regardless of the physical proba width.
     proba2 = np.array([[0.7, 0.3]])
     f2 = class_prob_spread(proba2, np.array([-1, 0]), 10.0)
     assert np.allclose(f2, (0.0 - 0.7) * 10.0)
+
+
+def test_real_classifier_two_class_fold_column_alignment():
+    # Regression lock for the installed LightGBM: with the pinned num_class=3, a
+    # purged training fold observing only {-1, +1} still yields a 3-column
+    # predict_proba, with the OBSERVED classes in classes_ order occupying the
+    # leading columns and a near-zero phantom third column. class_prob_spread must
+    # read P(+1)/P(-1) through classes_, never by physical position 2.
+    defn = runtime_candidates()[4]
+    cls = eng.ESTIMATOR_CLASSES[defn["estimator_class"]]
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((160, 4))
+    y = np.where(X[:, 0] > 0, 1, -1)
+    model = cls(**defn["model_params"])
+    model.fit(X, y, sample_weight=np.ones(len(y)))
+    proba = model.predict_proba(X[:10])
+    assert proba.shape == (10, 3)
+    assert list(model.classes_) == [-1, 1]
+    assert proba[:, 2].max() < 1e-6          # phantom class stays ~0
+    f = class_prob_spread(proba, model.classes_, 2.5)
+    assert np.array_equal(f, (proba[:, 1] - proba[:, 0]) * np.float64(2.5))
 
 
 # ------------------------------------------------------ candidate CPCV forecasts
@@ -475,6 +496,46 @@ def test_canonical_ordering_row_shuffle_does_not_change_results(dev_run, bundle)
     ledger3 = G0BNLedger()
     run3 = run_g0bn_development(shuffled, manifest, config, identity, ledger3)
     assert ledger3.identity_set_sha256() == ledger.identity_set_sha256()
+
+
+def test_cpcv_geometry_purges_test_spans_and_embargo(bundle, horizon_rows):
+    # The engine pins t0=t_event, t1=t_barrier (spec section 9): no training row's
+    # realized label span may overlap any test span, and no training row may start
+    # inside the embargo window after a test barrier. Checked pairwise, which the
+    # merged-interval purge in data.cv implies.
+    from data.cv import cpcv_splits
+    _, _, config, _ = bundle
+    rows = horizon_rows["60s"]
+    t_event = rows["t_event"].to_numpy(np.int64)
+    t_barrier = rows["t_barrier"].to_numpy(np.int64)
+    embargo = config["cv"]["embargo_ns"]
+    splits = list(cpcv_splits(t_event, t_event, t_barrier, n_groups=6, k=2,
+                              embargo_ns=embargo))
+    assert len(splits) == N_SPLITS
+    for train_idx, test_idx in splits:
+        t0_tr, t1_tr = t_event[train_idx][:, None], t_barrier[train_idx][:, None]
+        t0_te, t1_te = t_event[test_idx][None, :], t_barrier[test_idx][None, :]
+        overlap = (t0_tr <= t1_te) & (t1_tr >= t0_te)
+        embargoed = (t0_tr > t1_te) & (t0_tr <= t1_te + embargo)
+        assert not overlap.any()
+        assert not embargoed.any()
+
+
+def test_conflicting_prior_completion_fails_the_run_not_an_abort(bundle):
+    # A pre-existing completed result that the deterministic rerun cannot
+    # reproduce is non-determinism/tampering: the run must fail closed, never
+    # downgrade the conflict to an aborted event.
+    frame, manifest, config, identity = bundle
+    ledger = G0BNLedger()
+    poisoned = base_trial_identities(config, identity)[0]
+    ledger.record_completion(poisoned, {
+        "schema": "g0bn-trial-result-v1", "n_rows": 1,
+        "forecasts_sha256": "0" * 64,
+        "collapse_version": "mean_repeated_test_forecasts_v1",
+        "split_scales": None})
+    with pytest.raises(ValueError, match="DIFFERENT result"):
+        run_g0bn_development(frame, manifest, config, identity, ledger)
+    assert ledger.n_effective_trials() == 1     # nothing was silently replaced
 
 
 def test_infrastructure_abort_is_recorded_and_counted(bundle, monkeypatch):
