@@ -820,7 +820,10 @@ def test_insufficient_uniqueness_sum_blocks_eligibility():
             assert "insufficient_valid_days" not in cand["reasons"]
 
 
-def test_selection_rejects_foreign_development_identity(strong_run):
+def test_ledger_rejects_foreign_development_identity_at_registration(strong_run):
+    # The ledger's data-identity pin makes a foreign-build entry impossible to
+    # record at all — completed OR aborted (the aborted-only case previously
+    # slipped past selection's scored-trial reconciliation into n_trials).
     run, _ = strong_run
     base = next(t for t, i in run.identities.items()
                 if i["horizon"] == "2s" and i["candidate_id"] == "ofi_ridge")
@@ -829,11 +832,28 @@ def test_selection_rejects_foreign_development_identity(strong_run):
     led = G0BNLedger()
     for tid, ident in run.identities.items():
         led.record_completion(ident, run.ledger.result_for(tid))
-    led.record_completion(foreign, {
-        "schema": "g0bn-trial-result-v1", "n_rows": 1,
-        "forecasts_sha256": "1" * 64,
-        "collapse_version": "mean_repeated_test_forecasts_v1",
-        "split_scales": None})
+    with pytest.raises(ValueError, match="data-identity drift"):
+        led.record_completion(foreign, {
+            "schema": "g0bn-trial-result-v1", "n_rows": 1,
+            "forecasts_sha256": "1" * 64,
+            "collapse_version": "mean_repeated_test_forecasts_v1",
+            "split_scales": None})
+    with pytest.raises(ValueError, match="data-identity drift"):
+        led.record_abort(foreign, error="aborted foreign attempt")
+    assert led.n_effective_trials() == 15
+
+
+def test_selection_rejects_a_ledger_pinned_to_foreign_data(strong_run):
+    # Defense in depth: a ledger whose pin was set by a foreign first identity
+    # (e.g. the wrong ledger file supplied to selection) fails with the precise
+    # foreign-data diagnosis before any counting.
+    run, _ = strong_run
+    base = next(t for t, i in run.identities.items()
+                if i["horizon"] == "2s" and i["candidate_id"] == "ofi_ridge")
+    foreign = copy.deepcopy(run.identities[base])
+    foreign["development_build_id"] = "c" * 64
+    led = G0BNLedger()
+    led.record_abort(foreign, error="aborted-only foreign attempt")
     patched = DevelopmentRun(
         config=run.config, data_identity=run.data_identity, manifest=run.manifest,
         horizon_rows=run.horizon_rows, identities=run.identities,
@@ -841,6 +861,39 @@ def test_selection_rejects_foreign_development_identity(strong_run):
         aborted=run.aborted, ledger=led)
     with pytest.raises(ValueError, match="foreign"):
         development_selection(patched)
+
+
+def test_selection_rejects_scored_identities_with_drifted_section_hashes(strong_run):
+    # A recordable variant whose identity binds a DIFFERENT cost/label/cv/
+    # thresholds provenance than the immutable config cannot be scored under this
+    # config's economics: its net series would contaminate the same-horizon
+    # dispersion and PBO matrix under the wrong costs.
+    run, _ = strong_run
+    rows = run.horizon_rows["2s"]
+    series = rows["y_fwd_bps"].to_numpy(np.float64).copy()
+    base = next(t for t, i in run.identities.items()
+                if i["horizon"] == "2s" and i["candidate_id"] == "ofi_ridge")
+    for field in ("cost_sha256", "label_sha256", "cv_sha256", "thresholds_sha256"):
+        variant = dict(copy.deepcopy(run.identities[base]), variant="probe",
+                       variant_params={"drifted": field})
+        variant[field] = "6" * 64
+        led = G0BNLedger()
+        for tid, ident in run.identities.items():
+            led.record_completion(ident, run.ledger.result_for(tid))
+        led.record_completion(variant, {
+            "schema": "g0bn-trial-result-v1", "n_rows": int(len(rows)),
+            "forecasts_sha256": forecast_series_sha256(
+                rows["t_event"].to_numpy(np.int64), "2s", series),
+            "collapse_version": "mean_repeated_test_forecasts_v1",
+            "split_scales": None})
+        patched = DevelopmentRun(
+            config=run.config, data_identity=run.data_identity,
+            manifest=run.manifest, horizon_rows=run.horizon_rows,
+            identities=run.identities, forecasts=run.forecasts,
+            split_scales=run.split_scales, aborted=run.aborted, ledger=led)
+        with pytest.raises(ValueError, match="provenance"):
+            development_selection(patched,
+                                  extra_forecasts={hash_obj(variant): series})
 
 
 def test_off_ladder_horizon_trial_counts_in_n_trials_only(strong_run):

@@ -543,6 +543,32 @@ def development_selection(run, *, extra_forecasts: dict | None = None,
               f"{data_identity['development_logical_row_sha256']} — refusing to "
               "score mutated or foreign rows")
 
+    # ---- bind the ledger's pins to THIS run before any counting: an aborted-only
+    # foreign identity would otherwise inflate n_trials without ever being
+    # inspected (the loop below reconciles scored trials only).
+    ledger_pin = ledger.data_identity_pin()
+    if ledger_pin is not None and any(
+            ledger_pin[key] != data_identity[key] for key in ledger_pin):
+        _fail("ledger", "the ledger is pinned to a foreign development data "
+                        "identity; its attempts cannot enter this run's effective "
+                        "trial count")
+    if (ledger.protocol_config_sha256() is not None
+            and ledger.protocol_config_sha256() != config["sha256"]):
+        _fail("ledger", "the ledger is pinned to a foreign protocol config")
+
+    # The canonical section-hash provenance every scored identity must reproduce
+    # under the immutable config: a variant binding different cost/label/cv/
+    # threshold evidence cannot be scored with this config's economics.
+    section_hashes = {
+        "cost_sha256": hash_obj(config["costs"]),
+        "label_sha256": hash_obj(config["labels"]),
+        "cv_sha256": hash_obj(config["cv"]),
+        "thresholds_sha256": hash_obj(config["verdict_thresholds"]),
+        "software_versions_sha256": hash_obj(config["software"]),
+        "source_certification_sha256":
+            config["source_certification"]["certification_sha256"],
+    }
+
     # ---- reconcile every successfully scored ladder-horizon trial with the ledger
     scored_by_tag: dict = {tag: [] for tag in ladder_tags}
     forecast_map: dict = {}
@@ -557,6 +583,13 @@ def development_selection(run, *, extra_forecasts: dict | None = None,
         if identity["protocol_config_sha256"] != config["sha256"]:
             _fail("ledger", f"scored trial {tid[:12]}... binds a foreign protocol "
                             "config")
+        for key, expected in section_hashes.items():
+            if identity[key] != expected:
+                _fail("ledger", f"scored trial {tid[:12]}... binds {key} "
+                                f"{identity[key][:12]}..., not the config's "
+                                f"{expected[:12]}...; its identity-bound provenance "
+                                "cannot be reproduced under this config, so its "
+                                "series must not enter dispersion/PBO")
         tag = identity["horizon"]
         if tag not in scored_by_tag:
             continue    # off-ladder horizon: counts in effective N only

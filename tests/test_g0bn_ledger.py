@@ -367,6 +367,60 @@ def test_load_rejects_mixed_config_ledger_file(tmp_path):
         G0BNLedger.load(path)
 
 
+def test_register_rejects_development_data_identity_drift():
+    # One protocol instance has ONE canonical development build (immutable config
+    # + deterministic producer): an identity binding a different build must fail
+    # closed at every registration path — an aborted-only foreign attempt would
+    # otherwise silently inflate effective N and every DSR benchmark.
+    led = G0BNLedger()
+    led.record_start(_identity())
+    for field in ("development_build_id", "development_manifest_sha256",
+                  "development_logical_row_sha256", "partition_plan_sha256"):
+        foreign = _identity(horizon="10s", **{field: "c" * 64})
+        with pytest.raises(ValueError, match="data-identity drift"):
+            led.record_start(foreign)
+        with pytest.raises(ValueError, match="data-identity drift"):
+            led.record_abort(foreign, error="x")
+        with pytest.raises(ValueError, match="data-identity drift"):
+            led.record_completion(foreign, _result())
+    assert led.n_effective_trials() == 1
+
+
+def test_load_rejects_mixed_data_identity_ledger_file(tmp_path):
+    led = G0BNLedger()
+    led.record_completion(_identity(), _result())
+    path = tmp_path / "ledger.json"
+    led.save(path)
+    payload = json.loads(path.read_text())
+    foreign = _identity(horizon="10s", development_build_id="d" * 64)
+    payload["identities"].append({"trial_id": trial_id(foreign), "identity": foreign,
+                                  "result": None, "result_sha256": None})
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="data-identity drift"):
+        G0BNLedger.load(path)
+
+
+def test_symlinked_paths_share_one_writer_lock(tmp_path):
+    # abspath alone would leave symlink aliases distinct, deriving different
+    # .lock files for the same underlying ledger; canonicalization through
+    # symlinks must make every alias contend on ONE lock.
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    alias = tmp_path / "alias"
+    os.symlink(real_dir, alias)
+    led = G0BNLedger(path=real_dir / "ledger.json")
+    led.record_start(_identity())
+    with pytest.raises(ValueError, match="lock"):
+        G0BNLedger.load(alias / "ledger.json")       # alias resolves to same lock
+    snapshot = G0BNLedger.load(alias / "ledger.json", bind=False)
+    assert snapshot.n_effective_trials() == 1
+    led.close()
+    resumed = G0BNLedger.load(alias / "ledger.json")  # released -> alias may bind
+    resumed.record_abort(_identity(), error="via alias")
+    resumed.close()
+    assert len(G0BNLedger.load(real_dir / "ledger.json", bind=False).events()) == 2
+
+
 # ------------------------------------------------------------ durable persistence
 
 def test_path_bound_ledger_persists_every_event_immediately(tmp_path):
