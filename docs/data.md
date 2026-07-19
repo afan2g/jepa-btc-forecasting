@@ -17,7 +17,7 @@ assets, and model families are conditional increments (spec §1):
 
 | Role | Venue / instrument | Vendor | Feeds |
 |---|---|---|---|
-| `G0-BN` signal + target | Binance **BTC-USDT-PERP** | source selected by #64 | L2 snapshots/deltas, trades |
+| `G0-BN` signal + target | Binance **BTC-USDT-PERP** | Crypto Lake (accepted by #64) | L2 snapshots/deltas, trades |
 | Conditional increment 1 | Binance **BTC-USDT** spot | source selected after G0-BN | L2 snapshots/deltas, trades |
 | Conditional increment 2 | Binance perpetual state | source selected after G0-BN | funding, open interest, liquidations |
 | Conditional transfer/cross-venue | Coinbase **BTC-USD** | source selected by #65 | minimum certified labels/costs; depth only if justified |
@@ -113,14 +113,14 @@ must authorize the exact one-time post-freeze scope.
 
 ---
 
-## 3. Candidate evidence & pending source decisions
+## 3. Source decisions & candidate evidence
 
-**Binance — decision pending #64.** Crypto Lake is a measured candidate: its Binance products are
-structurally suitable, inexpensive under the existing plan, Tokyo-captured, and have the Stage-1
-coverage/schema/timestamp evidence recorded in §5. Those measurements do **not** select the source.
-#64 must complete Stage-2 reconstruction and independent comparison against CryptoHFTData (or record
-a reviewed fallback) before #68 may plan the 92-day acquisition. No text in this section authorizes
-a Crypto Lake pull while that gate is open.
+**Binance — Crypto Lake selected by #64 on 2026-07-19.** Human review accepted the preregistered
+`lake_go` route on internal certification only for the bounded G0-BN experiment. The approved
+instrument is `BINANCE_FUTURES` / `BTC-USDT-PERP` (native `BTCUSDT`); the only raw products are
+`book` snapshot seeds, absolute-size `book_delta_v2` L2 updates, and `trades`. The existing
+`lake_binance/1` raw-store contract produces `topk_l2/1` and `trades/1`. This source selection lets
+#68 prepare its exact 92-day acquisition and custody plan, but it is **not** vendor-I/O approval.
 
 > **#64 probe outcome (2026-07-16, measured).** Stage-2 reconstruction certified the local
 > `2026-04-01` Crypto Lake smoke (all nine units; perp/spot top-K CERTIFIED; 0 off-tick across
@@ -142,7 +142,24 @@ a Crypto Lake pull while that gate is open.
 > (`binance_futures/2026-04-01` hours 00..12) is a *different* request than the preregistered
 > expansion and would require a dated, reviewed preregistration amendment (or a separately-scoped
 > bounded request) — **not just an approval**, and its premise must be confirmed rather than assumed.
-> #64 stays open on that question; this note authorizes no acquisition.
+> On 2026-07-19, human review accepted this internal-only certification for G0-BN while retaining
+> independent parity as an explicit residual risk. CryptoHFTData is not an approved production or
+> parity fallback from this probe. Any later parity attempt requires a new reviewed preregistration
+> or request scope; this decision authorizes no acquisition.
+
+The binding #68 source policy is fail closed:
+
+- jointly use fully populated `origin_time` across the source frames; the existing whole-day
+  `received_time` fallback is allowed only through `ingest.lake_binance.resolve_engine_time`, with
+  every fallback and dropped row recorded;
+- replay deltas in stable engine-time order with `sequence_number` as the tie-break. Duplicate
+  sequence values are valid, and sequence differences are not a row-gap detector;
+- use perpetual price scale 10 (a $0.10 tick), supported by zero off-tick prices in the
+  preregistered April evidence; and
+- certify every required day through the existing Stage-2 schema, silence, seed/reseed, quality,
+  determinism, and tick gates. A non-certified day is an explicit exclusion, never a silent repair
+  or source substitution. #68 must measure availability for `2025-11-01` through `2026-01-31` and
+  obtain separate approval before any live request.
 
 **Coinbase — decision pending #65; prior hybrid retained as fallback evidence.** The previously
 specified Crypto Lake + CoinAPI design remains implemented, measured fallback infrastructure, not
@@ -1380,8 +1397,9 @@ Other open items:
       CERTIFIED probe replay (which a delta-only hour cannot yield), so obtaining/replaying earlier
       hours (00..12) needs a reviewed preregistration amendment or a separately-scoped bounded
       request, not just an approval — and its premise that an earlier hour carries a usable snapshot
-      is unverified (only hour 12 was checked, and it was delta-only).* Still open in the amended order: #64 independent-parity confirmation (or reviewed
-      acceptance of internal-only certification); #68 minimal 92-day futures L2+trades acquisition; #67
+      is unverified (only hour 12 was checked, and it was delta-only).* Internal-only Crypto Lake
+      certification was accepted for bounded G0-BN on 2026-07-19, with no fallback and no vendor-I/O
+      authorization. Still open in the amended order: #68 minimal 92-day futures L2+trades acquisition; #67
       Binance-only producer/evaluator mode; #69 G0-BN; only after PASS, the
       deferred spot/state/Coinbase/cross-venue and remaining-archive stages.
 - [ ] **Liquidations sparsity** — confirm low coverage is genuine (no liquidations) vs missing files.
