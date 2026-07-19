@@ -135,11 +135,14 @@ a Crypto Lake pull while that gate is open.
 > (`chd_probe_2026-04-01_12.json`). Independent parity remains **unproven** and is **procedurally
 > blocked**, not merely awaiting approval: the preregistered `request_bounds.expansion` gate
 > (enforced in `scripts/run_binance_source_gate.py`) unlocks additional hours only when the probe's
-> own `chd-replay` is `certified`, which a delta-only hour cannot satisfy. Seeding from earlier
-> snapshot-bearing hours (`binance_futures/2026-04-01` hours 00..12) to reconstruct hour 12 is a
-> *different* request than the preregistered expansion and would require a dated, reviewed
-> preregistration amendment (or a separately-scoped bounded request) — **not just an approval**. #64
-> stays open on that question; this note authorizes no acquisition.
+> own `chd-replay` is `certified`, which a delta-only hour cannot satisfy. Reconstructing hour 12
+> would require some earlier hour to carry a usable snapshot — a plausible but **unverified
+> hypothesis** (only hour 12 was checked, and it was delta-only; no committed artifact yet proves an
+> earlier hour of this exact product/date contains a snapshot). Obtaining and replaying those hours
+> (`binance_futures/2026-04-01` hours 00..12) is a *different* request than the preregistered
+> expansion and would require a dated, reviewed preregistration amendment (or a separately-scoped
+> bounded request) — **not just an approval**, and its premise must be confirmed rather than assumed.
+> #64 stays open on that question; this note authorizes no acquisition.
 
 **Coinbase — decision pending #65; prior hybrid retained as fallback evidence.** The previously
 specified Crypto Lake + CoinAPI design remains implemented, measured fallback infrastructure, not
@@ -1374,9 +1377,10 @@ Other open items:
       validated as genuine but delta-only (no snapshot), so the fail-closed replay refused
       (`missing_initial_snapshot`) and routing recorded `lake_go` on internal certification only —
       independent parity is procedurally blocked: the preregistered expansion gate requires a
-      CERTIFIED probe replay (which a delta-only hour cannot yield), so seeding hours 00..12 needs a
-      reviewed preregistration amendment or a separately-scoped bounded request, not just an
-      approval.* Still open in the amended order: #64 independent-parity confirmation (or reviewed
+      CERTIFIED probe replay (which a delta-only hour cannot yield), so obtaining/replaying earlier
+      hours (00..12) needs a reviewed preregistration amendment or a separately-scoped bounded
+      request, not just an approval — and its premise that an earlier hour carries a usable snapshot
+      is unverified (only hour 12 was checked, and it was delta-only).* Still open in the amended order: #64 independent-parity confirmation (or reviewed
       acceptance of internal-only certification); #68 minimal 92-day futures L2+trades acquisition; #67
       Binance-only producer/evaluator mode; #69 G0-BN; only after PASS, the
       deferred spot/state/Coinbase/cross-venue and remaining-archive stages.

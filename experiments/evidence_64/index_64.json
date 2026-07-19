@@ -10,7 +10,7 @@
   "tracked_files": {
     "lake_verdict_2026-04-01.json": "d24769a6fc05bd601a9c97440935be2a6ac3d21968076e0bf3431321a2c6ecf8",
     "stage2_cross_engine_determinism.json": "fcdd8b76206b2c112c6900848a815d0bb6524f7cf0ae94c10f578b82540c7152",
-    "chd_probe_2026-04-01_12.json": "308b51b4e4eb2095f71f3614d0447060f4817834f8ba7865fe6e1ac592e21668"
+    "chd_probe_2026-04-01_12.json": "915c33156558d58c52f07d5402bbb62c7039d99c596f3d71889d43beb96d8539"
   },
   "ignored_reports_sha256": {
     "verify_inputs.json": "2c10cb489fbab68902b73ad08a9c2a550ccb739e932324a42e9acbccb88fe3c7",
@@ -31,7 +31,7 @@
     "requests": 0,
     "bytes": 0,
     "cost_usd": 0.0,
-    "scope": "Crypto Lake Stage-2 integrity evidence generation only — fully offline/local, no vendor I/O"
+    "scope": "Crypto Lake Stage-2 integrity evidence generation only \u2014 fully offline/local, no vendor I/O"
   },
   "vendor_calls_total": {
     "requests": 1,
@@ -46,15 +46,21 @@
     "object": "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
     "object_sha256": "dff90e761a3bc53be7391f9f33bc846e9988cc4422664e3217001d2c8f0e9acb",
     "validate_pass": true,
-    "validate_event_type_rows": {"update": 5743827},
+    "validate_event_type_rows": {
+      "update": 5743827
+    },
     "chd_verdict": "inconclusive",
     "chd_refusal": "missing_initial_snapshot",
     "comparison_executable": false,
     "final_source_decision": "lake_go",
     "final_source_decision_detail": "Crypto Lake approved on internal certification only; independent validation not executable (CryptoHFTData window unavailable or refused fail-closed); fallback none",
     "lake_topk_perp_frame_reproduced_bit_identical": true,
-    "vendor_calls": {"requests": 1, "bytes": 19743899, "cost_usd": 0.0},
+    "vendor_calls": {
+      "requests": 1,
+      "bytes": 19743899,
+      "cost_usd": 0.0
+    },
     "tracked_summary": "chd_probe_2026-04-01_12.json",
-    "note": "One bounded, user-approved mid-day hourly object; genuine delta-only data (no snapshot in the hourly partition) so the fail-closed replay refused. Independent parity is procedurally blocked: the preregistered request_bounds.expansion gate requires a CERTIFIED probe replay (which a delta-only hour cannot yield), so seeding hours 00..12 needs a reviewed preregistration amendment or a separately-scoped bounded request, not just an approval. The 0-vendor-call Lake certification above is unchanged and was independently reproduced bit-for-bit on this branch."
+    "note": "One bounded, user-approved mid-day hourly object; genuine delta-only data (no snapshot in the hourly partition) so the fail-closed replay refused. Independent parity is procedurally blocked: the preregistered request_bounds.expansion gate requires a CERTIFIED probe replay (which a delta-only hour cannot yield), so obtaining and replaying earlier hours (00..12) needs a reviewed preregistration amendment or a separately-scoped bounded request, not just an approval \u2014 and its premise (that some earlier hour carries a usable snapshot) is an unverified hypothesis, since only hour 12 was checked and it was delta-only. The 0-vendor-call Lake certification above is unchanged and was independently reproduced bit-for-bit on this branch."
   }
 }
