@@ -238,6 +238,13 @@ def test_plan_precomputes_the_oos_bootstrap_draw_hash(strong):
          "day": "2026-01-02", "sha256": sha_hex("raw-on-normalized")}),
      "certified"),
     (lambda inv: inv["objects"].append(dict(inv["objects"][0])), "duplicate"),
+    # a SECOND object (fresh object_id) for an already-covered slot is
+    # ambiguous custody and an activity-proxy channel: exactly one object per
+    # (day, layer, product)
+    (lambda inv: inv["objects"].append(
+        {"object_id": "custody/raw/book/2026-01-01/part-2", "layer": "raw",
+         "product": "book", "day": "2026-01-01",
+         "sha256": sha_hex("second-object-same-slot")}), "duplicate"),
     (lambda inv: inv["objects"].__setitem__(
         3, dict(inv["objects"][3], object_id=inv["objects"][2]["object_id"])),
      "duplicate"),

@@ -268,9 +268,14 @@ def _validate_day_scope(path: str, included, excluded, config: dict) -> None:
 
 def _validate_allowlist(path: str, objects, included, config: dict) -> None:
     """Exact sealed-object allowlist accounting: unique opaque ids, certified
-    products only, included days only, and complete (day, layer, product)
-    coverage. Byte sizes / record counts are January activity proxies and are
-    structurally rejected by the exact object field set (spec section 5.1)."""
+    products only, included days only, and EXACTLY ONE object per
+    (day, layer, product) — a second object for a covered slot is ambiguous
+    custody and would make object multiplicity a January activity proxy, so the
+    allowlist cardinality is a pure function of the included-day count. Byte
+    sizes / record counts are likewise structurally rejected by the exact
+    object field set (spec section 5.1). A custodian sharding scheme finer than
+    day-per-product requires an explicit contract revision, never silent
+    acceptance."""
     if not isinstance(objects, list) or not objects:
         _fail(path, "must be a non-empty array of sealed object entries")
     raw_products = _raw_products(config)
@@ -303,7 +308,14 @@ def _validate_allowlist(path: str, objects, included, config: dict) -> None:
                   f"duplicate object_id {obj['object_id']!r} in the sealed "
                   "allowlist")
         seen_ids.add(obj["object_id"])
-        seen.add((obj["day"], obj["layer"], obj["product"]))
+        triple = (obj["day"], obj["layer"], obj["product"])
+        if triple in seen:
+            _fail(opath,
+                  f"duplicate sealed object for (day, layer, product) {triple}; "
+                  "the allowlist admits exactly one object per certified "
+                  "product per included day (ambiguous custody and "
+                  "activity-proxy multiplicity are forbidden)")
+        seen.add(triple)
     missing = [(day, layer, product)
                for day in included
                for layer in OBJECT_LAYERS
