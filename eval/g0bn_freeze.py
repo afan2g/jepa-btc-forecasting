@@ -593,6 +593,11 @@ def validate_holdout_plan(plan: dict, config: dict, *,
         _validate_generated_at(plan["generated_at"])
 
     if inventory is not None:
+        # The inventory is only a custody anchor if IT reconciles with the
+        # config's seal/coverage/permission/identity pins: a forged minimal
+        # dict mirroring the plan's own scope fields (or a full inventory
+        # carrying foreign custody evidence) must fail before any comparison.
+        validate_custody_inventory(inventory, config)
         _exact("included_days", plan["included_days"],
                list(inventory["included_days"]))
         _exact("excluded_days", plan["excluded_days"],

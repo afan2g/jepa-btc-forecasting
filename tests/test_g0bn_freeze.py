@@ -756,3 +756,25 @@ def test_validate_custody_inventory_is_exactly_the_build_input(strong):
     with pytest.raises(ValueError, match="unknown"):
         validate_custody_inventory(
             dict(strong["inventory"], holdout_row_count=3), strong["config"])
+
+
+def test_supplied_inventory_is_itself_validated_against_the_config(strong):
+    """A caller-supplied inventory is only a custody anchor if IT reconciles
+    with the config's seal pins: a forged minimal dict mirroring the plan's own
+    scope fields, or a full inventory carrying a foreign seal hash, must fail
+    before any comparison lets a binding hash be derived (Codex round 2)."""
+    plan, config = strong["plan"], strong["config"]
+    forged = {
+        "included_days": list(plan["included_days"]),
+        "excluded_days": copy.deepcopy(plan["excluded_days"]),
+        "objects": [dict(o) for o in plan["object_allowlist"]],
+    }
+    with pytest.raises(ValueError, match="missing"):
+        validate_holdout_plan(plan, config, inventory=forged)
+    mismatched = make_inventory(custodian_seal_sha256=sha_hex("foreign-seal"))
+    with pytest.raises(ValueError, match="custodian_seal_sha256"):
+        validate_holdout_plan(plan, config, inventory=mismatched)
+    with pytest.raises(ValueError, match="custodian_seal_sha256"):
+        verify_oos_build_binding(
+            {"holdout_plan_sha256": plan["sha256"]}, plan,
+            config=config, inventory=mismatched)
