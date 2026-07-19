@@ -118,8 +118,9 @@ must authorize the exact one-time post-freeze scope.
 **Binance — Crypto Lake selected by #64 on 2026-07-19.** Human review accepted the preregistered
 `lake_go` route on internal certification only for the bounded G0-BN experiment. The approved
 instrument is `BINANCE_FUTURES` / `BTC-USDT-PERP` (native `BTCUSDT`); the only raw products are
-`book` snapshot seeds, absolute-size `book_delta_v2` L2 updates, and `trades`. The existing
-`lake_binance/1` raw-store contract produces `topk_l2/1` and `trades/1`. This source selection lets
+`book` snapshot seeds, absolute-size `book_delta_v2` L2 updates, and `trades`. The
+`lake_binance/1` raw store contains those three products; Stage 2 consumes them and emits
+`topk_l2/1` and `trades/1` in the processed store. This source selection lets
 #68 prepare its exact 92-day acquisition and custody plan, but it is **not** vendor-I/O approval.
 
 > **#64 probe outcome (2026-07-16, measured).** Stage-2 reconstruction certified the local

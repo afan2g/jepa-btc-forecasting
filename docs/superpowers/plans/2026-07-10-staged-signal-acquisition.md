@@ -25,9 +25,10 @@ evidence and fallback infrastructure.
 
 Stage evidence and data spend in this order:
 
-1. **Certify one Binance source (#64).** Use bounded existing/sample evidence to
-   select Crypto Lake, CryptoHFTData, or a documented fallback for Binance
-   BTC-USDT perpetual.
+1. **Use the source certified by #64 (accepted 2026-07-19).** Crypto Lake is
+   selected for Binance BTC-USDT perpetual `book` + `book_delta_v2` + `trades`
+   on internal certification only. Independent CryptoHFTData parity remains a
+   residual risk, and CryptoHFTData is not an approved fallback.
 2. **Implement single-venue modeling support (#67).** Add the source-isolated
    `binance_single_venue` producer plus the distinct `g0bn-*` config, ledger,
    freeze, holdout-plan, transaction, runner, and report contracts. Do not
@@ -307,7 +308,8 @@ artifact, candidate ledger where applicable, and build ID.
 
 ## 6. Acquisition and Resource Gates
 
-#64 must select the Binance source before #68 plans the 92-day pull. #68 then:
+#64 selected the fail-closed Crypto Lake contract above. That source decision is
+complete but is not transfer authorization. #68 then:
 
 - enumerates exact source/product/day-or-hour units;
 - records conservative and measured bytes, disk, quota, and runtime;
@@ -330,8 +332,9 @@ The completed nine-unit `2026-04-01` smoke measured ~0.687 decimal GB. Scaling
 that observation over 92 days gives ~63.2 GB, but a single day is **not** an
 upper bound, quota guarantee, or approval estimate. The current Crypto Lake
 required-feed constants instead sum to `0.7788 GB/day`, or **~71.65 GB for 92
-days**; that value is also provisional because some per-feed constants are
-derived and #64 may select another source. It is **not** the current batch
+days**; that value remains provisional because some per-feed constants are
+derived and the 92-day sizes are not yet measured. Crypto Lake is the selected
+source; the estimate is **not** the current batch
 planner's output: `scripts/plan_lake_binance_batches.py` still budgets `1.2278
 GB/day`, selects both perpetual and spot, and omits `--feeds` (therefore all valid
 feeds). #68 must not use that full-archive planner as-is. It must replace both
@@ -345,8 +348,8 @@ experiment; it is never bulk-transfer authorization by itself.
 
 ## 7. Issue and Merge Boundaries
 
-- #64: bounded Binance source-quality decision; may continue under this amended
-  premise without reopening completed Coinbase work.
+- #64: reviewed Crypto Lake source-quality decision, accepted on internal
+  certification only with independent parity retained as a residual risk.
 - #66: premise/docs/issues/roadmap amendment.
 - #67: reviewable config/identity, candidate-ledger, freeze/plan,
   generic-runner guard, stable-universe/two-burn one-shot runner,
