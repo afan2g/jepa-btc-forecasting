@@ -68,8 +68,11 @@ snapshot/delta and trade sources. It rejects Coinbase/CoinAPI, spot, other
 assets or perpetuals, funding/OI/liquidations/basis, and any extra state/source
 feature before parquet access wherever the API controls loading.
 
-1. **Source gate (#64):** certify Crypto Lake or CryptoHFTData for Binance
-   BTC-USDT perpetual with independent, bounded reconstruction evidence.
+1. **Source gate (#64, accepted 2026-07-19):** use Crypto Lake for Binance
+   BTC-USDT perpetual `book` + `book_delta_v2` + `trades` on internal
+   certification only. Independent CryptoHFTData parity remains an explicit
+   residual risk and CryptoHFTData is not an approved fallback; #68 must certify
+   each required Crypto Lake day before use.
 2. **Producer/evaluator (#67):** implement source-isolated
    `binance_single_venue` production plus distinct `g0bn-*` config, ledger,
    freeze, holdout-universe/plan, raw- and matrix-access claims, consumption,
