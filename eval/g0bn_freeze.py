@@ -356,6 +356,19 @@ def validate_custody_inventory(inventory: dict, config: dict) -> dict:
     return inventory
 
 
+def _required_inventory(inventory) -> dict:
+    """The custody anchor is required SEMANTICALLY, not just syntactically: an
+    explicit `inventory=None` (or any non-dict) at a custody-anchored entry
+    point must fail closed rather than silently degrade the shared
+    validate_holdout_plan path to config-only validation."""
+    if not isinstance(inventory, dict):
+        _fail("inventory",
+              "the outcome-blind #68 custody inventory/seal metadata dict is "
+              f"required at this entry point; got {type(inventory).__name__} — "
+              "a missing inventory must not degrade to config-only validation")
+    return inventory
+
+
 def _validate_extra_cols(path: str, extra) -> list:
     if not isinstance(extra, list):
         _fail(path, f"must be an ordered array of diagnostic columns; got {extra!r}")
@@ -665,7 +678,8 @@ def oos_build_params(plan: dict, build_params: dict, *, config: dict,
     inventory a coordinated plan+freeze rehash could bind objects the custodian
     never sealed. The binding value is always injected from the plan itself: a
     caller-supplied value could pin a stale/tampered plan and is refused."""
-    validate_holdout_plan(plan, config, inventory=inventory)
+    validate_holdout_plan(plan, config,
+                          inventory=_required_inventory(inventory))
     if not isinstance(build_params, dict):
         _fail("build_params", "must be a dict of explicit build parameters")
     if "holdout_plan_sha256" in build_params:
@@ -685,7 +699,8 @@ def verify_oos_build_binding(build_params: dict, plan: dict, *, config: dict,
     custody-validated plan. Tampering with the plan after binding (even with a
     recomputed self-hash, and even if the allowlist edit is coordinated with a
     freeze rehash) or binding a foreign plan fails closed."""
-    validate_holdout_plan(plan, config, inventory=inventory)
+    validate_holdout_plan(plan, config,
+                          inventory=_required_inventory(inventory))
     if not isinstance(build_params, dict):
         _fail("build_params", "must be a dict of explicit build parameters")
     expected = holdout_plan_sha256(plan)
@@ -706,7 +721,7 @@ def holdout_plan_binding(plan: dict, freeze: dict, *, config: dict,
     one that only swaps a sealed object hash), and the freeze must bind exactly
     this plan."""
     validate_freeze(freeze, config=config, plan=plan,
-                    inventory=inventory)   # validates the plan too
+                    inventory=_required_inventory(inventory))  # validates plan too
     return {
         "name": HOLDOUT_PLAN_BINDING,
         "protocol": ONE_SHOT_SCHEMA,
@@ -794,7 +809,8 @@ def build_freeze(run, plan: dict, *, inventory: dict,
     deterministic result, so a stale, tampered, or hand-edited development
     result can never be frozen."""
     config = run.config
-    validate_holdout_plan(plan, config, inventory=inventory)
+    validate_holdout_plan(plan, config,
+                          inventory=_required_inventory(inventory))
     if expected_development_result is not None:
         exp = expected_development_result
         if not isinstance(exp, dict) or "result_sha256" not in exp:

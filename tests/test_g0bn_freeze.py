@@ -26,6 +26,7 @@ from eval.g0bn_freeze import (
     build_freeze,
     build_holdout_plan,
     freeze_sha256,
+    holdout_plan_binding,
     holdout_plan_sha256,
     oos_build_params,
     validate_custody_inventory,
@@ -776,6 +777,27 @@ def test_validate_custody_inventory_is_exactly_the_build_input(strong):
     with pytest.raises(ValueError, match="unknown"):
         validate_custody_inventory(
             dict(strong["inventory"], holdout_row_count=3), strong["config"])
+
+
+def test_none_inventory_cannot_bypass_the_custody_anchor(strong):
+    """inventory= is required SEMANTICALLY, not just syntactically: an explicit
+    None must fail closed at every custody-anchored entry point rather than
+    silently degrading to config-only validation (Codex round 5, P1)."""
+    plan, freeze = strong["plan"], strong["freeze"]
+    config, run = strong["config"], strong["run"]
+    with pytest.raises(ValueError, match="inventory"):
+        build_freeze(run, plan, inventory=None, generated_at=GEN_AT)
+    with pytest.raises(ValueError, match="inventory"):
+        oos_build_params(plan, {"producer": "t9"}, config=config,
+                         inventory=None)
+    with pytest.raises(ValueError, match="inventory"):
+        verify_oos_build_binding({"holdout_plan_sha256": plan["sha256"]}, plan,
+                                 config=config, inventory=None)
+    with pytest.raises(ValueError, match="inventory"):
+        holdout_plan_binding(plan, freeze, config=config, inventory=None)
+    with pytest.raises(ValueError, match="inventory"):
+        verify_holdout_manifest_binding({}, plan, freeze, config=config,
+                                        inventory=None)
 
 
 def test_supplied_inventory_is_itself_validated_against_the_config(strong):
