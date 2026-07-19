@@ -106,7 +106,7 @@ def strong():
     run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
     inventory = make_inventory()
     plan = build_holdout_plan(config, inventory, generated_at=GEN_AT)
-    freeze = build_freeze(run, plan, generated_at=GEN_AT)
+    freeze = build_freeze(run, plan, inventory=inventory, generated_at=GEN_AT)
     return {"config": config, "run": run, "inventory": inventory,
             "plan": plan, "freeze": freeze}
 
@@ -116,8 +116,9 @@ def weak():
     frame, manifest, config, identity = dev_bundle(signal_bps=2.0, noise_bps=0.5,
                                                    seed=23)
     run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
-    plan = build_holdout_plan(config, make_inventory(), generated_at=GEN_AT)
-    freeze = build_freeze(run, plan, generated_at=GEN_AT)
+    inventory = make_inventory()
+    plan = build_holdout_plan(config, inventory, generated_at=GEN_AT)
+    freeze = build_freeze(run, plan, inventory=inventory, generated_at=GEN_AT)
     return {"config": config, "run": run, "plan": plan, "freeze": freeze}
 
 
@@ -347,7 +348,7 @@ def test_stable_ids_survive_config_source_and_freeze_edits(strong):
     assert plan_c["holdout_universe_id"] == plan["holdout_universe_id"]
     assert plan_c["transaction_id"] == plan["transaction_id"]
     # plan/freeze regeneration — same transaction
-    freeze_b = build_freeze(strong["run"], plan,
+    freeze_b = build_freeze(strong["run"], plan, inventory=strong["inventory"],
                             generated_at="2026-07-19T23:00:00Z")
     assert freeze_b["transaction_id"] == plan["transaction_id"]
     assert freeze_b["sha256"] == strong["freeze"]["sha256"]
@@ -491,7 +492,8 @@ def test_freeze_builds_validates_and_reproduces(strong):
     freeze, config, plan = strong["freeze"], strong["config"], strong["plan"]
     assert freeze["schema"] == FREEZE_SCHEMA
     validate_freeze(json.loads(json.dumps(freeze)), config=config, plan=plan)
-    rebuilt = build_freeze(strong["run"], plan, generated_at=GEN_AT)
+    rebuilt = build_freeze(strong["run"], plan,
+                           inventory=strong["inventory"], generated_at=GEN_AT)
     assert rebuilt == freeze
     assert freeze_sha256(freeze) == freeze["sha256"]
     # the re-derived development result is what the freeze pins
@@ -564,9 +566,10 @@ def test_blocked_selection_cannot_build_a_freeze(strong):
     identity2 = dev_data_identity(config, manifest2, shuffled)
     run = run_g0bn_development(shuffled, manifest2, config, identity2,
                                durable_ledger())
-    plan = build_holdout_plan(config, make_inventory(), generated_at=GEN_AT)
+    inventory = make_inventory()
+    plan = build_holdout_plan(config, inventory, generated_at=GEN_AT)
     with pytest.raises(ValueError, match="predictive-eligible"):
-        build_freeze(run, plan, generated_at=GEN_AT)
+        build_freeze(run, plan, inventory=inventory, generated_at=GEN_AT)
 
 
 def test_freeze_rejects_expected_development_result_mismatch(strong):
@@ -578,15 +581,18 @@ def test_freeze_rejects_expected_development_result_mismatch(strong):
                                                              "generated_at"))
     with pytest.raises(ValueError, match="development result"):
         build_freeze(strong["run"], strong["plan"], generated_at=GEN_AT,
+                     inventory=strong["inventory"],
                      expected_development_result=edited)
     # a tampered embedded result hash fails before any comparison
     tampered = copy.deepcopy(derived)
     tampered["result_sha256"] = sha_hex("tampered-result")
     with pytest.raises(ValueError, match="result_sha256"):
         build_freeze(strong["run"], strong["plan"], generated_at=GEN_AT,
+                     inventory=strong["inventory"],
                      expected_development_result=tampered)
     # the matching re-derived result freezes identically
     ok = build_freeze(strong["run"], strong["plan"], generated_at=GEN_AT,
+                      inventory=strong["inventory"],
                       expected_development_result=derived)
     assert ok["sha256"] == strong["freeze"]["sha256"]
 
@@ -598,14 +604,16 @@ def test_freeze_rejects_tampered_forecasts(strong):
     tid = next(iter(tampered.forecasts))
     tampered.forecasts[tid] = tampered.forecasts[tid] + 1.0
     with pytest.raises(ValueError, match="forecast"):
-        build_freeze(tampered, strong["plan"], generated_at=GEN_AT)
+        build_freeze(tampered, strong["plan"],
+                     inventory=strong["inventory"], generated_at=GEN_AT)
 
 
 def test_freeze_rejects_a_foreign_plan(strong):
     config_b = dev_config(costs=make_costs(no_trade_margin_bps=0.75))
     plan_b = build_holdout_plan(config_b, make_inventory(), generated_at=GEN_AT)
     with pytest.raises(ValueError, match="protocol_config_sha256"):
-        build_freeze(strong["run"], plan_b, generated_at=GEN_AT)
+        build_freeze(strong["run"], plan_b, inventory=make_inventory(),
+                     generated_at=GEN_AT)
 
 
 def test_freeze_tamper_detection(strong):
@@ -694,9 +702,13 @@ def test_run_reconciliation_rejects_fabricated_statistics(strong):
     # ...and fails closed at the run-anchored reproducibility level
     with pytest.raises(ValueError, match="reproduce"):
         validate_freeze(fabricated, config=config, plan=plan,
-                        run=strong["run"])
+                        run=strong["run"], inventory=strong["inventory"])
     # the authentic freeze reconciles exactly
-    validate_freeze(freeze, config=config, plan=plan, run=strong["run"])
+    validate_freeze(freeze, config=config, plan=plan, run=strong["run"],
+                    inventory=strong["inventory"])
+    # the run-anchored level refuses to run without the custody anchor
+    with pytest.raises(ValueError, match="inventory"):
+        validate_freeze(freeze, config=config, plan=plan, run=strong["run"])
 
 
 # ------------------------------------------------------- outcome access boundaries
@@ -725,7 +737,8 @@ def test_freeze_construction_performs_zero_january_reads(strong, monkeypatch):
 
     plan = build_holdout_plan(strong["config"], strong["inventory"],
                               generated_at=GEN_AT)
-    freeze = build_freeze(strong["run"], plan, generated_at=GEN_AT)
+    freeze = build_freeze(strong["run"], plan,
+                          inventory=strong["inventory"], generated_at=GEN_AT)
 
     assert freeze["sha256"] == strong["freeze"]["sha256"]
     assert opened, "the code-identity hashes read module sources"

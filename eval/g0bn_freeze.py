@@ -778,18 +778,23 @@ def verify_holdout_manifest_binding(manifest: dict, plan: dict, freeze: dict, *,
 # ------------------------------------------------------------------------- freeze
 
 
-def build_freeze(run, plan: dict, *, expected_development_result: dict | None = None,
+def build_freeze(run, plan: dict, *, inventory: dict,
+                 expected_development_result: dict | None = None,
                  generated_at: str | None = None) -> dict:
     """Build the reproducible `g0bn-freeze-v1` from development evidence and
     outcome-blind metadata only (spec section 5.3).
 
-    Selection and ledger provenance are RE-DERIVED from the run via
-    `development_selection` — never trusted from supplied fields. The optional
-    `expected_development_result` is a reconciliation input: it must reproduce
-    its own embedded hash AND equal the re-derived deterministic result, so a
-    stale, tampered, or hand-edited development result can never be frozen."""
+    The plan is re-anchored to BOTH the immutable config and the required #68
+    custody inventory before its hash is frozen: without the inventory, a plan
+    whose object allowlist was edited and rehashed could be frozen over objects
+    the custodian never sealed. Selection and ledger provenance are RE-DERIVED
+    from the run via `development_selection` — never trusted from supplied
+    fields. The optional `expected_development_result` is a reconciliation
+    input: it must reproduce its own embedded hash AND equal the re-derived
+    deterministic result, so a stale, tampered, or hand-edited development
+    result can never be frozen."""
     config = run.config
-    validate_holdout_plan(plan, config)
+    validate_holdout_plan(plan, config, inventory=inventory)
     if expected_development_result is not None:
         exp = expected_development_result
         if not isinstance(exp, dict) or "result_sha256" not in exp:
@@ -1141,9 +1146,17 @@ def validate_freeze(freeze: dict, *, config: dict, plan: dict,
         _fail("sha256", f"embedded freeze sha256 does not match the canonical "
                         f"content (tampered or stale): {embedded} != {recomputed}")
     if run is not None:
+        if inventory is None:
+            _fail("inventory",
+                  "run-anchored freeze validation requires the #68 custody "
+                  "inventory: the rebuild must re-anchor the plan to custody, "
+                  "not merely to the config (the one-shot runner loads the seal "
+                  "metadata anyway; spec section 6.3 step 1)")
         # build_freeze validates the plan against run.config, whose sha the plan
-        # already pins, so the rebuild is anchored to the same immutable config.
-        rebuilt = build_freeze(run, plan, generated_at=freeze["generated_at"])
+        # already pins, so the rebuild is anchored to the same immutable config
+        # AND the custody inventory.
+        rebuilt = build_freeze(run, plan, inventory=inventory,
+                               generated_at=freeze["generated_at"])
         if rebuilt != freeze:
             diff = sorted(k for k in _FREEZE_FIELDS
                           if rebuilt.get(k) != freeze.get(k))
