@@ -138,7 +138,8 @@ _PLAN_FIELDS = (
 _OUTPUT_CONTRACT_FIELDS = (
     "dataset_id", "manifest_version", "partition", "expected_bindings",
     "feature_cols", "target_cols", "reserved_cols", "extra_cols",
-    "horizons", "dtypes", "expected_arrow_schema",
+    "horizons", "dtypes", "bar_clock", "max_lookback_ns", "embargo_ns",
+    "expected_arrow_schema",
     "expected_physical_schema_sha256", "matrix_file_hash_algorithm",
 )
 
@@ -283,6 +284,7 @@ def _validate_allowlist(path: str, objects, included, config: dict) -> None:
     included_set = set(included)
     seen_ids = set()
     seen = set()
+    seen_shas = set()
     for i, obj in enumerate(objects):
         opath = f"{path}[{i}]"
         _dict(opath, obj, _OBJECT_FIELDS)
@@ -303,6 +305,16 @@ def _validate_allowlist(path: str, objects, included, config: dict) -> None:
                   "January scope; sealed objects on excluded or out-of-window "
                   "days must not enter the allowlist")
         _sha256(f"{opath}.sha256", obj["sha256"])
+        # Byte-identical sealed objects within one (layer, product) would
+        # collapse in any hash-set audit and leave a sealed object unaccounted
+        # for: ambiguous/duplicated custody content fails closed.
+        sha_key = (obj["layer"], obj["product"], obj["sha256"])
+        if sha_key in seen_shas:
+            _fail(f"{opath}.sha256",
+                  f"duplicate sealed object checksum {obj['sha256']} within "
+                  f"({obj['layer']}, {obj['product']}); byte-identical sealed "
+                  "objects are ambiguous custody")
+        seen_shas.add(sha_key)
         if obj["object_id"] in seen_ids:
             _fail(f"{opath}.object_id",
                   f"duplicate object_id {obj['object_id']!r} in the sealed "
@@ -443,6 +455,18 @@ def _output_contract(config: dict, extra_cols: list) -> dict:
         "extra_cols": list(extra_cols),
         "horizons": {h["tag"]: h["ns"] for h in config["horizons"]},
         "dtypes": dict(G0BN_COST_DTYPES),
+        # The outcome-blind clock/timing pins the OOS manifest must repeat. The
+        # realized January threshold schedule hash is deliberately ABSENT: it
+        # does not exist before the raw-access burn and is attested by #91, so
+        # the manifest's bar_clock may carry it as an additional field.
+        "bar_clock": {
+            "kind": config["clock"]["kind"],
+            "reference_stream": config["clock"]["reference_stream"],
+            "target_bars_per_day": config["clock"]["target_bars_per_day"],
+            "time_cap_ns": config["clock"]["time_cap_ns"],
+        },
+        "max_lookback_ns": config["features"]["max_lookback_ns"],
+        "embargo_ns": config["cv"]["embargo_ns"],
         "expected_arrow_schema": arrow_fields,
         "expected_physical_schema_sha256":
             _expected_physical_schema_sha256(arrow_fields),
@@ -773,6 +797,14 @@ def verify_holdout_manifest_binding(manifest: dict, plan: dict, freeze: dict, *,
            oc["extra_cols"])
     _exact("manifest.horizons", manifest["horizons"], oc["horizons"])
     _exact("manifest.dtypes", manifest.get("dtypes"), oc["dtypes"])
+    # Frozen outcome-blind clock/timing pins: compared per pinned key so the
+    # manifest may additionally carry realized post-burn clock fields (e.g. the
+    # attested January threshold schedule hash) without weakening the pin.
+    for key, want in oc["bar_clock"].items():
+        _exact(f"manifest.bar_clock.{key}", manifest["bar_clock"].get(key), want)
+    _exact("manifest.max_lookback_ns", manifest["max_lookback_ns"],
+           oc["max_lookback_ns"])
+    _exact("manifest.embargo_ns", manifest["embargo_ns"], oc["embargo_ns"])
     _exact("manifest.custodian_seal", named["custodian_seal"][0]["sha256"],
            plan["custodian_seal_sha256"])
     _exact("manifest.source_certification",

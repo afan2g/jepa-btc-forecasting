@@ -272,6 +272,19 @@ def test_plan_rejects_broken_custody_inventory(strong, mutate, match):
         build_holdout_plan(strong["config"], inventory, generated_at=GEN_AT)
 
 
+def test_plan_rejects_duplicate_checksums_within_a_product(strong):
+    """Byte-identical sealed objects within one (layer, product) would collapse
+    in any hash-set audit and leave a sealed object unaccounted for: ambiguous
+    custody fails closed (Codex round 9)."""
+    inventory = copy.deepcopy(strong["inventory"])
+    objs = [o for o in inventory["objects"]
+            if o["layer"] == "normalized"
+            and o["product"] == "binance_futures_trades"]
+    objs[1]["sha256"] = objs[0]["sha256"]
+    with pytest.raises(ValueError, match="checksum"):
+        build_holdout_plan(strong["config"], inventory, generated_at=GEN_AT)
+
+
 def test_plan_rejects_insufficient_included_days(strong):
     days = january_days()
     excluded = {d: {"reason": "custody_source_gap",
@@ -493,6 +506,17 @@ def test_manifest_binding_rejects_unsealed_source_and_foreign_freeze(strong, wea
             break
     with pytest.raises(ValueError, match="complete sealed scope"):
         verify_holdout_manifest_binding(incomplete, plan, freeze, config=config,
+                                        inventory=inventory)
+    # outcome-blind clock/timing metadata must match the frozen config pins
+    drift = copy.deepcopy(man)
+    drift["bar_clock"]["target_bars_per_day"] = 9999
+    with pytest.raises(ValueError, match="bar_clock"):
+        verify_holdout_manifest_binding(drift, plan, freeze, config=config,
+                                        inventory=inventory)
+    drift = copy.deepcopy(man)
+    drift["max_lookback_ns"] = drift["embargo_ns"] = 123_000_000_000
+    with pytest.raises(ValueError, match="lookback|embargo"):
+        verify_holdout_manifest_binding(drift, plan, freeze, config=config,
                                         inventory=inventory)
     # a coverage evidence entry, when present, must pin the plan's coverage
     good = copy.deepcopy(man)
