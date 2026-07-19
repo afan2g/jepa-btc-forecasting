@@ -1,13 +1,16 @@
 {
   "issue": 64,
-  "generated_utc": "2026-07-13",
+  "index_scope": "Combined issue-64 evidence bundle. The lake_stage2_* fields and the 'Regenerated 2026-07-13' claim in provenance_note describe the Crypto Lake Stage-2 integrity reports ONLY. The 2026-07-16 user-approved CryptoHFTData probe (a live vendor fetch with an inconclusive replay, generated later under commit 0239d40) is described separately in the chd_probe block; do not attribute its provenance to the Lake dates/commits above.",
+  "index_last_updated_utc": "2026-07-16",
+  "lake_stage2_generated_utc": "2026-07-13",
   "preregistration_first_commit": "633d4e4f771574a2b8b207edf1947e87fbc987b8",
   "preregistration_last_amended_commit": "4b66c7232511b8e7abdc2e24364e5e2bea1e0388",
-  "reports_generated_at_commit": "23e4e65fc54b504de1950942e8887ad01f5c4bb8",
-  "provenance_note": "Local Crypto Lake 2026-04-01 Stage-2 integrity evidence for issue #64. Inputs are the nine Stage-1 raw units pinned (sha256/fingerprint/rows/bytes) inside the preregistration fixture and re-verified by verify_inputs.json. Run 1 = production scripts/run_binance_recon.py --engine auto (Python oracle; perp replay 84,153 s). Run 2 = stage2-native-run (production process_unit path, explicit native override, perp+spot scales 10/100; perp replay ~29 s). stage2_cross_engine_determinism pins run1==run2 on every semantic manifest field incl. published parquet sha256 (full-day cross-engine conformance, 2026-07-12 amendment). No vendor I/O of any kind was performed; no raw market rows appear in any tracked file. Regenerated 2026-07-13 with content-hash provenance binding (round 21): every report records prereg_sha256 (canonical content hash of the preregistration) and every consumer requires it to match; all reports re-ran under the amendment-5 contract with identical results \u2014 all PASS, cross-engine EQUAL (7 units), verdict CERTIFIED, conformance scales 10/100.",
+  "lake_stage2_reports_generated_at_commit": "23e4e65fc54b504de1950942e8887ad01f5c4bb8",
+  "provenance_note": "Local Crypto Lake 2026-04-01 Stage-2 integrity evidence for issue #64. Inputs are the nine Stage-1 raw units pinned (sha256/fingerprint/rows/bytes) inside the preregistration fixture and re-verified by verify_inputs.json. Run 1 = production scripts/run_binance_recon.py --engine auto (Python oracle; perp replay 84,153 s). Run 2 = stage2-native-run (production process_unit path, explicit native override, perp+spot scales 10/100; perp replay ~29 s). stage2_cross_engine_determinism pins run1==run2 on every semantic manifest field incl. published parquet sha256 (full-day cross-engine conformance, 2026-07-12 amendment). No vendor I/O was performed to generate this Lake Stage-2 evidence (all inputs local); no raw market rows appear in any tracked file. The later user-approved CryptoHFTData probe (chd_probe block; aggregated in vendor_calls_total) is the only live vendor fetch recorded in this index. Regenerated 2026-07-13 with content-hash provenance binding (round 21): every Lake Stage-2 report records prereg_sha256 (canonical content hash of the preregistration) and every consumer requires it to match; all Lake Stage-2 reports re-ran under the amendment-5 contract with identical results \u2014 all PASS, cross-engine EQUAL (7 units), verdict CERTIFIED, conformance scales 10/100. This 2026-07-13 regeneration claim covers the Lake Stage-2 reports ONLY; the later 2026-07-16 CryptoHFTData probe (chd_probe block) is a live-vendor fetch with an INCONCLUSIVE replay and is NOT part of this all-PASS/cross-engine claim.",
   "tracked_files": {
     "lake_verdict_2026-04-01.json": "d24769a6fc05bd601a9c97440935be2a6ac3d21968076e0bf3431321a2c6ecf8",
-    "stage2_cross_engine_determinism.json": "fcdd8b76206b2c112c6900848a815d0bb6524f7cf0ae94c10f578b82540c7152"
+    "stage2_cross_engine_determinism.json": "fcdd8b76206b2c112c6900848a815d0bb6524f7cf0ae94c10f578b82540c7152",
+    "chd_probe_2026-04-01_12.json": "afbd03074c617975c18885323366ef5a8fbee6994ae6f8247decef96d7175ea4"
   },
   "ignored_reports_sha256": {
     "verify_inputs.json": "2c10cb489fbab68902b73ad08a9c2a550ccb739e932324a42e9acbccb88fe3c7",
@@ -24,10 +27,40 @@
     "frames/lake_topk_spot_2026-04-01.parquet": "98f5ac3a71e2287fc9ffc9e4ba7b9d2bfe465eeff0986a78d52bebae12a7955c"
   },
   "lake_verdict": "certified",
-  "vendor_calls": {
+  "vendor_calls_lake_stage2": {
     "requests": 0,
     "bytes": 0,
-    "cost_usd": 0.0
+    "cost_usd": 0.0,
+    "scope": "Crypto Lake Stage-2 integrity evidence generation only \u2014 fully offline/local, no vendor I/O"
   },
-  "preregistration_content_sha256": "208e365fa15f1df9fdf5562bf2df76701e3b3ae1b256d31730acac035ac39c26"
+  "vendor_calls_total": {
+    "requests": 1,
+    "bytes": 19743899,
+    "cost_usd": 0.0,
+    "scope": "aggregate across ALL tracked issue-64 evidence in this index = Lake Stage-2 (0/0/$0) + the user-approved CryptoHFTData probe (1 request / 19,743,899 B / $0); see the chd_probe block"
+  },
+  "preregistration_content_sha256": "208e365fa15f1df9fdf5562bf2df76701e3b3ae1b256d31730acac035ac39c26",
+  "chd_probe": {
+    "generated_utc": "2026-07-16",
+    "approval_provenance": "aaron-2026-07-16-issue64-hour12-probe-approved",
+    "object": "binance_futures/2026-04-01/12/BTCUSDT_orderbook.parquet.zst",
+    "object_sha256": "dff90e761a3bc53be7391f9f33bc846e9988cc4422664e3217001d2c8f0e9acb",
+    "validate_pass": true,
+    "validate_event_type_rows": {
+      "update": 5743827
+    },
+    "chd_verdict": "inconclusive",
+    "chd_refusal": "missing_initial_snapshot",
+    "comparison_executable": false,
+    "final_source_decision": "lake_go",
+    "final_source_decision_detail": "Crypto Lake approved on internal certification only; independent validation not executable (CryptoHFTData window unavailable or refused fail-closed); fallback none",
+    "lake_topk_perp_frame_reproduced_bit_identical": true,
+    "vendor_calls": {
+      "requests": 1,
+      "bytes": 19743899,
+      "cost_usd": 0.0
+    },
+    "tracked_summary": "chd_probe_2026-04-01_12.json",
+    "note": "One bounded, user-approved mid-day hourly object; genuine delta-only data (no snapshot in the hourly partition) so the fail-closed replay refused. Independent parity is procedurally blocked: the preregistered request_bounds.expansion gate requires a CERTIFIED probe replay (which a delta-only hour cannot yield), so obtaining and replaying earlier hours (00..12) needs a reviewed preregistration amendment or a separately-scoped bounded request, not just an approval \u2014 and its premise (that some earlier hour carries a usable snapshot) is an unverified hypothesis, since only hour 12 was checked and it was delta-only. The 0-vendor-call Lake certification above is unchanged and was independently reproduced bit-for-bit on this branch."
+  }
 }
