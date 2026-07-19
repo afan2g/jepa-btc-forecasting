@@ -484,6 +484,18 @@ def test_manifest_binding_rejects_unsealed_source_and_foreign_freeze(strong, wea
     with pytest.raises(ValueError, match="sealed normalized allowlist"):
         verify_holdout_manifest_binding(bad, plan, freeze, config=config,
                                         inventory=inventory)
+    # a coverage evidence entry, when present, must pin the plan's coverage
+    good = copy.deepcopy(man)
+    good["sources"].append({"name": "coverage",
+                            "sha256": plan["coverage_sha256"]})
+    verify_holdout_manifest_binding(good, plan, freeze, config=config,
+                                    inventory=inventory)
+    bad_cov = copy.deepcopy(man)
+    bad_cov["sources"].append({"name": "coverage",
+                               "sha256": sha_hex("foreign-coverage")})
+    with pytest.raises(ValueError, match="coverage"):
+        verify_holdout_manifest_binding(bad_cov, plan, freeze, config=config,
+                                        inventory=inventory)
     # a foreign freeze (different run, same plan/config) cannot verify a
     # manifest bound to the original freeze
     assert weak["freeze"]["sha256"] != freeze["sha256"]

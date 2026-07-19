@@ -778,6 +778,12 @@ def verify_holdout_manifest_binding(manifest: dict, plan: dict, freeze: dict, *,
     _exact("manifest.source_certification",
            named["source_certification"][0]["sha256"],
            plan["source_certification_sha256"])
+    # coverage evidence is optional on a manifest, but when present it must pin
+    # exactly the plan's custody-validated coverage artifact — a foreign
+    # coverage hash weakens the pre-burn audit trail.
+    for i, entry in enumerate(named.get("coverage", [])):
+        _exact(f"manifest.coverage[{i}]", entry["sha256"],
+               plan["coverage_sha256"])
     cost_entry = {k: v for k, v in named["cost_assumption"][0].items()
                   if k != "name"}
     _exact("manifest.cost_assumption", cost_entry,
