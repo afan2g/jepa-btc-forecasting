@@ -76,11 +76,16 @@ eval/         # supervised baseline, backtest harness, PnL/no-trade-band metrics
   Coinbase target/transfer and cross-exchange features third; other assets only
   after those rungs prove incremental net OOS value.
 
-### Vendor decision (verified against crypto-lake.com docs)
-- **Binance source is gated by #64.** Crypto Lake and CryptoHFTData are
-  candidates; downstream code consumes a normalized contract and must not assume
-  a vendor until bounded independent parity selects one. No 92-day pull starts
-  before that GO decision.
+### Binance vendor decision (accepted 2026-07-19)
+- **#64 selected Crypto Lake for bounded G0-BN on internal certification only.**
+  The approved source is `BINANCE_FUTURES/BTC-USDT-PERP` with raw `book` snapshot
+  seeds, absolute-size `book_delta_v2` updates, and `trades`; downstream code
+  continues to consume the normalized contract.
+- Independent CryptoHFTData parity was not executable from the approved
+  delta-only probe hour and remains an explicit residual risk, not a prerequisite
+  for this bounded gate. CryptoHFTData is not an approved fallback.
+- #68 must still verify availability and certify each required day. No 92-day
+  request or download starts without its exact reviewed plan and explicit approval.
 - **Coinbase is deferred by #65.** The completed Crypto Lake quality map and
   CoinAPI L3 tooling remain valid evidence/fallback infrastructure. Broad L3
   spend is paused while cheap quote/L2 target alternatives are evaluated, and

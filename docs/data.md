@@ -186,7 +186,9 @@ Raw parquet columns: `timestamp`, `receipt_timestamp`, `sequence_number`, **`sid
 `receipt_timestamp→received_time` (datetime64[ns]) on load. **To column-project in `load_data`, pass
 the RAW names.** Update semantics: **`size` is the absolute size at that price; `size==0` removes the
 level.** There is **no per-day snapshot block** — the daily file starts mid-stream (see §5a-Recon).
-`book` (snapshot) variant is 2×20 levels (85 cols) — *not used in production* (see §5a). `trades` has
+`book` (snapshot) is 2×20 levels (85 cols) and is a **required Stage-2 seed input** for G0-BN
+`book_delta_v2` reconstruction. It is consumed by reconstruction rather than emitted as a modeling
+feed (see §5a). `trades` has
 `origin_time`, `received_time`, `price`, `quantity`, `side`∈{buy,sell}, `trade_id` (int64).
 
 ### 4.2 CoinAPI Flat Files `limitbook_full` (L3, order-by-order)
