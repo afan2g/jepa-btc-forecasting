@@ -10,7 +10,7 @@
   "tracked_files": {
     "lake_verdict_2026-04-01.json": "d24769a6fc05bd601a9c97440935be2a6ac3d21968076e0bf3431321a2c6ecf8",
     "stage2_cross_engine_determinism.json": "fcdd8b76206b2c112c6900848a815d0bb6524f7cf0ae94c10f578b82540c7152",
-    "chd_probe_2026-04-01_12.json": "915c33156558d58c52f07d5402bbb62c7039d99c596f3d71889d43beb96d8539"
+    "chd_probe_2026-04-01_12.json": "afbd03074c617975c18885323366ef5a8fbee6994ae6f8247decef96d7175ea4"
   },
   "ignored_reports_sha256": {
     "verify_inputs.json": "2c10cb489fbab68902b73ad08a9c2a550ccb739e932324a42e9acbccb88fe3c7",
