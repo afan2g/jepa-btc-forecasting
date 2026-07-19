@@ -491,9 +491,9 @@ def test_manifest_binding_rejects_unsealed_source_and_foreign_freeze(strong, wea
                                      inventory)
     # a normalized data-source pin the custodian never sealed fails closed
     bad = copy.deepcopy(man)
-    for s in bad["sources"]:
-        if s.get("name") == "binance_futures_trades":
-            s["sha256"] = sha_hex("unsealed-normalized-object")
+    next(s for s in bad["sources"]
+         if s.get("name") == "binance_futures_trades")["sha256"] = \
+        sha_hex("unsealed-normalized-object")
     with pytest.raises(ValueError, match="sealed normalized allowlist"):
         verify_holdout_manifest_binding(bad, plan, freeze, config=config,
                                         inventory=inventory)
@@ -506,6 +506,14 @@ def test_manifest_binding_rejects_unsealed_source_and_foreign_freeze(strong, wea
             break
     with pytest.raises(ValueError, match="complete sealed scope"):
         verify_holdout_manifest_binding(incomplete, plan, freeze, config=config,
+                                        inventory=inventory)
+    # duplicate source entries break one-to-one custody accounting even when
+    # the unique hash set still equals the sealed allowlist
+    dup = copy.deepcopy(man)
+    dup["sources"].append(dict(next(
+        s for s in dup["sources"] if s.get("name") == "binance_futures_trades")))
+    with pytest.raises(ValueError, match="one-to-one"):
+        verify_holdout_manifest_binding(dup, plan, freeze, config=config,
                                         inventory=inventory)
     # outcome-blind clock/timing metadata must match the frozen config pins
     drift = copy.deepcopy(man)

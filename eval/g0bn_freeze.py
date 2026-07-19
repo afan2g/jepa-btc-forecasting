@@ -830,7 +830,12 @@ def verify_holdout_manifest_binding(manifest: dict, plan: dict, freeze: dict, *,
         if obj["layer"] == "normalized":
             allowed_shas.setdefault(obj["product"], set()).add(obj["sha256"])
     for name in G0BN_DATA_SOURCES:
-        got = {entry["sha256"] for entry in named.get(name, [])}
+        entry_shas = [entry["sha256"] for entry in named.get(name, [])]
+        got = set(entry_shas)
+        if len(entry_shas) != len(got):
+            _fail(f"manifest.{name}",
+                  "duplicate source entries for one sealed object; manifest "
+                  "entries must be one-to-one with the sealed allowlist")
         want = allowed_shas.get(name, set())
         unsealed = sorted(got - want)
         if unsealed:
