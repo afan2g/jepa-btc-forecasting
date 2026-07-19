@@ -351,28 +351,32 @@ def test_stable_ids_survive_config_source_and_freeze_edits(strong):
 
 def test_oos_build_params_bind_the_plan_hash(strong):
     plan, config = strong["plan"], strong["config"]
-    params = oos_build_params(plan, {"producer": "t9", "seed": 1}, config=config)
+    inventory = strong["inventory"]
+    params = oos_build_params(plan, {"producer": "t9", "seed": 1},
+                              config=config, inventory=inventory)
     assert params["holdout_plan_sha256"] == holdout_plan_sha256(plan)
-    verify_oos_build_binding(params, plan, config=config)
+    verify_oos_build_binding(params, plan, config=config, inventory=inventory)
     # the caller cannot supply or pre-empt the binding
     with pytest.raises(ValueError, match="holdout_plan_sha256"):
         oos_build_params(plan, {"holdout_plan_sha256": sha_hex("supplied")},
-                         config=config)
+                         config=config, inventory=inventory)
     with pytest.raises(ValueError, match="generated_at"):
         oos_build_params(plan, {"generated_at": "2026-07-19T00:00:00Z"},
-                         config=config)
+                         config=config, inventory=inventory)
     # a VALID but different plan (different extra_cols) fails the hash binding
     plan_variant = build_holdout_plan(
-        config, strong["inventory"],
+        config, inventory,
         extra_cols=["latency_drift_bps", "emitted_by_time_cap"],
         generated_at=GEN_AT)
     with pytest.raises(ValueError, match="holdout_plan_sha256"):
-        verify_oos_build_binding(params, plan_variant, config=config)
+        verify_oos_build_binding(params, plan_variant, config=config,
+                                 inventory=inventory)
     # an internally tampered (rehashed) plan fails its own config validation
     tampered = _resha(dict(copy.deepcopy(plan),
                            included_days=plan["included_days"][:-1]))
     with pytest.raises(ValueError):
-        verify_oos_build_binding(params, tampered, config=config)
+        verify_oos_build_binding(params, tampered, config=config,
+                                 inventory=inventory)
     # a hand-edited plan whose embedded self-hash was not updated is rejected
     stale = copy.deepcopy(plan)
     stale["n_allowlist_objects"] += 1
@@ -382,15 +386,17 @@ def test_oos_build_params_bind_the_plan_hash(strong):
 
 def test_future_build_binds_plan_hash_through_the_t8_writer(strong, tmp_path):
     plan, freeze, config = strong["plan"], strong["freeze"], strong["config"]
+    inventory = strong["inventory"]
     frame = g0bn_frame()
-    man, params = oos_manifest_and_params(config, plan, freeze, frame)
+    man, params = oos_manifest_and_params(config, plan, freeze, frame, inventory)
     result = write_holdout(frame, man, build_params=params,
                            matrix_path=tmp_path / "oos.parquet",
                            manifest_path=tmp_path / "oos_manifest.json")
     # the physical schema the writer attests matches the plan's pinned expectation
     assert result.physical_schema_sha256 == \
         plan["output_contract"]["expected_physical_schema_sha256"]
-    verify_holdout_manifest_binding(man, plan, freeze, config=config)
+    verify_holdout_manifest_binding(man, plan, freeze, config=config,
+                                    inventory=inventory)
     # the generic-runner guard (67-D) still refuses the bound manifest pre-loader
     with pytest.raises(ValueError, match="holdout"):
         preflight_generic_manifest(man)
@@ -402,46 +408,73 @@ def test_future_build_binds_plan_hash_through_the_t8_writer(strong, tmp_path):
                       manifest_path=tmp_path / "b.json")
     # a VALID but different plan breaks the manifest binding verification
     plan_variant = build_holdout_plan(
-        config, strong["inventory"],
+        config, inventory,
         extra_cols=["latency_drift_bps", "emitted_by_time_cap"],
         generated_at=GEN_AT)
     with pytest.raises(ValueError, match="holdout_plan"):
-        verify_holdout_manifest_binding(man, plan_variant, freeze, config=config)
+        verify_holdout_manifest_binding(man, plan_variant, freeze,
+                                        config=config, inventory=inventory)
 
 
 def test_manifest_binding_rejects_coordinated_plan_freeze_rehash(strong):
-    # An attacker who loosens the plan's output contract and rehashes BOTH the
-    # plan and the freeze so they agree internally must still fail: the binding
-    # verifiers re-anchor both artifacts to the immutable config.
+    # An attacker who edits the plan and rehashes BOTH the plan and the freeze
+    # so they agree internally must still fail: the binding verifiers re-anchor
+    # both artifacts to the immutable config AND the custody inventory.
     plan, freeze, config = strong["plan"], strong["freeze"], strong["config"]
-    man, _ = oos_manifest_and_params(config, plan, freeze, g0bn_frame())
-    plan_t = copy.deepcopy(plan)
-    plan_t["output_contract"]["dtypes"]["cost_bps"] = "float32"
-    plan_t = _resha(plan_t)
-    freeze_t = copy.deepcopy(freeze)
-    freeze_t["holdout_plan_sha256"] = hash_obj(
-        plan_t, exclude_keys=("sha256", "generated_at"))
-    freeze_t = _resha(freeze_t)
+    inventory = strong["inventory"]
+    man, _ = oos_manifest_and_params(config, plan, freeze, g0bn_frame(),
+                                     inventory)
+
+    def _coordinated(mutate):
+        plan_t = copy.deepcopy(plan)
+        mutate(plan_t)
+        plan_t = _resha(plan_t)
+        freeze_t = copy.deepcopy(freeze)
+        freeze_t["holdout_plan_sha256"] = hash_obj(
+            plan_t, exclude_keys=("sha256", "generated_at"))
+        return plan_t, _resha(freeze_t)
+
+    # loosened output contract -> caught by the config anchor
+    plan_t, freeze_t = _coordinated(
+        lambda p: p["output_contract"]["dtypes"].__setitem__("cost_bps",
+                                                             "float32"))
     with pytest.raises(ValueError, match="output_contract"):
-        verify_holdout_manifest_binding(man, plan_t, freeze_t, config=config)
+        verify_holdout_manifest_binding(man, plan_t, freeze_t, config=config,
+                                        inventory=inventory)
+    # swapped sealed-object hash -> caught by the custody-inventory anchor
+    # (the config cannot pin January object hashes; the #68 inventory does)
+    plan_t, freeze_t = _coordinated(
+        lambda p: p["object_allowlist"][0].__setitem__(
+            "sha256", sha_hex("never-sealed-object")))
+    with pytest.raises(ValueError, match="object_allowlist"):
+        verify_holdout_manifest_binding(man, plan_t, freeze_t, config=config,
+                                        inventory=inventory)
+    with pytest.raises(ValueError, match="object_allowlist"):
+        verify_oos_build_binding(
+            {"holdout_plan_sha256": hash_obj(
+                plan_t, exclude_keys=("sha256", "generated_at"))},
+            plan_t, config=config, inventory=inventory)
 
 
 def test_manifest_binding_rejects_unsealed_source_and_foreign_freeze(strong, weak):
     plan, freeze, config = strong["plan"], strong["freeze"], strong["config"]
-    man, _ = oos_manifest_and_params(config, plan, freeze, g0bn_frame())
+    inventory = strong["inventory"]
+    man, _ = oos_manifest_and_params(config, plan, freeze, g0bn_frame(),
+                                     inventory)
     # a normalized data-source pin the custodian never sealed fails closed
     bad = copy.deepcopy(man)
     for s in bad["sources"]:
         if s.get("name") == "binance_futures_trades":
             s["sha256"] = sha_hex("unsealed-normalized-object")
     with pytest.raises(ValueError, match="sealed normalized allowlist"):
-        verify_holdout_manifest_binding(bad, plan, freeze, config=config)
+        verify_holdout_manifest_binding(bad, plan, freeze, config=config,
+                                        inventory=inventory)
     # a foreign freeze (different run, same plan/config) cannot verify a
     # manifest bound to the original freeze
     assert weak["freeze"]["sha256"] != freeze["sha256"]
     with pytest.raises(ValueError, match="freeze_sha256"):
         verify_holdout_manifest_binding(man, plan, weak["freeze"],
-                                        config=config)
+                                        config=config, inventory=inventory)
 
 
 # -------------------------------------------------------------------------- freeze

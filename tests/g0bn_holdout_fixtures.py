@@ -85,7 +85,7 @@ def make_inventory(**over) -> dict:
 
 
 def oos_manifest_and_params(config: dict, plan: dict, freeze: dict,
-                            frame) -> tuple:
+                            frame, inventory: dict) -> tuple:
     """A T8-shaped BLIND-HOLDOUT manifest whose bindings all derive from the real
     plan/freeze artifacts, plus the oos build params that bind holdout_plan_sha256.
     The frame is synthetic (out-of-window timestamps); write_holdout performs only
@@ -115,7 +115,7 @@ def oos_manifest_and_params(config: dict, plan: dict, freeze: dict,
          "horizon_roles_sha256": plan["output_contract"]["expected_bindings"][
              "g0bn_protocol"]["horizon_roles_sha256"],
          "instrument": dict(INSTRUMENT)},
-        holdout_plan_binding(plan, freeze, config=config),
+        holdout_plan_binding(plan, freeze, config=config, inventory=inventory),
     ]
     man = {
         "manifest_version": 1,
@@ -143,7 +143,8 @@ def oos_manifest_and_params(config: dict, plan: dict, freeze: dict,
         "dtypes": dict(plan["output_contract"]["dtypes"]),
     }
     params = oos_build_params(plan, {"producer": "tests/g0bn_holdout_fixtures.py",
-                                     "seed": 7}, config=config)
+                                     "seed": 7}, config=config,
+                              inventory=inventory)
     lrh = logical_row_sha256(frame, ordered_manifest_columns(man))
     man["build_id"] = build_id_for(dataset_id=man["dataset_id"],
                                    logical_row_sha256=lrh, build_params=params)

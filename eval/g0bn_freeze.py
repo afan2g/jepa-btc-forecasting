@@ -639,14 +639,16 @@ def freeze_sha256(freeze: dict) -> str:
 # ------------------------------------------------------------ future-build binding
 
 
-def oos_build_params(plan: dict, build_params: dict, *, config: dict) -> dict:
+def oos_build_params(plan: dict, build_params: dict, *, config: dict,
+                     inventory: dict) -> dict:
     """Derive the one-shot OOS logical build parameters: the caller's explicit
     parameters plus the binding `holdout_plan_sha256` (spec section 5.2). The
-    plan is first re-anchored to the immutable config — a tampered-but-rehashed
-    plan cannot be bound — and the binding value is always injected from the
-    plan itself: a caller-supplied value could pin a stale/tampered plan and is
-    refused."""
-    validate_holdout_plan(plan, config)
+    plan is first re-anchored to BOTH the immutable config and the #68 custody
+    inventory — the config cannot pin January object hashes, so without the
+    inventory a coordinated plan+freeze rehash could bind objects the custodian
+    never sealed. The binding value is always injected from the plan itself: a
+    caller-supplied value could pin a stale/tampered plan and is refused."""
+    validate_holdout_plan(plan, config, inventory=inventory)
     if not isinstance(build_params, dict):
         _fail("build_params", "must be a dict of explicit build parameters")
     if "holdout_plan_sha256" in build_params:
@@ -660,12 +662,13 @@ def oos_build_params(plan: dict, build_params: dict, *, config: dict) -> dict:
     return dict(build_params, holdout_plan_sha256=holdout_plan_sha256(plan))
 
 
-def verify_oos_build_binding(build_params: dict, plan: dict, *,
-                             config: dict) -> dict:
-    """Verify that build parameters bind exactly this config-validated plan.
-    Tampering with the plan after binding (even with a recomputed self-hash) or
-    binding a foreign plan fails closed."""
-    validate_holdout_plan(plan, config)
+def verify_oos_build_binding(build_params: dict, plan: dict, *, config: dict,
+                             inventory: dict) -> dict:
+    """Verify that build parameters bind exactly this config- and
+    custody-validated plan. Tampering with the plan after binding (even with a
+    recomputed self-hash, and even if the allowlist edit is coordinated with a
+    freeze rehash) or binding a foreign plan fails closed."""
+    validate_holdout_plan(plan, config, inventory=inventory)
     if not isinstance(build_params, dict):
         _fail("build_params", "must be a dict of explicit build parameters")
     expected = holdout_plan_sha256(plan)
@@ -677,13 +680,16 @@ def verify_oos_build_binding(build_params: dict, plan: dict, *,
     return build_params
 
 
-def holdout_plan_binding(plan: dict, freeze: dict, *, config: dict) -> dict:
+def holdout_plan_binding(plan: dict, freeze: dict, *, config: dict,
+                         inventory: dict) -> dict:
     """The exact `g0bn_holdout_plan` manifest source entry the blind-materialized
     OOS manifest must carry (spec section 7), derived from the real plan/freeze
-    pair. Both artifacts are first re-anchored to the immutable config (a
-    coordinated plan+freeze rehash still fails), and the freeze must bind
-    exactly this plan."""
-    validate_freeze(freeze, config=config, plan=plan)   # validates the plan too
+    pair. Both artifacts are first re-anchored to the immutable config AND the
+    #68 custody inventory (a coordinated plan+freeze rehash still fails, even
+    one that only swaps a sealed object hash), and the freeze must bind exactly
+    this plan."""
+    validate_freeze(freeze, config=config, plan=plan,
+                    inventory=inventory)   # validates the plan too
     return {
         "name": HOLDOUT_PLAN_BINDING,
         "protocol": ONE_SHOT_SCHEMA,
@@ -696,12 +702,14 @@ def holdout_plan_binding(plan: dict, freeze: dict, *, config: dict) -> dict:
 
 
 def verify_holdout_manifest_binding(manifest: dict, plan: dict, freeze: dict, *,
-                                    config: dict) -> dict:
-    """Verify a blind-materialized holdout manifest against the config-validated
-    plan's pinned output contract and the plan/freeze hashes. Any tampering —
-    with the plan, the freeze, or a manifest binding — fails closed, including a
-    coordinated rehash of the plan/freeze pair (the config is the anchor)."""
-    expected_plan_binding = holdout_plan_binding(plan, freeze, config=config)
+                                    config: dict, inventory: dict) -> dict:
+    """Verify a blind-materialized holdout manifest against the config- and
+    custody-validated plan's pinned output contract and the plan/freeze hashes.
+    Any tampering — with the plan, the freeze, or a manifest binding — fails
+    closed, including a coordinated rehash of the plan/freeze pair (the config
+    and the #68 inventory are the anchors)."""
+    expected_plan_binding = holdout_plan_binding(plan, freeze, config=config,
+                                                 inventory=inventory)
     validate_g0bn_manifest(manifest)
     oc = plan["output_contract"]
     named: dict = {}
@@ -874,7 +882,7 @@ def build_freeze(run, plan: dict, *, expected_development_result: dict | None = 
 
 
 def validate_freeze(freeze: dict, *, config: dict, plan: dict,
-                    run=None) -> dict:
+                    run=None, inventory: dict | None = None) -> dict:
     """Strict fail-closed validation of one `g0bn-freeze-v1` against the exact
     protocol config and holdout plan: exact nested field sets (no January
     outcome field can exist anywhere), stable identities, config-drift and
@@ -888,8 +896,12 @@ def validate_freeze(freeze: dict, *, config: dict, plan: dict,
     development run the one-shot runner reloads in its spec-6.3 step-1
     self-verification), the freeze is additionally REBUILT via
     `build_freeze` — re-running `development_selection` — and must reproduce
-    exactly, so a fabricated or stale statistic fails closed."""
-    validate_holdout_plan(plan, config)
+    exactly, so a fabricated or stale statistic fails closed. `inventory`
+    (the #68 seal metadata, likewise loaded by the runner) re-anchors the
+    plan's day scope and object allowlist to custody; the binding entry
+    points require it because the config alone cannot pin January object
+    hashes."""
+    validate_holdout_plan(plan, config, inventory=inventory)
     cert = config["source_certification"]
     thresholds = config["verdict_thresholds"]
     _dict("g0bn freeze", freeze, _FREEZE_FIELDS)
