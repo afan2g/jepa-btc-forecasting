@@ -380,6 +380,12 @@ def test_oos_build_params_bind_the_plan_hash(strong):
     with pytest.raises(ValueError, match="holdout_plan_sha256"):
         verify_oos_build_binding(params, plan_variant, config=config,
                                  inventory=inventory)
+    # the verifier mirrors the builder's invariants: a timestamp-bearing
+    # recipe must fail the binding gate, not only the later writer path
+    with pytest.raises(ValueError, match="generated_at"):
+        verify_oos_build_binding(
+            dict(params, generated_at="2026-07-19T00:00:00Z"), plan,
+            config=config, inventory=inventory)
     # an internally tampered (rehashed) plan fails its own config validation
     tampered = _resha(dict(copy.deepcopy(plan),
                            included_days=plan["included_days"][:-1]))

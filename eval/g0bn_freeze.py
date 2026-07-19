@@ -703,6 +703,13 @@ def verify_oos_build_binding(build_params: dict, plan: dict, *, config: dict,
                           inventory=_required_inventory(inventory))
     if not isinstance(build_params, dict):
         _fail("build_params", "must be a dict of explicit build parameters")
+    # Mirror the builder's invariant: a timestamp-bearing recipe must fail the
+    # binding gate here, not only later at the writer's build-id derivation
+    # (identical rebuilds must share one logical build identity).
+    if "generated_at" in build_params:
+        _fail("build_params.generated_at",
+              "must not appear in build parameters (identical rebuilds must "
+              "share a build identity)")
     expected = holdout_plan_sha256(plan)
     if build_params.get("holdout_plan_sha256") != expected:
         _fail("build_params.holdout_plan_sha256",
