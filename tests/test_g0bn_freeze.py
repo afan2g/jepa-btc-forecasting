@@ -56,6 +56,7 @@ from tests.g0bn_holdout_fixtures import (
     make_inventory,
     make_objects,
     oos_manifest_and_params,
+    sealed_config_kwargs,
 )
 from tests.g0bn_protocol_fixtures import (
     make_costs,
@@ -103,9 +104,10 @@ def _resha(artifact: dict) -> dict:
 
 @pytest.fixture(scope="module")
 def strong():
-    frame, manifest, config, identity = dev_bundle()
-    run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
     inventory = make_inventory()
+    frame, manifest, config, identity = dev_bundle(
+        config=dev_config(**sealed_config_kwargs(inventory)))
+    run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
     plan = build_holdout_plan(config, inventory, generated_at=GEN_AT)
     freeze = build_freeze(run, plan, inventory=inventory, generated_at=GEN_AT)
     return {"config": config, "run": run, "inventory": inventory,
@@ -114,10 +116,11 @@ def strong():
 
 @pytest.fixture(scope="module")
 def weak():
-    frame, manifest, config, identity = dev_bundle(signal_bps=2.0, noise_bps=0.5,
-                                                   seed=23)
-    run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
     inventory = make_inventory()
+    frame, manifest, config, identity = dev_bundle(
+        signal_bps=2.0, noise_bps=0.5, seed=23,
+        config=dev_config(**sealed_config_kwargs(inventory)))
+    run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
     plan = build_holdout_plan(config, inventory, generated_at=GEN_AT)
     freeze = build_freeze(run, plan, inventory=inventory, generated_at=GEN_AT)
     return {"config": config, "run": run, "plan": plan, "freeze": freeze}
@@ -290,8 +293,13 @@ def test_plan_rejects_insufficient_included_days(strong):
     excluded = {d: {"reason": "custody_source_gap",
                     "evidence_sha256": sha_hex(f"x-{d}")} for d in days[:25]}
     included = days[25:]
-    inventory = make_inventory(included_days=included, excluded_days=excluded,
-                               objects=make_objects(included))
+    # carry the config's sealed pin so the scalar check passes and the
+    # day-scope sufficiency check (this test's target) fires first
+    inventory = make_inventory(
+        included_days=included, excluded_days=excluded,
+        objects=make_objects(included),
+        custodian_seal_sha256=strong["config"]["source_certification"][
+            "custodian_seal_sha256"])
     with pytest.raises(ValueError, match="min_valid_days"):
         build_holdout_plan(strong["config"], inventory, generated_at=GEN_AT)
 
@@ -348,17 +356,21 @@ def test_plan_rejects_nested_january_and_unknown_fields(strong):
 def test_stable_ids_survive_config_source_and_freeze_edits(strong):
     plan = strong["plan"]
     # config edit (different cost margin -> different config sha) — same transaction
-    config_b = dev_config(costs=make_costs(no_trade_margin_bps=0.75))
+    inv_b = make_inventory()
+    config_b = dev_config(costs=make_costs(no_trade_margin_bps=0.75),
+                          **sealed_config_kwargs(inv_b))
     assert config_b["sha256"] != strong["config"]["sha256"]
-    plan_b = build_holdout_plan(config_b, make_inventory(), generated_at=GEN_AT)
+    plan_b = build_holdout_plan(config_b, inv_b, generated_at=GEN_AT)
     assert plan_b["holdout_universe_id"] == plan["holdout_universe_id"]
     assert plan_b["transaction_id"] == plan["transaction_id"]
     # source-certification edit — same transaction
+    inv_c = make_inventory()
     cert_c = make_source_certification(
         certification_sha256=sha_hex("alternate-64-evidence"),
+        custodian_seal_sha256=inv_c["custodian_seal_sha256"],
         development_source_manifest_sha256=dev_source_manifest_sha256())
     config_c = dev_config(source_certification=cert_c)
-    plan_c = build_holdout_plan(config_c, make_inventory(), generated_at=GEN_AT)
+    plan_c = build_holdout_plan(config_c, inv_c, generated_at=GEN_AT)
     assert plan_c["holdout_universe_id"] == plan["holdout_universe_id"]
     assert plan_c["transaction_id"] == plan["transaction_id"]
     # plan/freeze regeneration — same transaction
@@ -611,7 +623,9 @@ def test_weak_run_freezes_in_predictive_mode(weak):
 
 
 def test_blocked_selection_cannot_build_a_freeze(strong):
-    frame, manifest, config, identity = dev_bundle(seed=31)
+    blocked_inventory = make_inventory()
+    frame, manifest, config, identity = dev_bundle(
+        seed=31, config=dev_config(**sealed_config_kwargs(blocked_inventory)))
     rng = np.random.default_rng(99)
     shuffled = frame.copy()
     for tag in ("2s", "10s", "60s"):
@@ -627,10 +641,10 @@ def test_blocked_selection_cannot_build_a_freeze(strong):
     identity2 = dev_data_identity(config, manifest2, shuffled)
     run = run_g0bn_development(shuffled, manifest2, config, identity2,
                                durable_ledger())
-    inventory = make_inventory()
-    plan = build_holdout_plan(config, inventory, generated_at=GEN_AT)
+    plan = build_holdout_plan(config, blocked_inventory, generated_at=GEN_AT)
     with pytest.raises(ValueError, match="predictive-eligible"):
-        build_freeze(run, plan, inventory=inventory, generated_at=GEN_AT)
+        build_freeze(run, plan, inventory=blocked_inventory,
+                     generated_at=GEN_AT)
 
 
 def test_freeze_rejects_expected_development_result_mismatch(strong):
@@ -670,10 +684,12 @@ def test_freeze_rejects_tampered_forecasts(strong):
 
 
 def test_freeze_rejects_a_foreign_plan(strong):
-    config_b = dev_config(costs=make_costs(no_trade_margin_bps=0.75))
-    plan_b = build_holdout_plan(config_b, make_inventory(), generated_at=GEN_AT)
+    inv_b = make_inventory()
+    config_b = dev_config(costs=make_costs(no_trade_margin_bps=0.75),
+                          **sealed_config_kwargs(inv_b))
+    plan_b = build_holdout_plan(config_b, inv_b, generated_at=GEN_AT)
     with pytest.raises(ValueError, match="protocol_config_sha256"):
-        build_freeze(strong["run"], plan_b, inventory=make_inventory(),
+        build_freeze(strong["run"], plan_b, inventory=inv_b,
                      generated_at=GEN_AT)
 
 
@@ -858,6 +874,28 @@ def test_none_inventory_cannot_bypass_the_custody_anchor(strong):
     with pytest.raises(ValueError, match="inventory"):
         verify_holdout_manifest_binding({}, plan, freeze, config=config,
                                         inventory=None)
+
+
+def test_inventory_content_is_bound_to_the_sealed_pin(strong):
+    """The custodian seal hash is a CONTENT commitment: an inventory whose
+    scalar pins are copied from the config but whose objects or day accounting
+    were edited must fail the recomputed seal-content binding (Codex round 11,
+    P1) — a forged allowlist can never reuse a sealed pin."""
+    forged = copy.deepcopy(strong["inventory"])
+    forged["objects"][0]["sha256"] = sha_hex("forged-object-content")
+    with pytest.raises(ValueError, match="custodian seal"):
+        validate_custody_inventory(forged, strong["config"])
+    forged = copy.deepcopy(strong["inventory"])
+    forged["excluded_days"]["2026-01-14"]["reason"] = "edited_reason"
+    with pytest.raises(ValueError, match="custodian seal"):
+        validate_custody_inventory(forged, strong["config"])
+    with pytest.raises(ValueError, match="custodian seal"):
+        build_holdout_plan(strong["config"],
+                           copy.deepcopy(dict(strong["inventory"],
+                                              objects=strong["inventory"]["objects"][:-1]
+                                              + [dict(strong["inventory"]["objects"][-1],
+                                                      sha256=sha_hex("swap"))])),
+                           generated_at=GEN_AT)
 
 
 def test_supplied_inventory_is_itself_validated_against_the_config(strong):

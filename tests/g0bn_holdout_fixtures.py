@@ -60,8 +60,11 @@ def make_objects(included_days) -> list:
 
 
 def make_inventory(**over) -> dict:
-    """Outcome-blind custodian inventory/seal metadata consistent with dev_config():
-    29 included days, 2 explicitly excluded days, and a complete object allowlist."""
+    """Outcome-blind custodian inventory/seal metadata: 29 included days, 2
+    explicitly excluded days, and a complete object allowlist. The
+    custodian_seal_sha256 is the CONTENT commitment over the inventory body
+    (recomputed unless explicitly overridden), so the paired config must pin
+    the content-derived hash — see sealed_config_kwargs."""
     days = january_days()
     excluded = {
         "2026-01-14": {"reason": "custody_source_gap",
@@ -71,7 +74,7 @@ def make_inventory(**over) -> dict:
     }
     included = [d for d in days if d not in excluded]
     inv = {
-        "custodian_seal_sha256": sha_hex("custodian-seal"),
+        "custodian_seal_sha256": None,
         "coverage_sha256": sha_hex("coverage"),
         "permission_policy_sha256": sha_hex("permission-policy"),
         "custodian_identity": "g0bn-custodian-svc",
@@ -81,7 +84,21 @@ def make_inventory(**over) -> dict:
         "objects": make_objects(included),
     }
     inv.update(over)
+    if inv["custodian_seal_sha256"] is None:
+        from eval.g0bn_freeze import custodian_seal_content_sha256
+        inv["custodian_seal_sha256"] = custodian_seal_content_sha256(inv)
     return inv
+
+
+def sealed_config_kwargs(inventory: dict) -> dict:
+    """dev_config keyword arguments pairing a protocol config with a sealed
+    inventory: the config's source_certification pins the inventory's
+    content-derived custodian seal hash."""
+    from tests.g0bn_dev_fixtures import dev_source_manifest_sha256
+    from tests.g0bn_protocol_fixtures import make_source_certification
+    return {"source_certification": make_source_certification(
+        custodian_seal_sha256=inventory["custodian_seal_sha256"],
+        development_source_manifest_sha256=dev_source_manifest_sha256())}
 
 
 def oos_manifest_and_params(config: dict, plan: dict, freeze: dict,

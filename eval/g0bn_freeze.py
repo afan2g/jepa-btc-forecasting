@@ -340,6 +340,34 @@ def _validate_allowlist(path: str, objects, included, config: dict) -> None:
                     "L2/trade product")
 
 
+SEAL_CONTENT_SCHEMA = "g0bn-custodian-seal-content-v1"
+
+
+def custodian_seal_content_sha256(inventory: dict) -> str:
+    """The seal-content commitment of the 67-C consumption contract: the
+    canonical hash over the inventory's outcome-blind BODY (identities,
+    coverage/permission pins, day accounting, canonical-sorted allowlist).
+
+    The config's `source_certification.custodian_seal_sha256` must equal this
+    recomputation, so an inventory whose scalar pins were copied from the
+    config but whose objects or day accounting were edited fails closed — a
+    forged allowlist can never reuse a sealed pin (spec section 5.1). #68 must
+    emit a seal whose pinned hash follows this recipe (or an adapter; #93
+    reconciles), and signature verification OVER this hash is #68/#91's
+    custody-plane concern, not this module's."""
+    return hash_obj({
+        "schema": SEAL_CONTENT_SCHEMA,
+        "custodian_identity": inventory["custodian_identity"],
+        "operator_identity": inventory["operator_identity"],
+        "coverage_sha256": inventory["coverage_sha256"],
+        "permission_policy_sha256": inventory["permission_policy_sha256"],
+        "included_days": list(inventory["included_days"]),
+        "excluded_days": inventory["excluded_days"],
+        "objects": [dict(o) for o in sorted(inventory["objects"],
+                                            key=_object_key)],
+    })
+
+
 def validate_custody_inventory(inventory: dict, config: dict) -> dict:
     """Strict consumption contract for the outcome-blind #68 custodian
     inventory/seal metadata. This module only reads such already-produced
@@ -365,6 +393,16 @@ def validate_custody_inventory(inventory: dict, config: dict) -> dict:
                         inventory["excluded_days"], config)
     _validate_allowlist(f"{path}.objects", inventory["objects"],
                         inventory["included_days"], config)
+    # Content binding LAST (after shape checks): the seal hash is a commitment
+    # over the inventory body, so scalar pins copied from the config cannot
+    # vouch for edited objects or day accounting.
+    recomputed = custodian_seal_content_sha256(inventory)
+    if recomputed != cert["custodian_seal_sha256"]:
+        _fail(f"{path}.custodian_seal_sha256",
+              f"the inventory content does not hash to the config's pinned "
+              f"custodian seal ({recomputed} != "
+              f"{cert['custodian_seal_sha256']}); edited or unsealed content "
+              "cannot reuse a sealed pin (spec section 5.1)")
     return inventory
 
 
