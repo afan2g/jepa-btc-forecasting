@@ -95,13 +95,12 @@ def oos_manifest_and_params(config: dict, plan: dict, freeze: dict,
 
     cert = config["source_certification"]
 
-    def _normalized_sha(product: str) -> str:
-        return next(o["sha256"] for o in plan["object_allowlist"]
-                    if o["layer"] == "normalized" and o["product"] == product)
-
+    # One source entry per consumed sealed object: the binding verifier requires
+    # the manifest's per-product hash sets to equal the plan's sealed allowlist,
+    # proving the materializer accounted for the COMPLETE January scope.
     sources = [
-        {"name": name, "sha256": _normalized_sha(name)}
-        for name in NORMALIZED_PRODUCTS
+        {"name": o["product"], "sha256": o["sha256"]}
+        for o in plan["object_allowlist"] if o["layer"] == "normalized"
     ] + [
         {"name": "source_certification", "sha256": cert["certification_sha256"]},
         {"name": "custodian_seal", "sha256": cert["custodian_seal_sha256"]},

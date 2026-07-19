@@ -788,18 +788,30 @@ def verify_holdout_manifest_binding(manifest: dict, plan: dict, freeze: dict, *,
                   if k != "name"}
     _exact("manifest.cost_assumption", cost_entry,
            freeze["costs"]["cost_assumption"])
-    # Every normalized data-source pin must come from the sealed allowlist: a
-    # manifest naming an object the custodian never sealed fails closed.
+    # Per-product SET EQUALITY against the sealed allowlist: a manifest naming
+    # an object the custodian never sealed fails closed, and so does one that
+    # accounts for only a subset of the sealed scope — the pre-burn audit must
+    # prove the materializer consumed the complete custody-validated January
+    # scope (one entry per sealed object).
     allowed_shas: dict = {}
     for obj in plan["object_allowlist"]:
         if obj["layer"] == "normalized":
             allowed_shas.setdefault(obj["product"], set()).add(obj["sha256"])
     for name in G0BN_DATA_SOURCES:
-        for entry in named.get(name, []):
-            if entry["sha256"] not in allowed_shas.get(name, set()):
-                _fail(f"manifest.{name}",
-                      f"source object hash {entry['sha256']} is not in the "
-                      "plan's sealed normalized allowlist for that product")
+        got = {entry["sha256"] for entry in named.get(name, [])}
+        want = allowed_shas.get(name, set())
+        unsealed = sorted(got - want)
+        if unsealed:
+            _fail(f"manifest.{name}",
+                  f"source object hash(es) {unsealed[:3]} are not in the "
+                  "plan's sealed normalized allowlist for that product")
+        missing = sorted(want - got)
+        if missing:
+            _fail(f"manifest.{name}",
+                  f"does not account for the complete sealed scope: "
+                  f"{len(missing)} sealed object hash(es) missing "
+                  f"(e.g. {missing[:2]}); the manifest must carry one source "
+                  "entry per consumed sealed object")
     return manifest
 
 

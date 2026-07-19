@@ -484,6 +484,16 @@ def test_manifest_binding_rejects_unsealed_source_and_foreign_freeze(strong, wea
     with pytest.raises(ValueError, match="sealed normalized allowlist"):
         verify_holdout_manifest_binding(bad, plan, freeze, config=config,
                                         inventory=inventory)
+    # an incomplete per-product hash set (one sealed object dropped) fails:
+    # the manifest must account for the COMPLETE sealed scope, not a subset
+    incomplete = copy.deepcopy(man)
+    for i, s in enumerate(incomplete["sources"]):
+        if s.get("name") == "binance_futures_trades":
+            del incomplete["sources"][i]
+            break
+    with pytest.raises(ValueError, match="complete sealed scope"):
+        verify_holdout_manifest_binding(incomplete, plan, freeze, config=config,
+                                        inventory=inventory)
     # a coverage evidence entry, when present, must pin the plan's coverage
     good = copy.deepcopy(man)
     good["sources"].append({"name": "coverage",
