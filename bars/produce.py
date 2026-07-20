@@ -550,9 +550,14 @@ def _barrier_params(config: dict, runtime: RuntimeParams, horizons: dict) -> Bar
 def _cost_assumption(config: dict) -> CostAssumption:
     a = CostAssumption(**config["costs"]["cost_assumption"])
     # the anti-aliasing gate: the build's declared single-venue identity must
-    # exactly match the assumption before any row is priced (bars.cost / §G)
-    require_assumption_identity(a, venue=VENUE_BINANCE,
-                                product=G0BN_INSTRUMENT["symbol"], source=a.source)
+    # exactly match the assumption before any row is priced (bars.cost / §G).
+    # The declared source is the config-pinned CERTIFIED NORMALIZED contract
+    # identity the cost inputs derive from — never the assumption's own field
+    # echoed back, which would let a mistyped/copied source attest a foreign
+    # identity (Codex round 19).
+    require_assumption_identity(
+        a, venue=VENUE_BINANCE, product=G0BN_INSTRUMENT["symbol"],
+        source=config["source_certification"]["normalized_schema_version"])
     return a
 
 

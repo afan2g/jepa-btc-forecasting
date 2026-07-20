@@ -873,6 +873,25 @@ def test_degenerate_barrier_runtime_is_rejected_at_the_boundary(tmp_path):
                 manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
 
 
+def test_cost_source_must_match_the_certified_normalized_identity(tmp_path):
+    # Codex round 19: the assumption's source must bind the config-pinned
+    # normalized contract identity (source_certification.normalized_schema_
+    # version), not echo itself — a mistyped/copied source fails closed
+    from tests.g0bn_protocol_fixtures import make_costs
+
+    world = SyntheticWorld()
+    paths, _ = write_day_objects(world, "2025-11-01", tmp_path)
+    foreign = make_costs()
+    foreign["cost_assumption"] = dict(foreign["cost_assumption"],
+                                      source="coinbase/normalized_v9")
+    config = produce_config(costs=foreign)
+    with pytest.raises(ValueError, match="cost assumption identity mismatch"):
+        produce_development(
+            config, runtime=make_runtime(), day_objects={"2025-11-01": paths},
+            matrix_path=tmp_path / "m.parquet",
+            manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
+
+
 def test_runtime_must_match_the_config_clock_pin(tmp_path):
     world = SyntheticWorld()
     config = produce_config()

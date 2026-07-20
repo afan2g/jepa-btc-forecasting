@@ -360,7 +360,10 @@ def make_costs(**over) -> dict:
         "cost_assumption": {
             "venue": "binance",
             "product": "BTC-USDT-PERP",
-            "source": "binance-futures/normalized_v1",
+            # must equal source_certification.normalized_schema_version: the
+            # T9 producer binds the assumption to the certified normalized
+            # contract identity the cost inputs derive from
+            "source": "g0bn_normalized_v1",
             "version": "g0bn-cost-v1",
             "taker_fee_bps": 4.5,
             "base_slippage_bps": 0.5,
