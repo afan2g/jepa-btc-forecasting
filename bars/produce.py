@@ -11,8 +11,11 @@ merged T1-T8 stages, with two entry points and no generic third path:
 - `materialize_holdout` — THE sole blind-materializer boundary for the 67-E one-shot
   runner (#91). It consumes only the frozen custody-validated `g0bn-holdout-plan-v1`
   object allowlist plus a matching durable `g0bn-raw-access-claim-v1`; rejects
-  ranges, globs, discovery, fallbacks, missing/extra/duplicate objects, wrong
-  days/products, and foreign object hashes before any payload decode; streams the
+  ranges, globs, discovery, fallbacks, symlinks, missing/extra/duplicate objects,
+  wrong days/products, and foreign object hashes before any payload decode (each
+  sealed object is pinned to one held O_NOFOLLOW descriptor, hash-verified over
+  that descriptor, and decoded only from that descriptor — a path swapped after
+  verification can never substitute unverified bytes); streams the
   frozen recipe exactly once through `eval.writer.write_holdout` (fresh O_EXCL
   outputs, hashes computed WHILE writing); then atomically writes and fsyncs
   `g0bn-materialization-attestation-v1`. It never reopens a derived matrix,
@@ -92,7 +95,13 @@ from bars.snapshot import (
     dual_book_reads,
     validate_book_top,
 )
-from data.labels import BarrierParams, LabelRejection, LabelRow, triple_barrier_labels
+from data.labels import (
+    BarrierParams,
+    LabelRejection,
+    LabelRow,
+    triple_barrier_labels,
+    validate_barrier_params,
+)
 from data.uniqueness import uniqueness_by_horizon
 from eval.g0bn_config import (
     ATTESTATION_SCHEMA,
@@ -248,30 +257,38 @@ def _day_open_ns(day: str) -> int:
     return int(dt.timestamp()) * 10**9
 
 
-def read_normalized_trades(path) -> list:
+def read_normalized_trades(source) -> list:
     """One day of the certified normalized trade contract -> `ClockTrade` list in
     file order (defensive sorting is the clock's job). One day of trades is the
-    documented bounded materialization (bars.clock.bars_for_day)."""
-    pf = pq.ParquetFile(path)
+    documented bounded materialization (bars.clock.bars_for_day). `source` is a
+    path (development) or a custody-pinned `_PinnedObject` (holdout)."""
+    stream = source.stream() if isinstance(source, _PinnedObject) else None
+    pf = pq.ParquetFile(stream if stream is not None else source)
     try:
         df = pf.read().to_pandas()
     finally:
         pf.close()
+        if stream is not None:
+            stream.close()
     return clock_trades_from_df(df)
 
 
-def iter_normalized_book_events(path) -> Iterator[BookDelta]:
+def iter_normalized_book_events(source) -> Iterator[BookDelta]:
     """Stream one normalized L2 object (snapshot seed or delta day) as `BookDelta`
     events, validating non-decreasing `(origin_time, seq)` while yielding — this
     closes the lazy-tail hole bars.snapshot documents (an ordering violation past
     the last decision's lookahead barrier is undetectable there, so the T9 driver
-    validates the day's stream order itself). Memory is one record batch."""
-    pf = pq.ParquetFile(path)
+    validates the day's stream order itself). Memory is one record batch.
+    `source` is a path (development) or a custody-pinned `_PinnedObject`
+    (holdout: every decode reads the verified descriptor's bytes)."""
+    label = source.path if isinstance(source, _PinnedObject) else source
+    stream = source.stream() if isinstance(source, _PinnedObject) else None
+    pf = pq.ParquetFile(stream if stream is not None else source)
     try:
         names = pf.schema_arrow.names
         missing = [c for c in _L2_COLUMNS if c not in names]
         if missing:
-            raise ValueError(f"normalized L2 object {path} lacks required "
+            raise ValueError(f"normalized L2 object {label} lacks required "
                              f"column(s) {missing}; got {list(names)}")
         last_key = None
         for batch in pf.iter_batches(columns=list(_L2_COLUMNS)):
@@ -280,7 +297,7 @@ def iter_normalized_book_events(path) -> Iterator[BookDelta]:
                 key = (int(origin), int(seq))
                 if last_key is not None and key < last_key:
                     raise ValueError(
-                        f"normalized L2 object {path} is out of (origin_time, seq) "
+                        f"normalized L2 object {label} is out of (origin_time, seq) "
                         f"order: {key} after {last_key} — the certified normalized "
                         "contract requires a sorted stream")
                 last_key = key
@@ -288,6 +305,8 @@ def iter_normalized_book_events(path) -> Iterator[BookDelta]:
                                 str(side), float(price), float(size))
     finally:
         pf.close()
+        if stream is not None:
+            stream.close()
 
 
 def _sha256_file(path) -> str:
@@ -296,6 +315,40 @@ def _sha256_file(path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _open_pinned_fd(path: str) -> int:
+    """The single holdout source-open primitive (and the read-spy seam):
+    O_NOFOLLOW pins a regular file's descriptor so hashing and every later
+    decode read the same inode's bytes."""
+    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+
+
+class _PinnedObject:
+    """A sealed normalized object bound to ONE held file descriptor: the custody
+    hash is computed over this descriptor and every payload decode streams from a
+    dup of the SAME descriptor, so a path swapped between verification and
+    parsing can never substitute unverified bytes (the by-name reopen TOCTOU).
+    Decodes are strictly sequential, so the dup's shared offset is reset per use."""
+
+    def __init__(self, path) -> None:
+        self.path = os.fspath(path)
+        self._fd = _open_pinned_fd(self.path)
+
+    def stream(self):
+        f = os.fdopen(os.dup(self._fd), "rb")
+        f.seek(0)
+        return f
+
+    def sha256(self) -> str:
+        h = hashlib.sha256()
+        with self.stream() as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def close(self) -> None:
+        os.close(self._fd)
 
 
 # ------------------------------------------------------------------ clock state
@@ -370,10 +423,14 @@ def _validate_runtime(runtime: RuntimeParams, config: dict) -> None:
     if not isinstance(runtime, RuntimeParams):
         _fail("runtime", f"must be a bars.produce.RuntimeParams; got "
                          f"{type(runtime).__name__}")
-    # eager sub-contract validation (ThresholdSchedule/FeatureConfig re-validate at
-    # construction; failing here keeps the error at the boundary)
+    # eager sub-contract validation (each stage re-validates at construction;
+    # failing here keeps every deterministic operator-parameter error at the
+    # boundary — in holdout, BEFORE the raw claim is consumed or any sealed
+    # source is opened, where a late raise would burn the one-shot)
     ThresholdSchedule(runtime.threshold)
     BarFeatureBuilder(FeatureConfig(top_k=runtime.top_k, tick_size=runtime.tick_size))
+    validate_barrier_params(_barrier_params(
+        config, runtime, {h["tag"]: int(h["ns"]) for h in config["horizons"]}))
     clock = config["clock"]
     if runtime.threshold.target_bars_per_day != clock["target_bars_per_day"]:
         _fail("runtime.threshold.target_bars_per_day",
@@ -984,6 +1041,11 @@ def _validate_object_paths(object_paths: Mapping, normalized: list) -> dict:
     for obj in normalized:
         oid = obj["object_id"]
         _validate_source_path(f"{ctx}[{oid!r}]", object_paths[oid])
+        if os.path.islink(os.fspath(object_paths[oid])):
+            _fail(f"{ctx}[{oid!r}]",
+                  f"{os.fspath(object_paths[oid])!r} is a symlink; sealed "
+                  "objects are opened O_NOFOLLOW as regular files (no link "
+                  "indirection into or out of custody)")
         real = os.path.realpath(os.fspath(object_paths[oid]))
         if real in resolved:
             _fail(ctx, f"objects {resolved[real]!r} and {oid!r} resolve to the "
@@ -1024,11 +1086,12 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
 
     Ordering contract (read spies pin it): all metadata validation runs first
     with zero data access; the durable raw-access claim is the first file read;
-    every sealed object is then hash-verified against its custody pin before any
-    payload decode; the frozen recipe streams exactly once through
-    `eval.writer.write_holdout` (fresh O_EXCL outputs, every hash computed while
-    writing); and the attestation is atomically written and fsynced last. No
-    derived matrix/manifest/parquet footer is ever reopened."""
+    every sealed object is then pinned to one held descriptor and hash-verified
+    against its custody pin before any payload decode, and every decode streams
+    from the same verified descriptor; the frozen recipe streams exactly once
+    through `eval.writer.write_holdout` (fresh O_EXCL outputs, every hash
+    computed while writing); and the attestation is atomically written and
+    fsynced last. No derived matrix/manifest/parquet footer is ever reopened."""
     validate_protocol_config(config)
     if (not isinstance(plan, dict)
             or list(plan.get("drop_count_categories", [])) != list(DROP_COUNT_CATEGORIES)):
@@ -1068,37 +1131,47 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
             f"refusing blind materialization onto existing output path(s): "
             f"{existing}; the one-shot write requires fresh derived artifacts")
 
-    # sealed-hash verification over the COMPLETE scope before any payload decode:
-    # a foreign object never reaches a parser
+    # pin every sealed object to ONE held descriptor (the first source opens —
+    # strictly after the claim read above), hash-verify the COMPLETE scope over
+    # those descriptors, and decode only from the same descriptors: a foreign
+    # object never reaches a parser, and a path swapped after verification can
+    # never substitute unverified bytes for the parse (by-name reopen TOCTOU)
     by_day: dict[str, dict] = {}
     for obj in normalized:
         by_day.setdefault(obj["day"], {})[obj["product"]] = obj
-    sealed_sha: dict[str, dict] = {}
-    for day in plan["included_days"]:
-        sealed_sha[day] = {}
-        for product in G0BN_DATA_SOURCES:
-            obj = by_day[day][product]
-            actual = _sha256_file(paths_by_id[obj["object_id"]])
-            if actual != obj["sha256"]:
-                _fail(f"object_paths[{obj['object_id']!r}]",
-                      f"content hash {actual} does not match the sealed custody "
-                      f"pin {obj['sha256']} (foreign or corrupted object); no "
-                      "payload was decoded")
-            sealed_sha[day][product] = actual
+    pinned: dict[str, _PinnedObject] = {}
+    try:
+        for obj in normalized:
+            pinned[obj["object_id"]] = _PinnedObject(paths_by_id[obj["object_id"]])
+        sealed_sha: dict[str, dict] = {}
+        for day in plan["included_days"]:
+            sealed_sha[day] = {}
+            for product in G0BN_DATA_SOURCES:
+                obj = by_day[day][product]
+                actual = pinned[obj["object_id"]].sha256()
+                if actual != obj["sha256"]:
+                    _fail(f"object_paths[{obj['object_id']!r}]",
+                          f"content hash {actual} does not match the sealed "
+                          f"custody pin {obj['sha256']} (foreign or corrupted "
+                          "object); no payload was decoded")
+                sealed_sha[day][product] = actual
 
-    days = list(plan["included_days"])
-    schedule = ThresholdSchedule(runtime.threshold)
-    for entry in clock_state["history"]:
-        schedule.record_day(entry["day"], float(entry["completed_notional"]),
-                            float(entry["covered_fraction"]))
-    build = _build_frame(
-        config, runtime, partition="holdout", days=days,
-        paths_for_day=lambda day: {p: paths_by_id[by_day[day][p]["object_id"]]
-                                   for p in G0BN_DATA_SOURCES},
-        schedule=schedule, seeded_history=list(clock_state["history"]),
-        partition_start_ns=holdout_start_ns, partition_end_ns=holdout_end_ns,
-        extra_cols=extra_cols,
-        verify_sha_for_day=lambda day: dict(sealed_sha[day]))
+        days = list(plan["included_days"])
+        schedule = ThresholdSchedule(runtime.threshold)
+        for entry in clock_state["history"]:
+            schedule.record_day(entry["day"], float(entry["completed_notional"]),
+                                float(entry["covered_fraction"]))
+        build = _build_frame(
+            config, runtime, partition="holdout", days=days,
+            paths_for_day=lambda day: {p: pinned[by_day[day][p]["object_id"]]
+                                       for p in G0BN_DATA_SOURCES},
+            schedule=schedule, seeded_history=list(clock_state["history"]),
+            partition_start_ns=holdout_start_ns, partition_end_ns=holdout_end_ns,
+            extra_cols=extra_cols,
+            verify_sha_for_day=lambda day: dict(sealed_sha[day]))
+    finally:
+        for po in pinned.values():
+            po.close()
 
     schedule_sha = _realized_schedule_sha256(build.realized_schedule)
     sources = [

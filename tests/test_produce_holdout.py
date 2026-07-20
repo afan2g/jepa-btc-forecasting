@@ -276,8 +276,11 @@ def test_existing_outputs_refuse_before_any_source_open(custody, materialized,
 
 
 def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatch):
+    import bars.produce as produce_mod
+
     order = []
     real_open = builtins.open
+    real_pin = produce_mod._open_pinned_fd
     real_pf = pq.ParquetFile
     real_meta = pq.read_metadata
     real_schema = pq.read_schema
@@ -285,6 +288,10 @@ def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatc
     def spy_open(file, mode="r", *args, **kwargs):
         order.append((str(file), mode))
         return real_open(file, mode, *args, **kwargs)
+
+    def spy_pin(path):
+        order.append((str(path), "pinned-open"))
+        return real_pin(path)
 
     derived = {str(tmp_path / "oos_matrix.parquet"),
                str(tmp_path / "oos_manifest.json"),
@@ -317,6 +324,7 @@ def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatc
                              "inside the blind materializer")
 
     monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(produce_mod, "_open_pinned_fd", spy_pin)
     monkeypatch.setattr(pq, "ParquetFile", spy_parquet)
     monkeypatch.setattr(pq, "read_metadata", spy_metadata)
     monkeypatch.setattr(pq, "read_schema", spy_schema)
@@ -335,6 +343,10 @@ def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatc
     claim_read = next(i for i, (f, _) in enumerate(order) if f == claim_file)
     assert claim_read < first_source, \
         "a January source was opened before the raw-access claim was read"
+    # descriptor binding (Codex P2): each sealed object is opened exactly once,
+    # via the pinned-fd primitive; no by-name reopen path exists for sources
+    for path in object_files:
+        assert [m for f, m in order if f == path] == ["pinned-open"], path
     # derived artifacts are opened exactly once each, write-only/exclusive, and
     # never reread; the attestation FINAL path is never opened at all — it is
     # published by atomic rename from the exclusive temp file
@@ -347,22 +359,59 @@ def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatc
     assert [m for f, m in order if f == att + ".tmp"] == ["x"]
 
 
+def _spy_all_source_opens(monkeypatch, opened):
+    """Record every source-open route: builtins.open AND the pinned-fd primitive."""
+    import bars.produce as produce_mod
+
+    real_open = builtins.open
+    real_pin = produce_mod._open_pinned_fd
+
+    def spy_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    def spy_pin(path):
+        opened.append(str(path))
+        return real_pin(path)
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(produce_mod, "_open_pinned_fd", spy_pin)
+
+
 def test_tampered_claim_blocks_every_source_open(custody, tmp_path, monkeypatch):
     bad_claim = tmp_path / "claim.json"
     _write_claim(bad_claim, config=custody["config"], plan=custody["plan"],
                  freeze=custody["freeze"],
                  holdout_plan_sha256=sha_hex("foreign-plan"))
     opened = []
-    real_open = builtins.open
-
-    def spy(file, *args, **kwargs):
-        opened.append(str(file))
-        return real_open(file, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "open", spy)
+    _spy_all_source_opens(monkeypatch, opened)
     with pytest.raises(ValueError, match="holdout_plan_sha256"):
         _materialize(custody, tmp_path, raw_access_claim_path=bad_claim)
     assert not (set(opened) & {str(p) for p in custody["object_paths"].values()})
+
+
+def test_degenerate_runtime_rejects_before_claim_and_sources(custody, tmp_path,
+                                                             monkeypatch):
+    # Codex P1: a deterministic bad operator parameter (min_returns=0) must fail
+    # the boundary validation before the claim is consumed or any sealed object
+    # is opened — never surface mid-build after the raw burn
+    opened = []
+    _spy_all_source_opens(monkeypatch, opened)
+    with pytest.raises(ValueError, match="min_returns"):
+        _materialize(custody, tmp_path,
+                     runtime=RUNTIME._replace(min_returns=0))
+    touched = set(opened)
+    assert str(custody["claim_path"]) not in touched
+    assert not (touched & {str(p) for p in custody["object_paths"].values()})
+
+
+def test_symlinked_object_path_is_rejected(custody, tmp_path):
+    oid = "custody/normalized/binance_futures_trades/2026-01-07"
+    link = tmp_path / "linked.parquet"
+    link.symlink_to(custody["object_paths"][oid])
+    paths = dict(custody["object_paths"], **{oid: link})
+    with pytest.raises(ValueError, match="symlink"):
+        _materialize(custody, tmp_path, object_paths=paths)
 
 
 def test_missing_claim_means_unclaimed_invocation(custody, tmp_path):
@@ -402,13 +451,7 @@ def test_foreign_object_hash_rejects_before_any_decode(custody, tmp_path,
 def test_missing_extra_duplicate_and_glob_objects_reject(custody, tmp_path,
                                                          monkeypatch):
     opened = []
-    real_open = builtins.open
-
-    def spy(file, *args, **kwargs):
-        opened.append(str(file))
-        return real_open(file, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "open", spy)
+    _spy_all_source_opens(monkeypatch, opened)
     object_files = {str(p) for p in custody["object_paths"].values()}
 
     paths = dict(custody["object_paths"])

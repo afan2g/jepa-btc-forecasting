@@ -487,6 +487,22 @@ def test_day_bridging_lookback_cap_fails_closed(tmp_path):
             manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
 
 
+def test_degenerate_barrier_runtime_is_rejected_at_the_boundary(tmp_path):
+    # Codex P1: min_returns=0 / negative vol_floor_bps must fail the eager
+    # runtime validation, never surface later inside the streaming build
+    world = SyntheticWorld()
+    config = produce_config()
+    paths, _ = write_day_objects(world, "2025-11-01", tmp_path)
+    for bad, match in ((make_runtime(min_returns=0), "min_returns"),
+                       (make_runtime(vol_floor_bps=-1.0), "vol_floor_bps"),
+                       (make_runtime(vol_floor_bps=float("nan")), "vol_floor_bps")):
+        with pytest.raises(ValueError, match=match):
+            produce_development(
+                config, runtime=bad, day_objects={"2025-11-01": paths},
+                matrix_path=tmp_path / "m.parquet",
+                manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
+
+
 def test_runtime_must_match_the_config_clock_pin(tmp_path):
     world = SyntheticWorld()
     config = produce_config()
