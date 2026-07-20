@@ -81,7 +81,7 @@ from bars.clock import (
     coalesce_decision_bars,
 )
 from bars.cost import CostAssumption, CostRow, cost_row, require_assumption_identity
-from bars.events import clock_trades_from_df
+from bars.events import MIN_ABSOLUTE_NS, clock_trades_from_df
 from bars.features import (
     FEATURE_COLS,
     BarFeatureBuilder,
@@ -322,7 +322,15 @@ def iter_normalized_book_events(source) -> Iterator[BookDelta]:
                 # consumed label-path fold can reach rows dual_book_reads never
                 # validates (its checks cover only the consumed decision
                 # prefix), so a malformed side/price/size/receipt must fail
-                # closed before ANY fold sees the event
+                # closed before ANY fold sees the event. The absolute-UTC floor
+                # mirrors the trades path (bars.events.MIN_ABSOLUTE_NS): a
+                # time-of-day or wrong-unit stamp would otherwise pass the
+                # seed's at-or-before-open check and seed books/labels.
+                if event.origin_time < MIN_ABSOLUTE_NS:
+                    raise ValueError(
+                        f"L2 event origin_time {event.origin_time} at "
+                        f"(origin_time, seq)={key} is not an absolute UTC epoch "
+                        "timestamp (normalize vendor offsets at ingestion)")
                 _validate_book_event(event)
                 yield event
     finally:

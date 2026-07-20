@@ -124,6 +124,26 @@ def test_iter_normalized_book_events_fails_closed_on_disorder(tmp_path):
         list(iter_normalized_book_events(path))
 
 
+def test_l2_reader_rejects_non_absolute_timestamps(tmp_path):
+    # Codex round 16: a time-of-day or wrong-unit L2 timestamp (e.g. origin=1)
+    # would pass the seed's at-or-before-open check and seed books/labels; the
+    # reader must enforce the same absolute-UTC floor the trades path uses
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = tmp_path / "offset.parquet"
+    pq.write_table(pa.table({
+        "origin_time": pa.array([1], pa.int64()),
+        "received_time": pa.array([2], pa.int64()),
+        "seq": pa.array([1], pa.int64()),
+        "side": pa.array(["bid"]),
+        "price": pa.array([99.0], pa.float64()),
+        "size": pa.array([5.0], pa.float64()),
+    }), path)
+    with pytest.raises(ValueError, match="absolute"):
+        list(iter_normalized_book_events(path))
+
+
 def test_read_normalized_trades_rejects_receipt_before_origin(tmp_path):
     # Codex round 7: a trade captured "before" it happened breaks the two-axis
     # contract and would understate the monotone decision watermark (lookahead);
