@@ -462,11 +462,30 @@ def _validate_runtime(runtime: RuntimeParams, config: dict) -> None:
     # failing here keeps every deterministic operator-parameter error at the
     # boundary — in holdout, BEFORE the raw claim is consumed or any sealed
     # source is opened, where a late raise would burn the one-shot)
-    if isinstance(runtime.top_k, bool) or not isinstance(runtime.top_k, int):
-        # FeatureConfig only bounds top_k >= 1; a float would first explode
-        # inside heapq.nlargest mid-build — after the raw burn in holdout
-        _fail("runtime.top_k",
-              f"must be a plain integer ladder depth; got {runtime.top_k!r}")
+    # strict TYPES first: the delegated stage validators bound VALUES but let a
+    # JSON/YAML typo class through — bools compare as 1/0 (tick_size=True would
+    # materialize a 1.0-tick build) and fractional day/count fields survive
+    # numeric comparisons; float top_k would first explode inside heapq.nlargest
+    # mid-build — after the raw burn in holdout
+    def _plain_int(field: str, v) -> None:
+        if isinstance(v, bool) or not isinstance(v, int):
+            _fail(f"runtime.{field}",
+                  f"must be a plain integer; got {v!r}")
+
+    def _plain_real(field: str, v) -> None:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            _fail(f"runtime.{field}",
+                  f"must be a plain real number; got {v!r}")
+
+    _plain_int("top_k", runtime.top_k)
+    _plain_real("tick_size", runtime.tick_size)
+    _plain_int("threshold.target_bars_per_day",
+               runtime.threshold.target_bars_per_day)
+    _plain_int("threshold.window_days", runtime.threshold.window_days)
+    _plain_int("threshold.warmup_days", runtime.threshold.warmup_days)
+    _plain_real("threshold.seed_threshold", runtime.threshold.seed_threshold)
+    _plain_real("threshold.min_covered_fraction",
+                runtime.threshold.min_covered_fraction)
     ThresholdSchedule(runtime.threshold)
     BarFeatureBuilder(FeatureConfig(top_k=runtime.top_k, tick_size=runtime.tick_size))
     validate_barrier_params(_barrier_params(

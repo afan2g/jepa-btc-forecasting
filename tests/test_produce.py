@@ -785,7 +785,24 @@ def test_degenerate_barrier_runtime_is_rejected_at_the_boundary(tmp_path):
                        # a float top_k passes FeatureConfig's >=1 check but
                        # would first explode inside heapq.nlargest post-burn
                        (make_runtime(top_k=3.0), "top_k"),
-                       (make_runtime(top_k=True), "top_k")):
+                       (make_runtime(top_k=True), "top_k"),
+                       # JSON/YAML typo classes: bools pass numeric validators
+                       # as 1/0 and fractional day/count fields pass comparisons
+                       (make_runtime(tick_size=True), "tick_size"),
+                       (make_runtime(threshold=ThresholdConfig(
+                           target_bars_per_day=TARGET_BARS_PER_DAY,
+                           window_days=3, warmup_days=1,
+                           seed_threshold=True, min_covered_fraction=0.0)),
+                        "seed_threshold"),
+                       (make_runtime(threshold=ThresholdConfig(
+                           target_bars_per_day=TARGET_BARS_PER_DAY,
+                           window_days=3.5, warmup_days=1,
+                           seed_threshold=SEED_THRESHOLD,
+                           min_covered_fraction=0.0)), "window_days"),
+                       (make_runtime(threshold=ThresholdConfig(
+                           target_bars_per_day=True, window_days=3,
+                           warmup_days=1, seed_threshold=SEED_THRESHOLD,
+                           min_covered_fraction=0.0)), "target_bars_per_day")):
         with pytest.raises(ValueError, match=match):
             produce_development(
                 config, runtime=bad, day_objects={"2025-11-01": paths},
