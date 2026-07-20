@@ -732,6 +732,15 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
                                        for p in G0BN_DATA_SOURCES}
             else:
                 source_sha256s[day] = verify_sha_for_day(day)
+            # full-object semantic validation BEFORE any fold: the lazy
+            # samplers/label passes pull only what decisions and label windows
+            # need, so a malformed or off-day row in the unpulled tail would
+            # otherwise never reach the validating reader while the manifest/
+            # attestation still claim the sealed object was consumed — a bad
+            # tail row is a bad object, never dead data
+            for _ in _seed_day_book_events(day, paths[L2_SNAPSHOT],
+                                           paths[L2_DELTA]):
+                pass
             trades = read_normalized_trades(paths[TRADES])
             day_bars = list(coalesce_decision_bars(bars_for_day(
                 trades, day=day, schedule=schedule,

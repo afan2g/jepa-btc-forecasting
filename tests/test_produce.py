@@ -538,6 +538,43 @@ def test_malformed_rows_fail_closed_at_the_reader_boundary(tmp_path):
             list(iter_normalized_book_events(path))
 
 
+def test_unpulled_l2_tail_is_still_validated(tmp_path):
+    # Codex round 8: rows past the last decision's consumed prefix AND past the
+    # last label window are never pulled by any lazy fold — a sealed object
+    # with a malformed tail row must still fail the build (the full object is
+    # drained through the validating reader before publication)
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from tests.produce_fixtures import day_open_ns
+
+    world = SyntheticWorld()
+    config = produce_config()
+    day_objects = {}
+    for day in ("2025-11-01", "2025-11-02"):
+        paths, _ = write_day_objects(world, day, tmp_path)
+        day_objects[day] = paths
+    delta_path = day_objects["2025-11-02"]["binance_futures_l2_delta"]
+    table = pq.read_table(delta_path)
+    good = day_open_ns("2025-11-02") + 79_200 * 10**9  # 22:00: absorbs the
+    late = day_open_ns("2025-11-02") + 84_600 * 10**9  # sampler's one-event
+    bad = pa.table({                                   # lookahead; 23:30 is
+        "origin_time": pa.array([good, late], pa.int64()),  # then truly
+        "received_time": pa.array([good + 1, late + 1], pa.int64()),  # unpulled
+        "seq": pa.array([10**9, 10**9 + 1], pa.int64()),
+        "side": pa.array(["bid", "foo"]),
+        "price": pa.array([99.99, 99.99], pa.float64()),
+        "size": pa.array([5.0, 5.0], pa.float64()),
+    })
+    pq.write_table(pa.concat_tables([table.select(bad.column_names), bad]),
+                   delta_path)
+    with pytest.raises(ValueError, match="side"):
+        produce_development(
+            config, runtime=make_runtime(), day_objects=day_objects,
+            matrix_path=tmp_path / "m.parquet",
+            manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
+
+
 def test_pinned_open_rejects_non_regular_files(tmp_path):
     # Codex round 5: the fd-level gate must reject a FIFO/device swapped in
     # after the path checks (O_NOFOLLOW alone only stops symlinks, and a FIFO
