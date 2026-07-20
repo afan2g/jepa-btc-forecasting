@@ -618,7 +618,10 @@ def _scan_day_validity(day: str, snapshot_path, delta_path) -> list:
     end_ns = open_ns + _DAY_NS
     book = OrderBook()
     intervals: list = []
-    invalid_since: int | None = None
+    # the day STARTS in the missing-book state: until the fold first yields a
+    # usable top, there is no true-mid support from the open — a valid seed
+    # closes this initial interval at the open itself (zero length, suppressed)
+    invalid_since: int | None = open_ns
     prev_ts: int | None = None
 
     def assess(ts: int) -> None:
@@ -628,7 +631,8 @@ def _scan_day_validity(day: str, snapshot_path, delta_path) -> list:
         if bad and invalid_since is None:
             invalid_since = ts
         elif not bad and invalid_since is not None:
-            intervals.append((invalid_since, ts))
+            if invalid_since < ts:  # a same-instant recovery is not a gap
+                intervals.append((invalid_since, ts))
             invalid_since = None
 
     for e in _seed_day_book_events(day, snapshot_path, delta_path):

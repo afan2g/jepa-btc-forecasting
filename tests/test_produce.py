@@ -382,6 +382,45 @@ def test_transient_same_timestamp_invalidity_is_not_a_gap(tmp_path):
     assert _scan_day_validity(day, snap, delta) == []
 
 
+def test_missing_seed_prefix_is_an_invalid_interval(tmp_path):
+    # Codex round 11: before any usable book state the day's true book is
+    # MISSING — the scan must start invalid at the open and record the
+    # [day_open, first_valid) prefix, or prior-day cross-midnight windows would
+    # bridge a stale mid across unsupported time
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from bars.produce import _scan_day_validity
+    from tests.produce_fixtures import day_open_ns
+
+    day = "2025-11-01"
+    open_ns = day_open_ns(day)
+    empty = {"origin_time": pa.array([], pa.int64()),
+             "received_time": pa.array([], pa.int64()),
+             "seq": pa.array([], pa.int64()),
+             "side": pa.array([], pa.string()),
+             "price": pa.array([], pa.float64()),
+             "size": pa.array([], pa.float64())}
+    snap = tmp_path / "snap.parquet"
+    pq.write_table(pa.table(empty), snap)
+    first_valid = open_ns + 10 * 10**9
+    delta = tmp_path / "delta.parquet"
+    pq.write_table(pa.table({
+        "origin_time": pa.array([first_valid] * 2, pa.int64()),
+        "received_time": pa.array([first_valid + 1] * 2, pa.int64()),
+        "seq": pa.array([1, 2], pa.int64()),
+        "side": pa.array(["bid", "ask"]),
+        "price": pa.array([99.0, 101.0], pa.float64()),
+        "size": pa.array([5.0, 5.0], pa.float64()),
+    }), delta)
+    assert _scan_day_validity(day, snap, delta) == [(open_ns, first_valid)]
+    # and a whole day with no book events at all is invalid end to end
+    empty_delta = tmp_path / "empty-delta.parquet"
+    pq.write_table(pa.table(empty), empty_delta)
+    assert _scan_day_validity(day, snap, empty_delta) == \
+        [(open_ns, open_ns + 86_400 * 10**9)]
+
+
 def test_day_end_truncation_bar_is_masked(tmp_path):
     result, _ = _build(tmp_path, [("2025-11-05", {}),
                                   ("2025-11-06", {"late_trade": True})])
