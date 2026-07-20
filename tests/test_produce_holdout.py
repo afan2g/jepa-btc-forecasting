@@ -1,0 +1,433 @@
+"""T9 blind holdout materializer tests (issue #94; spec §6.3 steps 4-5, §11.9).
+
+Everything is synthetic and tiny: the sealed January "objects" are the
+tests/produce_fixtures.py world written to tmp files, the custody inventory pins
+their REAL content hashes, and the plan/freeze chain is built through the merged
+67-B/67-C machinery from a synthetic development run. No vendor I/O and no real
+January access occur anywhere here.
+"""
+from __future__ import annotations
+
+import builtins
+import copy
+import json
+
+import pytest
+import pyarrow.parquet as pq
+
+from bars.clock import ThresholdConfig
+from bars.produce import (
+    CLOCK_STATE_SCHEMA,
+    DROP_COUNT_CATEGORIES,
+    RuntimeParams,
+    clock_state_sha256,
+    materialize_holdout,
+)
+from eval.g0bn_config import RAW_ACCESS_CLAIM_SCHEMA, g0bn_artifact_sha256
+from eval.g0bn_engine import run_g0bn_development
+from eval.g0bn_freeze import (
+    build_freeze,
+    build_holdout_plan,
+    verify_holdout_manifest_binding,
+)
+from eval.guard import preflight_generic_manifest
+from eval.hashing import hash_obj
+from eval.writer import classify_manifest
+from tests.g0bn_dev_fixtures import dev_bundle, dev_config, durable_ledger
+from tests.g0bn_holdout_fixtures import make_inventory, sealed_config_kwargs
+from tests.g0bn_protocol_fixtures import make_clock, make_partition, sha_hex
+from tests.produce_fixtures import (
+    SEED_THRESHOLD,
+    TARGET_BARS_PER_DAY,
+    TIME_CAP_NS,
+    SyntheticWorld,
+    write_day_objects,
+)
+
+GEN_AT = "2026-07-19T00:00:00Z"
+
+RAW_PRODUCTS = ("book", "book_delta_v2", "trades")
+NORMALIZED_PRODUCTS = ("binance_futures_l2_snapshot", "binance_futures_l2_delta",
+                       "binance_futures_trades")
+
+RUNTIME = RuntimeParams(
+    threshold=ThresholdConfig(
+        target_bars_per_day=TARGET_BARS_PER_DAY, window_days=3, warmup_days=1,
+        seed_threshold=SEED_THRESHOLD, min_covered_fraction=0.0),
+    top_k=3, tick_size=0.01, min_returns=2, vol_floor_bps=0.25)
+
+# frozen development-end clock state: three recorded December days at the synthetic
+# world's daily notional, giving January 1 a live (non-warm-up) trailing threshold
+CLOCK_STATE = {
+    "schema": CLOCK_STATE_SCHEMA,
+    "threshold_config": {
+        "target_bars_per_day": TARGET_BARS_PER_DAY, "window_days": 3,
+        "warmup_days": 1, "seed_threshold": float(SEED_THRESHOLD),
+        "min_covered_fraction": 0.0,
+    },
+    "history": [
+        {"day": d, "completed_notional": 36_000.0, "covered_fraction": 1.0}
+        for d in ("2025-12-29", "2025-12-30", "2025-12-31")
+    ],
+}
+
+# January day quirks exercising the drop taxonomy end to end:
+# - Jan 1 delays its first delta 5s: bar 1 is no_prior_read (feature_rejection),
+#   the next bars read the prior-day snapshot only (before_start), and the last
+#   snapshot-only bar ages past the 5s staleness cap;
+# - Jan 13 (before the excluded Jan 14) is late-active: coverage_gap drops;
+# - Jan 31 (partition end) is late-active: prefilter drops.
+DAY_KWARGS = {
+    "2026-01-01": {"first_delta_offset_ns": 5_000_000_000},
+    "2026-01-13": {"late_active": True},
+    "2026-01-31": {"late_active": True},
+}
+
+
+def _write_claim(path, *, config, plan, freeze, **over) -> dict:
+    claim = {
+        "schema": RAW_ACCESS_CLAIM_SCHEMA,
+        "holdout_universe_id": plan["holdout_universe_id"],
+        "transaction_id": plan["transaction_id"],
+        "protocol_config_sha256": config["sha256"],
+        "holdout_plan_sha256": plan["sha256"],
+        "freeze_sha256": freeze["sha256"],
+        "generated_at": GEN_AT,
+    }
+    claim.update(over)
+    claim["sha256"] = over.get("sha256", g0bn_artifact_sha256(claim))
+    path.write_text(json.dumps(claim, sort_keys=True) + "\n", encoding="utf-8")
+    return claim
+
+
+@pytest.fixture(scope="module")
+def custody(tmp_path_factory):
+    """The full synthetic custody chain: sealed object files with REAL content
+    hashes, the paired inventory/config/plan/freeze, the frozen clock state, and
+    a durable raw-access claim."""
+    root = tmp_path_factory.mktemp("jan-objects")
+    world = SyntheticWorld()
+    inventory_probe = make_inventory()  # for the included-day list only
+    included = list(inventory_probe["included_days"])
+
+    object_paths, objects = {}, []
+    for day in included:
+        paths, shas = write_day_objects(world, day, root,
+                                        **DAY_KWARGS.get(day, {}))
+        for product in RAW_PRODUCTS:
+            objects.append({"object_id": f"custody/raw/{product}/{day}",
+                            "layer": "raw", "product": product, "day": day,
+                            "sha256": sha_hex(f"jan-raw-{product}-{day}")})
+        for product in NORMALIZED_PRODUCTS:
+            oid = f"custody/normalized/{product}/{day}"
+            objects.append({"object_id": oid, "layer": "normalized",
+                            "product": product, "day": day,
+                            "sha256": shas[product]})
+            object_paths[oid] = object_paths.get(oid, paths[product])
+    inventory = make_inventory(objects=objects)
+
+    state_sha = clock_state_sha256(CLOCK_STATE)
+    config = dev_config(
+        clock=make_clock(target_bars_per_day=TARGET_BARS_PER_DAY,
+                         time_cap_ns=TIME_CAP_NS,
+                         development_end_state_sha256=state_sha),
+        **sealed_config_kwargs(inventory))
+    frame, manifest, config, identity = dev_bundle(config=config)
+    run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
+    plan = build_holdout_plan(config, inventory, generated_at=GEN_AT)
+    freeze = build_freeze(run, plan, inventory=inventory, generated_at=GEN_AT)
+
+    claim_path = root / "g0bn-raw-access-claim-v1.json"
+    claim = _write_claim(claim_path, config=config, plan=plan, freeze=freeze)
+    return {"root": root, "config": config, "inventory": inventory,
+            "plan": plan, "freeze": freeze, "claim": claim,
+            "claim_path": claim_path, "object_paths": object_paths}
+
+
+def _materialize(custody_bundle, out_dir, *, generated_at=GEN_AT, **over):
+    kwargs = dict(
+        config=custody_bundle["config"], plan=custody_bundle["plan"],
+        freeze=custody_bundle["freeze"], inventory=custody_bundle["inventory"],
+        runtime=RUNTIME, clock_state=CLOCK_STATE,
+        raw_access_claim_path=custody_bundle["claim_path"],
+        object_paths=custody_bundle["object_paths"],
+        matrix_path=out_dir / "oos_matrix.parquet",
+        manifest_path=out_dir / "oos_manifest.json",
+        attestation_path=out_dir / "g0bn-materialization-attestation-v1.json",
+        generated_at=generated_at)
+    kwargs.update(over)
+    return materialize_holdout(**kwargs)
+
+
+@pytest.fixture(scope="module")
+def materialized(custody, tmp_path_factory):
+    out = tmp_path_factory.mktemp("oos-out")
+    return {"out": out, "result": _materialize(custody, out)}
+
+
+# ------------------------------------------------------------------ happy path
+
+
+def test_materialization_publishes_attested_blind_artifacts(custody, materialized):
+    result = materialized["result"]
+    out = materialized["out"]
+    for name in ("oos_matrix.parquet", "oos_manifest.json",
+                 "g0bn-materialization-attestation-v1.json"):
+        assert (out / name).exists()
+    assert not (out / "g0bn-materialization-attestation-v1.json.tmp").exists()
+    manifest = json.loads((out / "oos_manifest.json").read_text())
+    cls = classify_manifest(manifest)
+    assert cls.holdout_bound and cls.partition == "holdout"
+    # the published manifest reconciles with the frozen plan/freeze and accounts
+    # for the COMPLETE sealed normalized scope
+    verify_holdout_manifest_binding(manifest, custody["plan"], custody["freeze"],
+                                    config=custody["config"],
+                                    inventory=custody["inventory"])
+    # the generic-runner guard refuses it before any loader
+    with pytest.raises(ValueError, match="holdout guard"):
+        preflight_generic_manifest(manifest)
+    # all three horizons survive with real support
+    assert all(n > 0 for n in result.row_counts.values())
+    assert set(result.row_counts) == {"2s", "10s", "60s"}
+    # the written physical schema matches the plan's frozen Arrow pin
+    oc = custody["plan"]["output_contract"]
+    assert result.write.physical_schema_sha256 == \
+        oc["expected_physical_schema_sha256"]
+
+
+def test_attestation_binds_claim_plan_freeze_and_write(custody, materialized):
+    att = materialized["result"].attestation
+    on_disk = json.loads(
+        (materialized["out"] / "g0bn-materialization-attestation-v1.json")
+        .read_text())
+    assert on_disk == att
+    assert att["schema"] == "g0bn-materialization-attestation-v1"
+    assert g0bn_artifact_sha256(att) == att["sha256"]
+    assert att["holdout_plan_sha256"] == custody["plan"]["sha256"]
+    assert att["freeze_sha256"] == custody["freeze"]["sha256"]
+    assert att["raw_access_claim_sha256"] == custody["claim"]["sha256"]
+    write = materialized["result"].write
+    assert att["build_id"] == write.build_id
+    assert att["logical_row_sha256"] == write.logical_row_sha256
+    assert att["manifest_sha256"] == write.manifest_sha256
+    assert att["matrix_file_sha256"] == write.matrix_file_sha256
+    assert att["physical_schema_sha256"] == write.physical_schema_sha256
+    assert att["row_count"] == write.row_count == sum(att["row_counts"].values())
+    assert att["drop_count_categories"] == list(DROP_COUNT_CATEGORIES)
+    assert att["counts_sha256"] == hash_obj({
+        "schema": "g0bn-materialization-counts-v1",
+        "row_count": att["row_count"], "row_counts": att["row_counts"],
+        "drop_counts": att["drop_counts"]})
+    assert att["days_built"] == list(custody["plan"]["included_days"])
+    assert [d["day"] for d in att["realized_threshold_schedule"]] == \
+        att["days_built"]
+
+
+def test_january_exercises_the_full_drop_taxonomy(materialized):
+    drops = materialized["result"].drop_counts
+    assert tuple(drops) == DROP_COUNT_CATEGORIES
+    # the frozen development-end state makes January 1 a live threshold day
+    assert all(n == 0 for n in drops["warmup"].values())
+    # Jan 1 bar 1: no prior observable read
+    assert all(n >= 1 for n in drops["feature_rejection"].values())
+    # Jan 1 early bars read only the prior-day snapshot state
+    assert all(n >= 1 for n in drops["before_start"].values())
+    # quiet-tail cap bars age past the staleness cap
+    assert all(n > 0 for n in drops["staleness"].values())
+    # late-active Jan 13 runs into the excluded Jan 14 coverage gap
+    assert drops["coverage_gap"]["60s"] > 0
+    # late-active Jan 31 runs into the February partition boundary
+    assert drops["prefilter"]["60s"] > 0
+    # the schedule is live all month: no warm-up entries in the realized schedule
+    sched = materialized["result"].realized_threshold_schedule
+    assert not any(s["is_warmup"] for s in sched)
+
+
+def test_rematerialization_is_logically_identical(custody, materialized, tmp_path):
+    again = _materialize(custody, tmp_path, generated_at="2026-07-20T00:00:00Z")
+    result = materialized["result"]
+    assert again.write.build_id == result.write.build_id
+    assert again.write.logical_row_sha256 == result.write.logical_row_sha256
+    assert again.write.manifest_sha256 == result.write.manifest_sha256
+    assert again.attestation["counts_sha256"] == \
+        result.attestation["counts_sha256"]
+    assert again.realized_threshold_schedule_sha256 == \
+        result.realized_threshold_schedule_sha256
+    assert again.clock_state_sha256 == result.clock_state_sha256
+
+
+def test_existing_outputs_refuse_before_any_source_open(custody, materialized,
+                                                        monkeypatch):
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    with pytest.raises(FileExistsError, match="fresh"):
+        _materialize(custody, materialized["out"])
+    object_files = {str(p) for p in custody["object_paths"].values()}
+    assert not (set(opened) & object_files)
+
+
+# ------------------------------------------------------------------- read spies
+
+
+def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatch):
+    order = []
+    real_open = builtins.open
+    real_pf = pq.ParquetFile
+
+    def spy_open(file, mode="r", *args, **kwargs):
+        order.append((str(file), mode))
+        return real_open(file, mode, *args, **kwargs)
+
+    derived = {str(tmp_path / "oos_matrix.parquet"),
+               str(tmp_path / "oos_manifest.json"),
+               str(tmp_path / "g0bn-materialization-attestation-v1.json")}
+
+    def spy_parquet(path, *args, **kwargs):
+        if str(path) in derived:
+            raise AssertionError(f"derived artifact reopened via parquet: {path}")
+        return real_pf(path, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("generic pandas/pyarrow table loaders must not run "
+                             "inside the blind materializer")
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(pq, "ParquetFile", spy_parquet)
+    monkeypatch.setattr(pq, "read_table", forbidden)
+    monkeypatch.setattr(pq, "read_pandas", forbidden)
+    import pandas as pd
+    monkeypatch.setattr(pd, "read_parquet", forbidden)
+
+    result = _materialize(custody, tmp_path)
+    assert result.write.row_count > 0
+
+    object_files = {str(p) for p in custody["object_paths"].values()}
+    claim_file = str(custody["claim_path"])
+    first_source = next(i for i, (f, _) in enumerate(order)
+                        if f in object_files)
+    claim_read = next(i for i, (f, _) in enumerate(order) if f == claim_file)
+    assert claim_read < first_source, \
+        "a January source was opened before the raw-access claim was read"
+    # derived artifacts are opened exactly once each, write-only/exclusive, and
+    # never reread; the attestation FINAL path is never opened at all — it is
+    # published by atomic rename from the exclusive temp file
+    assert [m for f, m in order
+            if f == str(tmp_path / "oos_matrix.parquet")] == ["xb"]
+    assert [m for f, m in order
+            if f == str(tmp_path / "oos_manifest.json")] == ["x"]
+    att = str(tmp_path / "g0bn-materialization-attestation-v1.json")
+    assert [m for f, m in order if f == att] == []
+    assert [m for f, m in order if f == att + ".tmp"] == ["x"]
+
+
+def test_tampered_claim_blocks_every_source_open(custody, tmp_path, monkeypatch):
+    bad_claim = tmp_path / "claim.json"
+    _write_claim(bad_claim, config=custody["config"], plan=custody["plan"],
+                 freeze=custody["freeze"],
+                 holdout_plan_sha256=sha_hex("foreign-plan"))
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    with pytest.raises(ValueError, match="holdout_plan_sha256"):
+        _materialize(custody, tmp_path, raw_access_claim_path=bad_claim)
+    assert not (set(opened) & {str(p) for p in custody["object_paths"].values()})
+
+
+def test_missing_claim_means_unclaimed_invocation(custody, tmp_path):
+    with pytest.raises(ValueError, match="unclaimed"):
+        _materialize(custody, tmp_path,
+                     raw_access_claim_path=tmp_path / "absent-claim.json")
+
+
+def test_claim_self_hash_tamper_is_rejected(custody, tmp_path):
+    stale = tmp_path / "stale-claim.json"
+    _write_claim(stale, config=custody["config"], plan=custody["plan"],
+                 freeze=custody["freeze"], sha256=sha_hex("stale"))
+    with pytest.raises(ValueError, match="sha256"):
+        _materialize(custody, tmp_path, raw_access_claim_path=stale)
+
+
+def test_foreign_object_hash_rejects_before_any_decode(custody, tmp_path,
+                                                       monkeypatch):
+    oid = "custody/normalized/binance_futures_trades/2026-01-05"
+    original = custody["object_paths"][oid]
+    corrupted = tmp_path / "corrupted.parquet"
+    corrupted.write_bytes(original.read_bytes() + b"\x00")
+    paths = dict(custody["object_paths"], **{oid: corrupted})
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("no payload may be decoded once any sealed object "
+                             "hash fails to verify")
+
+    monkeypatch.setattr(pq, "ParquetFile", no_decode)
+    with pytest.raises(ValueError, match="foreign or corrupted"):
+        _materialize(custody, tmp_path, object_paths=paths)
+
+
+# --------------------------------------------------------- allowlist discipline
+
+
+def test_missing_extra_duplicate_and_glob_objects_reject(custody, tmp_path):
+    paths = dict(custody["object_paths"])
+    oid = "custody/normalized/binance_futures_l2_delta/2026-01-03"
+    removed = paths.pop(oid)
+    with pytest.raises(ValueError, match="missing sealed normalized object"):
+        _materialize(custody, tmp_path, object_paths=paths)
+
+    paths = dict(custody["object_paths"])
+    paths["custody/normalized/binance_futures_trades/2026-01-14"] = removed
+    with pytest.raises(ValueError, match="unknown object id"):
+        _materialize(custody, tmp_path, object_paths=paths)
+
+    paths = dict(custody["object_paths"])
+    other = "custody/normalized/binance_futures_l2_delta/2026-01-04"
+    paths[oid] = paths[other]
+    with pytest.raises(ValueError, match="same file"):
+        _materialize(custody, tmp_path, object_paths=paths)
+
+    paths = dict(custody["object_paths"])
+    paths[oid] = str(tmp_path / "*.parquet")
+    with pytest.raises(ValueError, match="glob"):
+        _materialize(custody, tmp_path, object_paths=paths)
+
+
+def test_incompatible_drop_count_schema_fails_closed(custody, tmp_path):
+    config2 = dev_config(
+        clock=make_clock(target_bars_per_day=TARGET_BARS_PER_DAY,
+                         time_cap_ns=TIME_CAP_NS,
+                         development_end_state_sha256=clock_state_sha256(
+                             CLOCK_STATE)),
+        partition=make_partition(holdout_drop_count_categories=["a", "b"]),
+        **sealed_config_kwargs(custody["inventory"]))
+    plan2 = build_holdout_plan(config2, custody["inventory"], generated_at=GEN_AT)
+    with pytest.raises(ValueError, match="drop_count_categories"):
+        _materialize(custody, tmp_path, config=config2, plan=plan2)
+
+
+def test_clock_state_must_reproduce_the_frozen_pin(custody, tmp_path):
+    drifted = copy.deepcopy(CLOCK_STATE)
+    drifted["history"][0]["completed_notional"] = 40_000.0
+    with pytest.raises(ValueError, match="development-end clock state"):
+        _materialize(custody, tmp_path, clock_state=drifted)
+
+    in_partition = copy.deepcopy(CLOCK_STATE)
+    in_partition["history"].append(
+        {"day": "2026-01-02", "completed_notional": 1.0, "covered_fraction": 1.0})
+    with pytest.raises(ValueError, match="prior day"):
+        _materialize(custody, tmp_path, clock_state=in_partition)
+
+    wrong_runtime = RUNTIME._replace(threshold=RUNTIME.threshold._replace(
+        window_days=5))
+    with pytest.raises(ValueError, match="threshold_config"):
+        _materialize(custody, tmp_path, runtime=wrong_runtime)

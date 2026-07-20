@@ -413,8 +413,13 @@ def make_partition(**over) -> dict:
         "partition_guard_ns": 120_000_000_000,
         "prefilter_rule": "t_event + horizons[horizon] + partition_guard_ns < partition_end_ns",
         "development_drop_counts": {"2s": 180, "10s": 240, "60s": 900},
+        # The T9 producer's pinned drop taxonomy (bars/produce.py
+        # DROP_COUNT_CATEGORIES), spelled literally so a drift in the
+        # implementation fails these fixtures instead of silently re-pinning.
         "holdout_drop_count_categories": [
-            "before_start", "prefilter", "actual_span", "staleness", "lookback_cap",
+            "warmup", "day_end_truncation", "book_rejection", "staleness",
+            "feature_rejection", "before_start", "lookback_cap", "prefilter",
+            "coverage_gap", "label_rejection", "actual_span",
         ],
         "sufficiency_thresholds": {"min_valid_days": 20, "min_uniqueness_sum": 100},
     }
