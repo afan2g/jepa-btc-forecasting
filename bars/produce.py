@@ -905,7 +905,16 @@ def produce_development(config: dict, *, runtime: RuntimeParams,
     """Deterministic development build over an EXPLICIT day/object allowlist
     (`{day: {normalized product: path}}` — never a range, glob, or discovery).
     Runs the full validate-then-write path (plan §H) and returns the logical
-    development data identity trials bind to."""
+    development data identity trials bind to.
+
+    The realized threshold schedule hash is REPORTED (manifest bar_clock +
+    result), never verified against `config.clock.development_schedule_sha256`
+    here: subset/calibration builds cannot match a full-scope pin by
+    construction, and the pin-minting bootstrap run predates the pin. The 67-E
+    pre-burn preflight owns that reconciliation — it compares the canonical
+    full-scope development manifest's realized hash against the config pin
+    before any burn (the one-shot's own load-bearing pin, the development-END
+    clock state, IS hash-enforced by materialize_holdout)."""
     validate_protocol_config(config)
     _validate_runtime(runtime, config)
     _validate_generated_at(generated_at)
@@ -1097,7 +1106,17 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
     from the same verified descriptor; the frozen recipe streams exactly once
     through `eval.writer.write_holdout` (fresh O_EXCL outputs, every hash
     computed while writing); and the attestation is atomically written and
-    fsynced last. No derived matrix/manifest/parquet footer is ever reopened."""
+    fsynced last. No derived matrix/manifest/parquet footer is ever reopened.
+
+    Scope claim (least privilege): this materializer consumes and physically
+    verifies the NORMALIZED layer of the sealed allowlist only — exactly the
+    scope `eval.g0bn_freeze.verify_holdout_manifest_binding` audits one-to-one.
+    It never receives raw object paths and must not: raw-layer custody is
+    verified by the #68 seal evidence and the 67-E pre-burn preflight, and
+    handing the operator-plane materializer raw payload access it does not need
+    would widen the custody boundary, not tighten it. The attestation binds the
+    plan hash (which pins BOTH layers' sealed hashes) but attests consumption
+    of the normalized scope only."""
     validate_protocol_config(config)
     if (not isinstance(plan, dict)
             or list(plan.get("drop_count_categories", [])) != list(DROP_COUNT_CATEGORIES)):
