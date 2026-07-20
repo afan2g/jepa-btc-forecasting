@@ -999,20 +999,26 @@ def _realized_schedule_sha256(realized_schedule: list) -> str:
                      "days": list(realized_schedule)})
 
 
-def _bar_clock_block(config: dict, realized_schedule_sha256: str) -> dict:
+def _bar_clock_block(config: dict, realized_schedule: list,
+                     realized_schedule_sha256: str) -> dict:
     return {
         "kind": G0BN_CLOCK_KIND,
         "reference_stream": G0BN_CLOCK_REFERENCE_STREAM,
         "target_bars_per_day": config["clock"]["target_bars_per_day"],
         "time_cap_ns": config["clock"]["time_cap_ns"],
-        # realized post-burn/pre-freeze evidence; deliberately an ADDITIONAL field
-        # beyond the four frozen pins (eval.g0bn_freeze compares per pinned key)
-        "realized_threshold_schedule_sha256": realized_schedule_sha256,
+        # realized evidence, deliberately ADDITIONAL fields beyond the four
+        # frozen pins (eval.g0bn_freeze compares per pinned key): plan §A
+        # requires the per-day VALUES plus the content hash — "not a single
+        # scalar and not the hash alone" (a hash cannot recover the thresholds
+        # for a rebuild/audit)
+        "threshold_schedule": [dict(s) for s in realized_schedule],
+        "threshold_schedule_hash": realized_schedule_sha256,
     }
 
 
 def _base_manifest(config: dict, *, dataset_id: str, sources: list,
-                   extra_cols: tuple, realized_schedule_sha256: str,
+                   extra_cols: tuple, realized_schedule: list,
+                   realized_schedule_sha256: str,
                    generated_at: str, dtypes: dict | None = None) -> dict:
     if dtypes is None:
         # development: pin every emitted diagnostic dtype (rebuildable, no
@@ -1031,7 +1037,8 @@ def _base_manifest(config: dict, *, dataset_id: str, sources: list,
         "manifest_version": 1,
         "dataset_id": dataset_id,
         "build_id": "0" * 64,  # placeholder; derived below from the final frame
-        "bar_clock": _bar_clock_block(config, realized_schedule_sha256),
+        "bar_clock": _bar_clock_block(config, realized_schedule,
+                                      realized_schedule_sha256),
         "time": {"unit": "ns", "timezone": "UTC"},
         "feature_cols": list(FEATURE_COLS),
         "target_cols": list(G0BN_TARGETS),
@@ -1138,7 +1145,9 @@ def produce_development(config: dict, *, runtime: RuntimeParams,
     ] + _evidence_sources(config, partition="development")
     manifest = _base_manifest(
         config, dataset_id=G0BN_DEV_DATASET_ID, sources=sources,
-        extra_cols=tuple(extra_cols), realized_schedule_sha256=schedule_sha,
+        extra_cols=tuple(extra_cols),
+        realized_schedule=build.realized_schedule,
+        realized_schedule_sha256=schedule_sha,
         generated_at=generated_at)
     build_params = {
         "builder": PRODUCER_VERSION,
@@ -1391,7 +1400,9 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
     ] + _evidence_sources(config, partition="holdout") + [dict(plan_binding)]
     manifest = _base_manifest(
         config, dataset_id=G0BN_OOS_DATASET_ID, sources=sources,
-        extra_cols=extra_cols, realized_schedule_sha256=schedule_sha,
+        extra_cols=extra_cols,
+        realized_schedule=build.realized_schedule,
+        realized_schedule_sha256=schedule_sha,
         generated_at=generated_at, dtypes=oc["dtypes"])
     base_params = {
         "builder": PRODUCER_VERSION,

@@ -273,6 +273,13 @@ def test_development_realized_schedule_is_causal_and_recorded(dev_build):
     state = dev_build["result"].clock_state
     assert state["schema"] == "g0bn-clock-state-v1"
     assert [h["day"] for h in state["history"]] == [s["day"] for s in sched]
+    # plan §A: the manifest persists the per-day VALUES plus the content hash —
+    # "not a single scalar and not the hash alone" (a hash cannot recover the
+    # thresholds for a rebuild/audit)
+    manifest = load_manifest(dev_build["result"].write.manifest_path)
+    assert manifest["bar_clock"]["threshold_schedule"] == sched
+    assert manifest["bar_clock"]["threshold_schedule_hash"] == \
+        dev_build["result"].realized_threshold_schedule_sha256
 
 
 # ---------------------------------------------------------- targeted drop paths
