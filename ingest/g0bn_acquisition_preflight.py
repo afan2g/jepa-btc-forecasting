@@ -45,6 +45,7 @@ one-shot transaction and its raw/matrix access burns).
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import math
@@ -677,9 +678,23 @@ def _locked(command: str) -> str:
     return f"{LOCK_WRAPPER} {command}"
 
 
+def _verify_chain(partition_name: str, work: str) -> str:
+    """Chain the offline verify-execution gate BEFORE the real work under one
+    flock: run_as is packet metadata, not enforcement, so the approved command
+    itself must refuse when the days-file content drifts from the plan's
+    commitment or (holdout) when the effective OS user is not the custodian.
+    Every interpolated token is validated shell-inert, so the double-quoted
+    sh -c composition cannot be escaped."""
+    verify = (f".venv/bin/python -m ingest.g0bn_acquisition_preflight "
+              f"verify-execution --partition {partition_name} "
+              f"--plan {DEFAULT_OUT_DIR}/g0bn_acquisition_plan.json")
+    return f'{LOCK_WRAPPER} sh -c "{verify} && {work}"'
+
+
 def _download_command(plan: dict, block: dict, cap_gb: float) -> str:
     ex = plan["execution"]
-    return _locked(
+    return _verify_chain(
+        block["partition"],
         f".venv/bin/python {ex['downloader']} "
         f"--instrument {plan['instrument_key']} "
         f"--feeds {plan['feeds_argument']} "
@@ -696,7 +711,8 @@ def _download_command(plan: dict, block: dict, cap_gb: float) -> str:
 
 def _recon_command(plan: dict, block: dict) -> str:
     ex = plan["execution"]
-    return _locked(
+    return _verify_chain(
+        block["partition"],
         f".venv/bin/python {ex['recon_runner']} "
         f"--instrument {plan['instrument_key']} "
         f"--feeds {plan['feeds_argument']} "
@@ -748,9 +764,9 @@ def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dic
             "notes": "First vendor-I/O step. Resumable and atomic; hard-stops "
                      "on quota/auth (exit 2), partial (exit 3), gate (exit 4). "
                      "--allow-broad is deliberately absent so --max-gb remains "
-                     "a binding refusal. Before running, verify sha256sum of "
-                     "the days file equals the plan's "
-                     "development.days_file_sha256.",
+                     "a binding refusal. The chained verify-execution gate "
+                     "re-validates the plan and the days-file content "
+                     "commitment before any vendor I/O.",
         },
         {
             "step": "development-recon",
@@ -775,9 +791,11 @@ def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dic
                      "permission-policy evidence exists. The operator never "
                      "reads this store, and the report dir and store manifest "
                      "are custody-internal too (their run records carry "
-                     "January rows/bytes — activity proxies). Before running, "
-                     "verify sha256sum of the days file equals the plan's "
-                     "holdout.days_file_sha256.",
+                     "January rows/bytes — activity proxies). The chained "
+                     "verify-execution gate REFUSES unless the effective OS "
+                     "user is the custodian identity and the days-file content "
+                     "matches the plan's commitment — run_as is not mere "
+                     "metadata.",
         },
         {
             "step": "holdout-recon",
@@ -1216,6 +1234,18 @@ def build_custody_inventory(*, custodian_identity: str, operator_identity: str,
         _str(f"{opath}.product", obj["product"])
         _day(f"{opath}.day", obj["day"])
         _sha256(f"{opath}.sha256", obj["sha256"])
+        # The public object_id is a PURE FUNCTION of (layer, product, day):
+        # custodian-chosen text (e.g. verbose store keys) could smuggle
+        # row/byte counts or outcome prose into the outcome-blind inventory,
+        # so any other spelling fails closed — like exclusion reasons, the
+        # opaque content commitment lives in sha256, not the id.
+        canonical_id = f"custody/{obj['layer']}/{obj['product']}/{obj['day']}"
+        if obj["object_id"] != canonical_id:
+            _fail(f"{opath}.object_id",
+                  f"must be the canonical derived id {canonical_id!r} (object "
+                  "ids are pure functions of (layer, product, day) so no "
+                  "custodian-chosen bytes can enter the public inventory); "
+                  f"got {obj['object_id']!r}")
         canonical.append({k: obj[k] for k in _OBJECT_FIELDS})
     canonical.sort(key=_object_sort_key)
     inventory = {
@@ -1439,6 +1469,51 @@ def _cmd_build_inventory(args) -> int:
     return 0
 
 
+def _cmd_verify_execution(args) -> int:
+    """Offline execution-time gate chained BEFORE every approved download/recon
+    command: re-validates the plan artifact, verifies the days-file CONTENT
+    against the plan's pinned commitment (the file, not the plan, is what the
+    downloader will actually transfer), and for the holdout partition requires
+    the effective OS user to BE the plan's custodian identity — the packet's
+    run_as field is documentation, this is the enforcement. No vendor I/O:
+    local JSON/file reads and one OS-user lookup only."""
+    try:
+        plan = validate_acquisition_plan(_read_json(args.plan))
+        block = plan[args.partition]
+        try:
+            with open(block["days_file"], "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+        except OSError as e:
+            raise ValueError(
+                f"cannot read the plan-pinned days file "
+                f"{block['days_file']!r} ({e}); regenerate the preflight "
+                "before executing any approved command") from None
+        if digest != block["days_file_sha256"]:
+            raise ValueError(
+                f"days file {block['days_file']!r} content sha256 {digest} "
+                f"does not match the plan's pinned days_file_sha256 "
+                f"{block['days_file_sha256']} — the file is edited or stale; "
+                "refusing before any vendor I/O (regenerate the preflight and "
+                "re-approve)")
+        if args.partition == "holdout":
+            user = getpass.getuser()
+            expected = plan["custody"]["custodian_identity"]
+            if user != expected:
+                raise ValueError(
+                    f"effective OS user {user!r} is not the custodian identity "
+                    f"{expected!r}; holdout commands are custodian-only and "
+                    "refuse until the provisioned custodian identity runs them "
+                    "(spec section 5.1 — run_as metadata is not enforcement)")
+    except (ValueError, json.JSONDecodeError, OSError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return SETUP_ERROR_EXIT
+    scope = ("custodian identity confirmed" if args.partition == "holdout"
+             else "development scope confirmed")
+    print(f"verify-execution OK: {args.partition} days file matches "
+          f"{block['days_file_sha256']}; {scope}")
+    return 0
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         prog="g0bn_acquisition_preflight",
@@ -1477,6 +1552,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                             "--config); the evidence must then cover every "
                             "planned holdout destination")
     inv_p.add_argument("--out", required=True, help="output inventory JSON path")
+    ver_p = sub.add_parser("verify-execution",
+                           help="offline gate chained before every approved "
+                                "download/recon command: plan + days-file "
+                                "content commitment + (holdout) custodian OS "
+                                "identity; no vendor I/O")
+    ver_p.add_argument("--partition", required=True,
+                       choices=("development", "holdout"))
+    ver_p.add_argument("--plan", required=True,
+                       help="path to the g0bn-acquisition-plan-v1 JSON")
     return ap.parse_args(argv)
 
 
@@ -1484,6 +1568,8 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if args.command == "plan":
         return _cmd_plan(args)
+    if args.command == "verify-execution":
+        return _cmd_verify_execution(args)
     return _cmd_build_inventory(args)
 
 

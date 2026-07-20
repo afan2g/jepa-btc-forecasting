@@ -474,8 +474,15 @@ def test_packet_commands_are_exact_inert_and_lock_serialized():
         assert c["approval_required"] is True
     for step in ("development-download", "development-recon",
                  "holdout-download", "holdout-recon"):
-        assert by_step[step]["command"].startswith(
-            "flock -w 14400 /tmp/jepa-expensive-compute.lock ")
+        cmd = by_step[step]["command"]
+        assert cmd.startswith("flock -w 14400 /tmp/jepa-expensive-compute.lock ")
+        # run_as is not mere metadata: every download/recon command chains the
+        # offline verify-execution gate (plan + days-file commitment +
+        # holdout custodian identity) before the real work (Codex deep P1s).
+        partition = "holdout" if step.startswith("holdout") else "development"
+        assert f"verify-execution --partition {partition}" in cmd
+        assert cmd.index("verify-execution") < cmd.index("--days-file")
+        assert " && " in cmd
     dev_dl = by_step["development-download"]["command"]
     assert "--instrument binance-perp" in dev_dl
     assert "--feeds book_delta_v2,trades" in dev_dl
@@ -715,6 +722,14 @@ def test_builder_rejects_activity_proxies_and_mismatches():
     badlayer[0] = dict(badlayer[0], layer="sideways")
     with pytest.raises(ValueError, match="layer"):
         build_inventory(objects=badlayer)
+    # object_id is a pure function of (layer, product, day): verbose
+    # custodian-chosen store keys could smuggle activity metadata into the
+    # public inventory (Codex deep P2).
+    verbose = make_objects(included)
+    verbose[0] = dict(verbose[0],
+                      object_id="s3://bucket/book/2026-01-01/rows=12345")
+    with pytest.raises(ValueError, match="canonical derived id"):
+        build_inventory(objects=verbose)
 
 
 def test_handoff_rejects_foreign_evidence_and_forged_seal():
@@ -934,6 +949,34 @@ def test_cli_build_inventory_refuses_tracked_out_path(tmp_path, capsys):
     assert rc == 2
     assert "--out" in capsys.readouterr().err
     assert not os.path.exists(os.path.join(repo_root, "eval", "inventory.json"))
+
+
+def test_cli_verify_execution_gate(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pf, "_free_gb", lambda path: 100000.0)
+    monkeypatch.chdir(tmp_path)
+    assert run_cli(["plan", "--custodian-identity", CUSTODIAN,
+                    "--operator-identity", OPERATOR]) == 0
+    plan_path = pf.DEFAULT_OUT_DIR + "/g0bn_acquisition_plan.json"
+    # Development: days-file content matches the plan commitment -> OK.
+    assert run_cli(["verify-execution", "--partition", "development",
+                    "--plan", plan_path]) == 0
+    # Holdout refuses for anyone who is not the provisioned custodian identity
+    # (the packet's run_as is documentation; this is the enforcement).
+    rc = run_cli(["verify-execution", "--partition", "holdout",
+                  "--plan", plan_path])
+    assert rc == 2
+    assert "custodian" in capsys.readouterr().err
+    monkeypatch.setattr(pf.getpass, "getuser", lambda: CUSTODIAN)
+    assert run_cli(["verify-execution", "--partition", "holdout",
+                    "--plan", plan_path]) == 0
+    # An edited/stale days file refuses BEFORE any vendor I/O could start.
+    days_file = pf.DEV_DAYS_FILE
+    with open(days_file, "a") as f:
+        f.write("2026-02-01\n")
+    rc = run_cli(["verify-execution", "--partition", "development",
+                  "--plan", plan_path])
+    assert rc == 2
+    assert "days_file_sha256" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------- network isolation
