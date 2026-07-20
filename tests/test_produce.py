@@ -781,7 +781,11 @@ def test_degenerate_barrier_runtime_is_rejected_at_the_boundary(tmp_path):
     paths, _ = write_day_objects(world, "2025-11-01", tmp_path)
     for bad, match in ((make_runtime(min_returns=0), "min_returns"),
                        (make_runtime(vol_floor_bps=-1.0), "vol_floor_bps"),
-                       (make_runtime(vol_floor_bps=float("nan")), "vol_floor_bps")):
+                       (make_runtime(vol_floor_bps=float("nan")), "vol_floor_bps"),
+                       # a float top_k passes FeatureConfig's >=1 check but
+                       # would first explode inside heapq.nlargest post-burn
+                       (make_runtime(top_k=3.0), "top_k"),
+                       (make_runtime(top_k=True), "top_k")):
         with pytest.raises(ValueError, match=match):
             produce_development(
                 config, runtime=bad, day_objects={"2025-11-01": paths},

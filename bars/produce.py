@@ -462,6 +462,11 @@ def _validate_runtime(runtime: RuntimeParams, config: dict) -> None:
     # failing here keeps every deterministic operator-parameter error at the
     # boundary — in holdout, BEFORE the raw claim is consumed or any sealed
     # source is opened, where a late raise would burn the one-shot)
+    if isinstance(runtime.top_k, bool) or not isinstance(runtime.top_k, int):
+        # FeatureConfig only bounds top_k >= 1; a float would first explode
+        # inside heapq.nlargest mid-build — after the raw burn in holdout
+        _fail("runtime.top_k",
+              f"must be a plain integer ladder depth; got {runtime.top_k!r}")
     ThresholdSchedule(runtime.threshold)
     BarFeatureBuilder(FeatureConfig(top_k=runtime.top_k, tick_size=runtime.tick_size))
     validate_barrier_params(_barrier_params(
