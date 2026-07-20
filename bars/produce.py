@@ -93,6 +93,7 @@ from bars.snapshot import (
     REJECT_STALE,
     BookDelta,
     SnapshotRejection,
+    _validate_event as _validate_book_event,
     dual_book_reads,
     validate_book_top,
 )
@@ -302,8 +303,15 @@ def iter_normalized_book_events(source) -> Iterator[BookDelta]:
                         f"order: {key} after {last_key} — the certified normalized "
                         "contract requires a sorted stream")
                 last_key = key
-                yield BookDelta(int(origin), int(received), int(seq),
-                                str(side), float(price), float(size))
+                event = BookDelta(int(origin), int(received), int(seq),
+                                  str(side), float(price), float(size))
+                # T2's per-event contract, enforced AT THE READER: the lazily
+                # consumed label-path fold can reach rows dual_book_reads never
+                # validates (its checks cover only the consumed decision
+                # prefix), so a malformed side/price/size/receipt must fail
+                # closed before ANY fold sees the event
+                _validate_book_event(event)
+                yield event
     finally:
         pf.close()
         if stream is not None:

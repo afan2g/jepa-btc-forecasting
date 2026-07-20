@@ -485,6 +485,38 @@ def test_off_day_delta_rows_fail_closed(tmp_path):
             manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
 
 
+def test_malformed_rows_fail_closed_at_the_reader_boundary(tmp_path):
+    # Codex round 6: the lazily-consumed label-path fold can reach L2 rows that
+    # dual_book_reads never validates (its per-event checks cover only the
+    # consumed decision prefix), so the READER itself must apply the same
+    # side/price/size/received-time validation before any fold sees an event
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    t0 = 1_800_000_000_000_000_000
+    cases = (
+        ({"side": "foo"}, "side"),
+        ({"price": float("nan")}, "price"),
+        ({"size": -1.0}, "size"),
+        ({"received_time": t0 - 1}, "received_time"),
+    )
+    for i, (override, match) in enumerate(cases):
+        row = {"origin_time": t0, "received_time": t0 + 1, "seq": 1,
+               "side": "bid", "price": 99.99, "size": 5.0}
+        row.update(override)
+        path = tmp_path / f"bad-{i}.parquet"
+        pq.write_table(pa.table({
+            "origin_time": pa.array([row["origin_time"]], pa.int64()),
+            "received_time": pa.array([row["received_time"]], pa.int64()),
+            "seq": pa.array([row["seq"]], pa.int64()),
+            "side": pa.array([row["side"]]),
+            "price": pa.array([row["price"]], pa.float64()),
+            "size": pa.array([row["size"]], pa.float64()),
+        }), path)
+        with pytest.raises(ValueError, match=match):
+            list(iter_normalized_book_events(path))
+
+
 def test_pinned_open_rejects_non_regular_files(tmp_path):
     # Codex round 5: the fd-level gate must reject a FIFO/device swapped in
     # after the path checks (O_NOFOLLOW alone only stops symlinks, and a FIFO
