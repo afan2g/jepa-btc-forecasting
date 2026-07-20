@@ -1185,6 +1185,16 @@ for #68. #68 must replace both projections with the selected source's exact
 minimal-unit manifest (or a separately reviewed scoped planner), reconcile the
 downloader's estimate, and use that result plus quota headroom for approval and
 batch caps. It may not add spot or auxiliary futures feeds opportunistically.
+That scoped planner now exists (#102): `ingest/g0bn_acquisition_preflight.py`
+(`python -m ingest.g0bn_acquisition_preflight plan …`) deterministically plans
+exactly the 92-day, perp-only, three-product scope (276 units), reconciles the
+unit list and estimate against `ingest.download_lake_binance.plan_units`/
+`ingest.lake_binance.estimate_gb`, splits development from sealed-holdout
+destinations, defines the custodian/operator handoff (evidence contract plus
+the `g0bn-custodian-seal-content-v1` inventory emitter consumed by
+`eval.g0bn_freeze.validate_custody_inventory`), and emits an inert human
+approval packet under `data/reports/g0bn_acquisition_preflight/`. It performs
+no vendor I/O; its commands stay inert until explicit approval on #68.
 
 **Deferred six-month cross-venue budget:** the former `2025-11-01` through
 `2026-04-30` nine-unit plan remains approximately **222.63 GB** under the
