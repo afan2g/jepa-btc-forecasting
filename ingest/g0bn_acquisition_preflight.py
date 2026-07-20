@@ -271,15 +271,23 @@ def _identity(path: str, value) -> str:
 
 
 # ------------------------------------------------------------------ destination safety
+# Planned paths are embedded UNQUOTED in the packet's human-approved shell
+# commands, so every /-segment must be a shell-inert token — this subsumes
+# whitespace and rejects `;`, `$`, backticks, quotes, globs, and '.'/'..'.
+_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
 def _safe_repo_data_root(path: str, value, *, required_prefix: str) -> str:
     """A destination is safe only as a normalized RELATIVE path under one of the
-    git-ignored data roots — no absolute paths, no '..' escapes, no aliasing."""
+    git-ignored data roots — no absolute paths, no '..' escapes, no aliasing,
+    and only shell-inert segment tokens."""
     _str(path, value)
     if os.path.isabs(value) or "\\" in value:
         _fail(path, f"must be a relative repo path under {required_prefix}/; "
                     f"got {value!r}")
-    if any(ch.isspace() for ch in value):
-        _fail(path, f"must not contain whitespace (paths are interpolated into "
+    if not all(_PATH_SEGMENT_RE.match(part) for part in value.split("/")):
+        _fail(path, f"every path segment must be a shell-inert token matching "
+                    f"[A-Za-z0-9][A-Za-z0-9._-]* (paths are interpolated into "
                     f"approved shell commands); got {value!r}")
     if posixpath.normpath(value) != value or \
             any(part in ("..", ".", "") for part in value.split("/")):

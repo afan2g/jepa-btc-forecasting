@@ -260,6 +260,12 @@ def test_build_rejects_shared_nested_or_unsafe_roots():
         build_plan(dev_raw_root="data/raw/../secrets")
     with pytest.raises(ValueError, match="data/processed"):
         build_plan(dev_normalized_root="data/raw/normalized_in_raw")
+    # Roots land unquoted in approved shell commands: shell metacharacters and
+    # whitespace must fail the segment-token allowlist (Codex P2 on PR #103).
+    for evil in ("data/raw/lake;touch${IFS}x", "data/raw/lake`id`",
+                 "data/raw/lake dev", "data/raw/$(whoami)"):
+        with pytest.raises(ValueError, match="shell-inert"):
+            build_plan(dev_raw_root=evil)
 
 
 # ------------------------------------------------------------- fail-closed validation
