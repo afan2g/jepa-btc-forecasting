@@ -423,6 +423,82 @@ def test_boundary_spillover_reads_never_advance_feature_state(tmp_path,
         f"{len(spillover)} boundary-spillover bar(s) reached the feature builder"
 
 
+def test_targets_are_log_mid_ratio_bps(tmp_path, monkeypatch):
+    # Codex round 5: the protocol config pins labels.return_formula ==
+    # log_mid_ratio_bps_v1, while data.labels emits simple mid-ratio bps; the
+    # published y_fwd_bps must be the exact log conversion of T5's return
+    import math
+
+    import pandas as pd
+
+    import bars.produce as produce_mod
+    from data.labels import LabelRow
+
+    captured = {}
+    real_tbl = produce_mod.triple_barrier_labels
+
+    def spy(path, anchors, **kwargs):
+        for out in real_tbl(path, anchors, **kwargs):
+            if isinstance(out, LabelRow):
+                captured[(out.t_event, out.horizon)] = out.y_fwd_bps
+            yield out
+
+    monkeypatch.setattr(produce_mod, "triple_barrier_labels", spy)
+    result, _ = _build(tmp_path, [("2025-11-01", {}), ("2025-11-02", {})])
+    frame = pd.read_parquet(result.write.matrix_path)
+    assert (frame["y_fwd_bps"] != 0).any()
+    for _, row in frame.iterrows():
+        raw = captured[(row["t_event"], row["horizon"])]
+        assert row["y_fwd_bps"] == pytest.approx(
+            1e4 * math.log1p(raw / 1e4), rel=1e-14, abs=1e-14)
+
+
+def test_off_day_delta_rows_fail_closed(tmp_path):
+    # Codex round 5: trades and snapshots are day-bounded, so a delta row
+    # outside its object's declared UTC day must fail closed before it can
+    # advance any book fold
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from tests.produce_fixtures import DAY_NS, day_open_ns
+
+    world = SyntheticWorld()
+    config = produce_config()
+    paths, _ = write_day_objects(world, "2025-11-01", tmp_path)
+    delta_path = paths["binance_futures_l2_delta"]
+    table = pq.read_table(delta_path)
+    off_day = day_open_ns("2025-11-01") + DAY_NS + 5
+    extra = pa.table({
+        "origin_time": pa.array([off_day], pa.int64()),
+        "received_time": pa.array([off_day + 1], pa.int64()),
+        "seq": pa.array([10**9], pa.int64()),
+        "side": pa.array(["bid"]),
+        "price": pa.array([99.99], pa.float64()),
+        "size": pa.array([5.0], pa.float64()),
+    })
+    pq.write_table(pa.concat_tables([table.select(extra.column_names), extra]),
+                   delta_path)
+    with pytest.raises(ValueError, match="outside its declared day"):
+        produce_development(
+            config, runtime=make_runtime(), day_objects={"2025-11-01": paths},
+            matrix_path=tmp_path / "m.parquet",
+            manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
+
+
+def test_pinned_open_rejects_non_regular_files(tmp_path):
+    # Codex round 5: the fd-level gate must reject a FIFO/device swapped in
+    # after the path checks (O_NOFOLLOW alone only stops symlinks, and a FIFO
+    # open would otherwise block)
+    import os
+
+    from bars.produce import _open_pinned_fd
+
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="regular file"):
+        _open_pinned_fd(str(fifo))
+
+
 def test_post_open_snapshot_origin_fails_closed(tmp_path):
     import pyarrow as pa
     import pyarrow.parquet as pq

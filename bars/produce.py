@@ -65,6 +65,7 @@ import hashlib
 import json
 import math
 import os
+import stat as _stat
 from typing import Iterator, Mapping, NamedTuple
 
 import pandas as pd
@@ -320,8 +321,22 @@ def _sha256_file(path) -> str:
 def _open_pinned_fd(path: str) -> int:
     """The single holdout source-open primitive (and the read-spy seam):
     O_NOFOLLOW pins a regular file's descriptor so hashing and every later
-    decode read the same inode's bytes."""
-    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    decode read the same inode's bytes. O_NONBLOCK keeps a swapped-in FIFO from
+    blocking the open, and the fstat gate rejects anything that is not a
+    regular file AFTER the open — the path-level isfile/islink checks are
+    advisory only (they can be invalidated before this open)."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                 | getattr(os, "O_CLOEXEC", 0))
+    try:
+        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(
+                f"sealed object path {path!r} is not a regular file at open "
+                "time (FIFO/device/directory swap); custody objects must be "
+                "plain regular files")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 class _PinnedObject:
@@ -530,6 +545,23 @@ class _Candidate(NamedTuple):
     label_mid: float
 
 
+def _day_bounded_deltas(day: str, source) -> Iterator[BookDelta]:
+    """The day's L2 delta stream with the certified day-partition bound enforced
+    fail-closed: trades are day-bounded by bars_for_day and snapshot seeds by
+    the at-or-before-open check, so an off-day delta row (a next-day spill or a
+    prior-day duplicate inside a declared day object) is the one remaining way
+    out-of-partition events could advance a book fold — it must never fold."""
+    open_ns = _day_open_ns(day)
+    end_ns = open_ns + _DAY_NS
+    for e in iter_normalized_book_events(source):
+        if not (open_ns <= e.origin_time < end_ns):
+            raise ValueError(
+                f"L2 delta object for {day} carries origin_time {e.origin_time} "
+                f"outside its declared day [{open_ns}, {end_ns}); certified "
+                "day-partitioned objects may not mix days")
+        yield e
+
+
 def _seed_day_book_events(day: str, snapshot_path, delta_path) -> Iterator[BookDelta]:
     """The day's full book event stream: snapshot seed first (state at/before the
     day open — a post-open snapshot origin is a broken normalized object), then
@@ -550,7 +582,7 @@ def _seed_day_book_events(day: str, snapshot_path, delta_path) -> Iterator[BookD
                 f"after the day open {open_ns}; a day seed must be the book state "
                 "at or before the open")
         yield e
-    yield from iter_normalized_book_events(delta_path)
+    yield from _day_bounded_deltas(day, delta_path)
 
 
 def _segment_mid_path(segment: list, paths_for_day) -> Iterator[tuple]:
@@ -570,7 +602,7 @@ def _segment_mid_path(segment: list, paths_for_day) -> Iterator[tuple]:
             book.apply(Delta(e.origin_time, e.seq, e.side, e.price, e.size))
         if validate_book_top(book) is None:
             yield (open_ns, book.mid())
-        for e in iter_normalized_book_events(paths[L2_DELTA]):
+        for e in _day_bounded_deltas(day, paths[L2_DELTA]):
             book.apply(Delta(e.origin_time, e.seq, e.side, e.price, e.size))
             if validate_book_top(book) is None:
                 yield (e.origin_time, book.mid())
@@ -778,7 +810,13 @@ def _assemble_row(rec: _Candidate, tag: str, label: LabelRow,
     feat = rec.feat
     row = {name: float(value) for name, value in zip(FEATURE_COLS, feat[2:])}
     row.update({
-        "y_fwd_bps": float(label.y_fwd_bps),
+        # the protocol pins labels.return_formula == log_mid_ratio_bps_v1
+        # (eval.g0bn_config.LABEL_RETURN_FORMULA) while data.labels emits the
+        # simple mid-ratio in bps of P0; log(P/P0) == log1p(simple/1e4) converts
+        # the SAME physical move exactly into the pinned representation. The
+        # barrier decision (label/t_barrier) is T5's touch event either way —
+        # only the published magnitude changes space.
+        "y_fwd_bps": 1e4 * math.log1p(float(label.y_fwd_bps) / 1e4),
         "label": int(label.label),
         "t_event": int(rec.t_event),
         "t_barrier": int(label.t_barrier),
