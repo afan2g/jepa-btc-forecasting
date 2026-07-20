@@ -152,9 +152,26 @@ class SyntheticWorld:
                            "price": price, "quantity": TRADE_NOTIONAL / price})
         return trades
 
+    def _invalid_stretch(self, open_ns: int, start_s: int,
+                         seconds: int) -> list[dict]:
+        """Remove every ask level at start_s and restore them seconds later:
+        the true book is one-sided (invalid) over [start_s, start_s+seconds)."""
+        rows = []
+        t = open_ns + start_s * 10**9
+        asks = sorted(self._books["ask"].items())
+        for price, _size in asks:
+            del self._books["ask"][price]
+            rows.append(self._delta_row(t, "ask", price, 0.0))
+        t2 = open_ns + (start_s + seconds) * 10**9
+        for price, size in asks:
+            self._books["ask"][price] = size
+            rows.append(self._delta_row(t2, "ask", price, size))
+        return rows
+
     def day_events(self, day: str, *, first_delta_offset_ns: int = 100_000_000,
                    late_active: bool = False, late_trade: bool = False,
-                   one_sided_snapshot: bool = False, midnight_burst: bool = False
+                   one_sided_snapshot: bool = False, midnight_burst: bool = False,
+                   invalid_midday: bool = False
                    ) -> tuple[list[dict], list[dict], list[dict]]:
         """(snapshot_rows, delta_rows, trade_rows) for one day, advancing state.
 
@@ -171,7 +188,16 @@ class SyntheticWorld:
         snapshot = self.snapshot_rows(day)
         if one_sided_snapshot:
             snapshot = [r for r in snapshot if r["side"] == "bid"]
-        deltas = self._window_deltas(open_ns, 0, ACTIVE_SECONDS, first_delta_offset_ns)
+        if invalid_midday:
+            # asks vanish over [00:00:30, 00:00:32): the true book is invalid
+            # inside the forward label windows of earlier (valid) anchors
+            deltas = self._window_deltas(open_ns, 0, 30, first_delta_offset_ns)
+            deltas += self._invalid_stretch(open_ns, 30, 2)
+            deltas += self._window_deltas(open_ns, 32_000_000_000,
+                                          ACTIVE_SECONDS - 32, 0)
+        else:
+            deltas = self._window_deltas(open_ns, 0, ACTIVE_SECONDS,
+                                         first_delta_offset_ns)
         trades = self._window_trades(open_ns, 0, ACTIVE_SECONDS)
         if late_active:
             late_start = DAY_NS - 300_000_000_000  # 23:55:00, 240s of activity

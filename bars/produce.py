@@ -163,7 +163,9 @@ DROP_COUNT_CATEGORIES = (
     "before_start",       # feature support (t_feature_start) precedes the partition start
     "lookback_cap",       # observed look-back exceeds the pinned cap (drop, never clip)
     "prefilter",          # t_event + horizon + guard >= partition end (spec §2.2 rule)
-    "coverage_gap",       # horizon window overruns the contiguous covered day segment
+    "coverage_gap",       # horizon window lacks contiguous covered true-mid
+                          # support: it overruns the day segment or crosses an
+                          # invalid (one-sided/crossed) true-book stretch
     "label_rejection",    # T5 insufficient_vol_history / degenerate_barrier_width
     "actual_span",        # realized guarded span (t_barrier + guard) leaves the partition
 )
@@ -603,6 +605,41 @@ def _seed_day_book_events(day: str, snapshot_path, delta_path) -> Iterator[BookD
     yield from _day_bounded_deltas(day, delta_path)
 
 
+def _scan_day_validity(day: str, snapshot_path, delta_path) -> list:
+    """Full-object drain AND true-book validity scan for one day: every event
+    passes the validating reader (ordering, day bounds, per-event contract —
+    the lazy folds pull only what decisions/label windows need, so this pass is
+    what guarantees a bad tail row still fails the build), and the origin-axis
+    intervals over which the folded true book is missing/one-sided/invalid/
+    crossed are returned as half-open [start_ns, end_ns) pairs clamped to the
+    day. A label window crossing such an interval has no covered true-mid
+    support and must not resolve over an as-of-carried stale mid."""
+    open_ns = _day_open_ns(day)
+    end_ns = open_ns + _DAY_NS
+    book = OrderBook()
+    intervals: list = []
+    invalid_since: int | None = None
+    for e in _seed_day_book_events(day, snapshot_path, delta_path):
+        book.apply(Delta(e.origin_time, e.seq, e.side, e.price, e.size))
+        bad = validate_book_top(book) is not None
+        ts = max(e.origin_time, open_ns)  # seed events govern from the open
+        if bad and invalid_since is None:
+            invalid_since = ts
+        elif not bad and invalid_since is not None:
+            intervals.append((invalid_since, ts))
+            invalid_since = None
+    if invalid_since is not None:
+        intervals.append((invalid_since, end_ns))
+    return intervals
+
+
+def _window_hits_invalid(t_event: int, window_end: int, intervals: list) -> bool:
+    """Does the forward label window (t_event, window_end] cross any invalid
+    true-book interval [s, e)? The anchor instant itself is excluded — an
+    invalid book AT t_event is already a bar-level T2 rejection."""
+    return any(s <= window_end and e > t_event for s, e in intervals)
+
+
 def _segment_mid_path(segment: list, paths_for_day) -> Iterator[tuple]:
     """The TRUE target-mid path over one contiguous segment: per day, fold the
     snapshot seed silently, emit one as-of point at the day open, then one point
@@ -713,6 +750,7 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
     for segment in _segments(days):
         seg_end_ns = _day_open_ns(segment[-1]) + _DAY_NS
         seg_records: list[_Candidate] = []
+        seg_invalid: list = []  # invalid true-book intervals across the segment
         # cross-day coalesce carry: each day's LAST decision is held back one day
         # so an equal-watermark first bar of the next day supersedes it (the
         # last-closing, most-informed decision — same rule as
@@ -732,15 +770,16 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
                                        for p in G0BN_DATA_SOURCES}
             else:
                 source_sha256s[day] = verify_sha_for_day(day)
-            # full-object semantic validation BEFORE any fold: the lazy
-            # samplers/label passes pull only what decisions and label windows
-            # need, so a malformed or off-day row in the unpulled tail would
-            # otherwise never reach the validating reader while the manifest/
-            # attestation still claim the sealed object was consumed — a bad
-            # tail row is a bad object, never dead data
-            for _ in _seed_day_book_events(day, paths[L2_SNAPSHOT],
-                                           paths[L2_DELTA]):
-                pass
+            # full-object semantic validation + true-book validity scan BEFORE
+            # any fold: the lazy samplers/label passes pull only what decisions
+            # and label windows need, so a malformed or off-day row in the
+            # unpulled tail would otherwise never reach the validating reader
+            # while the manifest/attestation still claim the sealed object was
+            # consumed — a bad tail row is a bad object, never dead data. The
+            # scan also records the origin intervals with an invalid true book,
+            # which gate the per-horizon label windows below.
+            seg_invalid.extend(_scan_day_validity(day, paths[L2_SNAPSHOT],
+                                                  paths[L2_DELTA]))
             trades = read_normalized_trades(paths[TRADES])
             day_bars = list(coalesce_decision_bars(bars_for_day(
                 trades, day=day, schedule=schedule,
@@ -798,6 +837,10 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
                     counter.add("prefilter", tag)
                     continue
                 if seg_end_ns < partition_end_ns and upper >= seg_end_ns:
+                    counter.add("coverage_gap", tag)
+                    continue
+                if _window_hits_invalid(rec.t_event, rec.t_event + horizon_ns,
+                                        seg_invalid):
                     counter.add("coverage_gap", tag)
                     continue
                 surviving.append(rec)

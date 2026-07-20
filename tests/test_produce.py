@@ -331,6 +331,22 @@ def test_insufficient_vol_history_counts_label_rejections(tmp_path):
     assert all(n > 0 for n in result.row_counts.values())
 
 
+def test_invalid_true_book_stretch_drops_crossing_windows(tmp_path):
+    # Codex round 9: a one-sided/crossed true book INSIDE a forward label window
+    # means the window has no contiguous covered true-mid support — rows whose
+    # guarded window crosses the invalid stretch must drop (coverage_gap), never
+    # resolve over an as-of-carried stale mid
+    result, _ = _build(tmp_path, [("2025-11-01", {}),
+                                  ("2025-11-02", {"invalid_midday": True})])
+    coverage = result.drop_counts["coverage_gap"]
+    # 60s windows from the first ~30s of day 2 cross the [30s, 32s) hole
+    assert coverage["60s"] > 0
+    assert coverage["60s"] >= coverage["10s"] >= coverage["2s"]
+    # anchors AT invalid instants were already bar-level book rejections
+    assert all(n >= 1 for n in result.drop_counts["book_rejection"].values())
+    assert all(n > 0 for n in result.row_counts.values())
+
+
 def test_day_end_truncation_bar_is_masked(tmp_path):
     result, _ = _build(tmp_path, [("2025-11-05", {}),
                                   ("2025-11-06", {"late_trade": True})])
