@@ -147,16 +147,21 @@ class SyntheticWorld:
         return trades
 
     def day_events(self, day: str, *, first_delta_offset_ns: int = 100_000_000,
-                   late_active: bool = False,
-                   late_trade: bool = False) -> tuple[list[dict], list[dict], list[dict]]:
+                   late_active: bool = False, late_trade: bool = False,
+                   one_sided_snapshot: bool = False
+                   ) -> tuple[list[dict], list[dict], list[dict]]:
         """(snapshot_rows, delta_rows, trade_rows) for one day, advancing state.
 
         late_active adds a second active window at 23:55:00-23:59:00 so bars form
         close enough to the day boundary for per-horizon prefilter/coverage drops;
         late_trade injects one trade at 23:59:30, inside the truncated final cap
-        interval, forcing a CLOSE_DAY_END bar."""
+        interval, forcing a CLOSE_DAY_END bar; one_sided_snapshot omits the ask
+        side from the day's seed object (early bars reject as one_sided_book
+        until churn deltas restore the ask ladder)."""
         open_ns = day_open_ns(day)
         snapshot = self.snapshot_rows(day)
+        if one_sided_snapshot:
+            snapshot = [r for r in snapshot if r["side"] == "bid"]
         deltas = self._window_deltas(open_ns, 0, ACTIVE_SECONDS, first_delta_offset_ns)
         trades = self._window_trades(open_ns, 0, ACTIVE_SECONDS)
         if late_active:

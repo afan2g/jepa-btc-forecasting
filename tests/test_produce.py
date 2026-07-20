@@ -277,6 +277,29 @@ def test_coverage_gap_masks_windows_that_overrun_the_segment(tmp_path):
     assert result.drop_counts["prefilter"]["60s"] == 0
 
 
+def test_one_sided_seed_book_counts_book_rejections(tmp_path):
+    # day 2's seed object carries only bids and the first delta arrives at 5s:
+    # bars closing before any ask level is restored reject as one_sided_book
+    result, _ = _build(tmp_path, [
+        ("2025-11-01", {}),
+        ("2025-11-02", {"one_sided_snapshot": True,
+                        "first_delta_offset_ns": 5_000_000_000})])
+    assert all(n >= 1 for n in result.drop_counts["book_rejection"].values())
+
+
+def test_insufficient_vol_history_counts_label_rejections(tmp_path):
+    # min_returns above the trailing return count at day 2's first anchors:
+    # the earliest labeled bars reject with insufficient_vol_history and later
+    # bars (more path returns) still label
+    # day 1 contributes ~300 trailing returns; day 2's active window adds ~5/s,
+    # so 400 rejects the first ~19s of day-2 anchors and passes the rest
+    runtime = make_runtime(min_returns=400)
+    result, _ = _build(tmp_path, [("2025-11-01", {}), ("2025-11-02", {})],
+                       runtime=runtime)
+    assert all(n >= 1 for n in result.drop_counts["label_rejection"].values())
+    assert all(n > 0 for n in result.row_counts.values())
+
+
 def test_day_end_truncation_bar_is_masked(tmp_path):
     result, _ = _build(tmp_path, [("2025-11-05", {}),
                                   ("2025-11-06", {"late_trade": True})])
