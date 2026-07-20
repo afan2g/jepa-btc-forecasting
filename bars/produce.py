@@ -619,15 +619,28 @@ def _scan_day_validity(day: str, snapshot_path, delta_path) -> list:
     book = OrderBook()
     intervals: list = []
     invalid_since: int | None = None
-    for e in _seed_day_book_events(day, snapshot_path, delta_path):
-        book.apply(Delta(e.origin_time, e.seq, e.side, e.price, e.size))
+    prev_ts: int | None = None
+
+    def assess(ts: int) -> None:
+        nonlocal invalid_since
         bad = validate_book_top(book) is not None
-        ts = max(e.origin_time, open_ns)  # seed events govern from the open
+        ts = max(ts, open_ns)  # seed events govern from the open
         if bad and invalid_since is None:
             invalid_since = ts
         elif not bad and invalid_since is not None:
             intervals.append((invalid_since, ts))
             invalid_since = None
+
+    for e in _seed_day_book_events(day, snapshot_path, delta_path):
+        # validity is a per-TIMESTAMP property: the state at an instant is the
+        # last event's post-state there (T2/T5 coalescing), so a remove/re-add
+        # inside one origin_time must never mint a zero-length invalid interval
+        if prev_ts is not None and e.origin_time != prev_ts:
+            assess(prev_ts)
+        book.apply(Delta(e.origin_time, e.seq, e.side, e.price, e.size))
+        prev_ts = e.origin_time
+    if prev_ts is not None:
+        assess(prev_ts)
     if invalid_since is not None:
         intervals.append((invalid_since, end_ns))
     return intervals

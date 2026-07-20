@@ -347,6 +347,41 @@ def test_invalid_true_book_stretch_drops_crossing_windows(tmp_path):
     assert all(n > 0 for n in result.row_counts.values())
 
 
+def test_transient_same_timestamp_invalidity_is_not_a_gap(tmp_path):
+    # Codex round 10: a remove/re-add at ONE origin_time is transiently invalid
+    # per event, but the state AT that instant is the last event's (T2/T5
+    # coalescing) — the validity scan must assess per timestamp, never emit a
+    # zero-length [ts, ts) interval that falsely drops crossing windows
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from bars.produce import _scan_day_validity
+    from tests.produce_fixtures import day_open_ns
+
+    day = "2025-11-01"
+    open_ns = day_open_ns(day)
+    snap = tmp_path / "snap.parquet"
+    pq.write_table(pa.table({
+        "origin_time": pa.array([open_ns - 10**9] * 2, pa.int64()),
+        "received_time": pa.array([open_ns - 10**9 + 1] * 2, pa.int64()),
+        "seq": pa.array([1, 2], pa.int64()),
+        "side": pa.array(["bid", "ask"]),
+        "price": pa.array([99.0, 101.0], pa.float64()),
+        "size": pa.array([5.0, 5.0], pa.float64()),
+    }), snap)
+    ts = open_ns + 10 * 10**9
+    delta = tmp_path / "delta.parquet"
+    pq.write_table(pa.table({
+        "origin_time": pa.array([ts, ts], pa.int64()),
+        "received_time": pa.array([ts + 1, ts + 2], pa.int64()),
+        "seq": pa.array([3, 4], pa.int64()),
+        "side": pa.array(["ask", "ask"]),
+        "price": pa.array([101.0, 101.0], pa.float64()),
+        "size": pa.array([0.0, 5.0], pa.float64()),  # remove then re-add
+    }), delta)
+    assert _scan_day_validity(day, snap, delta) == []
+
+
 def test_day_end_truncation_bar_is_masked(tmp_path):
     result, _ = _build(tmp_path, [("2025-11-05", {}),
                                   ("2025-11-06", {"late_trade": True})])
