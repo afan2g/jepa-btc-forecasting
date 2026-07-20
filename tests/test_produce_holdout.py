@@ -140,7 +140,7 @@ def custody(tmp_path_factory):
     claim_path = root / "g0bn-raw-access-claim-v1.json"
     claim = _write_claim(claim_path, config=config, plan=plan, freeze=freeze)
     return {"root": root, "config": config, "inventory": inventory,
-            "plan": plan, "freeze": freeze, "claim": claim,
+            "plan": plan, "freeze": freeze, "run": run, "claim": claim,
             "claim_path": claim_path, "object_paths": object_paths}
 
 
@@ -241,6 +241,28 @@ def test_january_exercises_the_full_drop_taxonomy(materialized):
     # the schedule is live all month: no warm-up entries in the realized schedule
     sched = materialized["result"].realized_threshold_schedule
     assert not any(s["is_warmup"] for s in sched)
+
+
+def test_opt_in_time_cap_diagnostic_materializes_cleanly(custody, tmp_path):
+    # Codex round 4: a plan that opts into the emitted_by_time_cap diagnostic is
+    # a SUPPORTED frozen contract — the manifest must reproduce the plan's
+    # output contract verbatim (including its dtypes map), never extend it into
+    # a post-burn binding rejection
+    plan2 = build_holdout_plan(
+        custody["config"], custody["inventory"],
+        extra_cols=["latency_drift_bps", "emitted_by_time_cap"],
+        generated_at=GEN_AT)
+    freeze2 = build_freeze(custody["run"], plan2,
+                           inventory=custody["inventory"], generated_at=GEN_AT)
+    claim2 = tmp_path / "claim2.json"
+    _write_claim(claim2, config=custody["config"], plan=plan2, freeze=freeze2)
+    result = _materialize(custody, tmp_path, plan=plan2, freeze=freeze2,
+                          raw_access_claim_path=claim2)
+    assert result.write.row_count > 0
+    schema = pq.read_schema(tmp_path / "oos_matrix.parquet")
+    assert schema.field("emitted_by_time_cap").type == "bool"
+    assert result.write.physical_schema_sha256 == \
+        plan2["output_contract"]["expected_physical_schema_sha256"]
 
 
 def test_rematerialization_is_logically_identical(custody, materialized, tmp_path):

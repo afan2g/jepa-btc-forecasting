@@ -838,10 +838,20 @@ def _bar_clock_block(config: dict, realized_schedule_sha256: str) -> dict:
 
 def _base_manifest(config: dict, *, dataset_id: str, sources: list,
                    extra_cols: tuple, realized_schedule_sha256: str,
-                   generated_at: str) -> dict:
-    dtypes = dict(G0BN_COST_DTYPES)
-    if "emitted_by_time_cap" in extra_cols:
-        dtypes["emitted_by_time_cap"] = "bool"
+                   generated_at: str, dtypes: dict | None = None) -> dict:
+    if dtypes is None:
+        # development: pin every emitted diagnostic dtype (rebuildable, no
+        # frozen contract to reproduce — stricter is better)
+        dtypes = dict(G0BN_COST_DTYPES)
+        if "emitted_by_time_cap" in extra_cols:
+            dtypes["emitted_by_time_cap"] = "bool"
+    else:
+        # holdout: reproduce the plan's frozen output-contract dtypes VERBATIM —
+        # adding an unpinned entry (e.g. a bool pin for an opted-in
+        # emitted_by_time_cap) would fail verify_holdout_manifest_binding's
+        # exact dtypes comparison post-burn; the bool's physical type is still
+        # attested via the frozen Arrow schema hash (Codex round 4)
+        dtypes = dict(dtypes)
     return {
         "manifest_version": 1,
         "dataset_id": dataset_id,
@@ -1207,7 +1217,7 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
     manifest = _base_manifest(
         config, dataset_id=G0BN_OOS_DATASET_ID, sources=sources,
         extra_cols=extra_cols, realized_schedule_sha256=schedule_sha,
-        generated_at=generated_at)
+        generated_at=generated_at, dtypes=oc["dtypes"])
     base_params = {
         "builder": PRODUCER_VERSION,
         "source_mode": BINANCE_SINGLE_VENUE,
