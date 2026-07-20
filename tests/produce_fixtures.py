@@ -10,8 +10,12 @@ segments exercise the cross-day carry paths the orchestrator owns.
 Timing model (all int ns, absolute UTC):
 - deltas every 200 ms and trades every 100 ms inside the active window at the
   start of the day; the rest of the day is quiet (time-cap bars, stale books);
-- received_time = origin_time + RECEIVED_LAG_NS for every event, so the
-  observability gate is exercised but deterministic;
+- received_time = origin_time + a deterministic VARYING per-event lag (1 ms to
+  ~901 ms, cycling on seq). A constant lag would make the observable and true
+  label reads identical on every bar, leaving the received-time observability
+  gate and the P0/true-mid discipline untestable — with the cycle, some deltas
+  are not yet observable at nearby decisions, so observable state != label state
+  on a known subset of bars and latency_drift_bps is strictly positive somewhere;
 - the mid zigzags one tick per second (up, up, down, down), giving the trailing
   EWMA a real vol and letting horizontal barriers fire.
 """
@@ -24,7 +28,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 DAY_NS = 86_400 * 10**9
-RECEIVED_LAG_NS = 2_000_000
+RECEIVED_LAG_NS = 2_000_000  # snapshot/seed lag only: observable before any bar
+
+
+def event_lag_ns(seq: int) -> int:
+    """Deterministic per-event capture lag, cycling 1 ms .. ~901 ms on seq."""
+    return 1_000_000 + (seq % 7) * 150_000_000
 
 TICK = 0.01
 BASE_MID = 100.0
@@ -85,6 +94,11 @@ class SyntheticWorld:
                              "price": price, "size": size})
         return rows
 
+    def _delta_row(self, origin: int, side: str, price: float, size: float) -> dict:
+        seq = self._next_seq()
+        return {"origin_time": origin, "received_time": origin + event_lag_ns(seq),
+                "seq": seq, "side": side, "price": price, "size": size}
+
     def _shift_mid(self, origin: int, up: bool) -> list[dict]:
         """Move the whole top of book one tick via explicit add/remove deltas."""
         rows = []
@@ -95,21 +109,15 @@ class SyntheticWorld:
             book = self._books[side]
             if best not in book:
                 book[best] = LEVEL_SIZE
-                rows.append({"origin_time": origin, "received_time": origin + RECEIVED_LAG_NS,
-                             "seq": self._next_seq(), "side": side,
-                             "price": best, "size": LEVEL_SIZE})
+                rows.append(self._delta_row(origin, side, best, LEVEL_SIZE))
             crossing = [p for p in book
                         if ((p > best) if side == "bid" else (p < best))]
             for p in crossing:
                 del book[p]
-                rows.append({"origin_time": origin, "received_time": origin + RECEIVED_LAG_NS,
-                             "seq": self._next_seq(), "side": side,
-                             "price": p, "size": 0.0})
+                rows.append(self._delta_row(origin, side, p, 0.0))
             if tail not in book:
                 book[tail] = LEVEL_SIZE
-                rows.append({"origin_time": origin, "received_time": origin + RECEIVED_LAG_NS,
-                             "seq": self._next_seq(), "side": side,
-                             "price": tail, "size": LEVEL_SIZE})
+                rows.append(self._delta_row(origin, side, tail, LEVEL_SIZE))
         return rows
 
     def _window_deltas(self, open_ns: int, start_offset_ns: int, seconds: int,
@@ -126,10 +134,7 @@ class SyntheticWorld:
                 price = self.best(side)
                 size = LEVEL_SIZE + (0.5 if i % 4 < 2 else -0.5)
                 self._books[side][price] = size
-                deltas.append({"origin_time": origin,
-                               "received_time": origin + RECEIVED_LAG_NS,
-                               "seq": self._next_seq(), "side": side,
-                               "price": price, "size": size})
+                deltas.append(self._delta_row(origin, side, price, size))
         return deltas
 
     def _window_trades(self, open_ns: int, start_offset_ns: int,
@@ -140,15 +145,16 @@ class SyntheticWorld:
             origin = open_ns + start_offset_ns + 100_000_000 + i * t_step + 1
             side = "buy" if i % 2 == 0 else "sell"
             price = self.best("ask") if side == "buy" else self.best("bid")
+            seq = self._next_seq()
             trades.append({"origin_time": origin,
-                           "received_time": origin + RECEIVED_LAG_NS,
-                           "seq": self._next_seq(), "side": side,
+                           "received_time": origin + event_lag_ns(seq),
+                           "seq": seq, "side": side,
                            "price": price, "quantity": TRADE_NOTIONAL / price})
         return trades
 
     def day_events(self, day: str, *, first_delta_offset_ns: int = 100_000_000,
                    late_active: bool = False, late_trade: bool = False,
-                   one_sided_snapshot: bool = False
+                   one_sided_snapshot: bool = False, midnight_burst: bool = False
                    ) -> tuple[list[dict], list[dict], list[dict]]:
         """(snapshot_rows, delta_rows, trade_rows) for one day, advancing state.
 
@@ -157,7 +163,10 @@ class SyntheticWorld:
         late_trade injects one trade at 23:59:30, inside the truncated final cap
         interval, forcing a CLOSE_DAY_END bar; one_sided_snapshot omits the ask
         side from the day's seed object (early bars reject as one_sided_book
-        until churn deltas restore the ask ladder)."""
+        until churn deltas restore the ask ladder); midnight_burst injects a
+        threshold-crossing trade run just before midnight whose last capture lag
+        crosses into the next day, so the closing bar's monotone watermark lands
+        past the day end (the T9 boundary-spillover mask must drop it)."""
         open_ns = day_open_ns(day)
         snapshot = self.snapshot_rows(day)
         if one_sided_snapshot:
@@ -175,6 +184,18 @@ class SyntheticWorld:
                            "seq": self._next_seq(), "side": "buy",
                            "price": self.best("ask"),
                            "quantity": TRADE_NOTIONAL / self.best("ask")})
+        if midnight_burst:
+            # enough rapid prints to cross the trailing threshold several times,
+            # every one captured ~700ms late: each burst-closing bar's watermark
+            # lands past midnight while every origin stays inside the day
+            n_burst = 40
+            for i in range(n_burst):
+                origin = open_ns + DAY_NS - 500_000_000 + i * 10_000_000
+                trades.append({"origin_time": origin,
+                               "received_time": origin + 700_000_000,
+                               "seq": self._next_seq(), "side": "buy",
+                               "price": self.best("ask"),
+                               "quantity": TRADE_NOTIONAL / self.best("ask")})
         return snapshot, deltas, trades
 
 

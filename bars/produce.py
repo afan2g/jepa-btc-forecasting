@@ -21,14 +21,19 @@ merged T1-T8 stages, with two entry points and no generic third path:
   inconsistency raises: after the raw burn the runner maps any raise to terminal
   INCONCLUSIVE (spec section 6.3 step 5 — an error is never a new exclusion).
 
-Pipeline (per contiguous included-day segment, bounded memory: one day of trades,
-one streaming book fold, and the assembled matrix rows — never a full day of book
-events in memory):
+Pipeline (per contiguous included-day segment, bounded memory: one day of trades/
+bars/reads at a time, one streaming book fold, slim per-candidate records, and the
+assembled matrix rows — never a full day of book events and never a segment of
+member-trade tuples in memory):
 
   normalized trades -> `bars.clock.bars_for_day` (trailing threshold from PRIOR
   days only; watermark/index chained across days) -> `coalesce_decision_bars`
-  over the concatenated segment stream -> per-day `bars.snapshot.dual_book_reads`
-  (day book seeded from the day's own snapshot object) -> `bars.features`
+  within the day plus a one-bar cross-day carry (an equal-watermark first bar of
+  the next day supersedes the held decision — the same last-closing rule, without
+  retaining any day's bar list) -> per-day `bars.snapshot.dual_book_reads`
+  (day book seeded from the day's own snapshot object; a bar whose watermark
+  crosses its day's midnight is masked as day_end_truncation, because its true
+  origin cut would need the next day's events) -> `bars.features`
   (one builder per build; the prior read carries across days and gaps — the
   lookback cap owns the drop) -> per-horizon partition/coverage prefilter ->
   `data.labels.triple_barrier_labels` per horizon over the segment's true-mid
@@ -57,7 +62,6 @@ import hashlib
 import json
 import math
 import os
-from itertools import chain
 from typing import Iterator, Mapping, NamedTuple
 
 import pandas as pd
@@ -83,7 +87,6 @@ from bars.features import (
 from bars.modes import BINANCE_SINGLE_VENUE, VENUE_BINANCE, require_venue_allowed
 from bars.snapshot import (
     REJECT_STALE,
-    BarBookReads,
     BookDelta,
     SnapshotRejection,
     dual_book_reads,
@@ -163,6 +166,19 @@ L2_SNAPSHOT, L2_DELTA, TRADES = G0BN_DATA_SOURCES
 
 _L2_COLUMNS = ("origin_time", "received_time", "seq", "side", "price", "size")
 _SPREAD_REGIME_RULE = "tight_le_boundary_wide_gt_boundary_v1"
+
+# The exactly-implemented frozen clock rules (spec §3.2: "Code must compare
+# runtime-resolved values to the config before the raw-access burn"). The producer
+# executes T1's trailing windowed arithmetic mean over coverage-normalized prior-day
+# notional, and records every certified included day at full coverage (a gappy day
+# is excluded at the day level by the certified gap policy, never partially
+# weighted). A config pinning any other rule identity must fail closed here rather
+# than silently attesting a schedule "derived under" a rule this code never ran.
+# clock.warmup_bars stays a #69/#93 forward pin: T1's schedule warms up in DAYS
+# (RuntimeParams.threshold.warmup_days), so a bar-count pin is not reconcilable
+# by this producer and is deliberately not consumed.
+_ADAPTIVE_THRESHOLD_RULE = "trailing_window_mean_threshold_v1"
+_COVERAGE_NORMALIZATION_RULE = "full_day_coverage_v1"
 
 _RAW_CLAIM_FIELDS = (
     "schema", "holdout_universe_id", "transaction_id", "protocol_config_sha256",
@@ -367,6 +383,23 @@ def _validate_runtime(runtime: RuntimeParams, config: dict) -> None:
         _fail("producer.lookback_cap_ns",
               "exceeds features.max_lookback_ns: retained rows could not satisfy "
               "the declared manifest look-back bound")
+    if config["producer"]["lookback_cap_ns"] >= _DAY_NS:
+        _fail("producer.lookback_cap_ns",
+              "must be under one UTC day: a day-partitioned producer cannot honor "
+              "a look-back cap that could bridge an entire excluded/uncovered day "
+              "(the cap owns the cross-gap feature-window drop)")
+    if clock["adaptive_threshold_update_rule"] != _ADAPTIVE_THRESHOLD_RULE:
+        _fail("clock.adaptive_threshold_update_rule",
+              f"unknown rule {clock['adaptive_threshold_update_rule']!r}; this "
+              f"producer implements only {_ADAPTIVE_THRESHOLD_RULE!r} (T1's "
+              "trailing windowed mean) — attesting a schedule under a foreign "
+              "rule identity would be a false attestation")
+    if clock["coverage_normalization"] != _COVERAGE_NORMALIZATION_RULE:
+        _fail("clock.coverage_normalization",
+              f"unknown rule {clock['coverage_normalization']!r}; this producer "
+              f"implements only {_COVERAGE_NORMALIZATION_RULE!r} (certified "
+              "included days are complete by the day-level gap policy and are "
+              "recorded at full coverage)")
     labels = config["labels"]
     if labels["tp_multiplier"] != labels["sl_multiplier"]:
         _fail("labels", "tp_multiplier != sl_multiplier: data.labels implements "
@@ -428,18 +461,30 @@ class _DropCounter:
 
 
 class _Candidate(NamedTuple):
-    """One surviving coalesced bar decision (bar-level gates passed)."""
+    """One surviving coalesced bar decision (bar-level gates passed). Deliberately
+    slim — the Bar (with its full member-trade tuple) and the book reads are
+    released as soon as classification prices the row, so segment-lifetime memory
+    is candidates + assembled rows, never a segment of raw trades/books."""
     day: str
-    bar: Bar
-    reads: BarBookReads
+    t_event: int
+    emitted_by_time_cap: bool
     feat: FeatureRow
     cost: CostRow
+    label_mid: float
 
 
 def _seed_day_book_events(day: str, snapshot_path, delta_path) -> Iterator[BookDelta]:
     """The day's full book event stream: snapshot seed first (state at/before the
     day open — a post-open snapshot origin is a broken normalized object), then
-    the day's deltas."""
+    the day's deltas.
+
+    Certified-source ordering invariant (fail-closed downstream): a day's
+    snapshot must carry origins at/after the PRIOR day's last consumed delta —
+    it represents a later book state. A violating feed would make the first
+    observable read of the day regress behind the carried prior read, and
+    `bars.features.BarFeatureBuilder` raises on that regression rather than
+    emitting a row from an incoherent seed (#93 reconciles the normalized-seed
+    contract that guarantees this)."""
     open_ns = _day_open_ns(day)
     for e in iter_normalized_book_events(snapshot_path):
         if e.origin_time > open_ns:
@@ -509,13 +554,57 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
     rows: list[dict] = []
     watermark = 0
     next_index = 0
-    last_emitted_t: int | None = None
+    prev_segment_last_t: int | None = None
+
+    def classify(day: str, bar: Bar, read, seg_records: list) -> None:
+        """First-failure-wins drop accounting for one coalesced decision, in the
+        pinned DROP_COUNT_CATEGORIES order. A bar whose monotone watermark lands
+        at/after its emission day's end is a day-boundary truncation artifact:
+        its true origin cut at t_event would need the NEXT day's events, which
+        this day-scoped feed deliberately does not extend into — masking it
+        mirrors the CLOSE_DAY_END rule and keeps P0 exact for every labeled row."""
+        day_end_like = (bar.close_reason == CLOSE_DAY_END
+                        or bar.t_event >= _day_open_ns(day) + _DAY_NS)
+        if isinstance(read, SnapshotRejection):
+            if bar.is_warmup:
+                counter.add_all("warmup")
+            elif day_end_like:
+                counter.add_all("day_end_truncation")
+            elif read.reason == REJECT_STALE:
+                counter.add_all("staleness")
+            else:
+                counter.add_all("book_rejection")
+            return
+        feat = builder.build(bar, read.observable)
+        if bar.is_warmup:
+            counter.add_all("warmup")
+            return
+        if day_end_like:
+            counter.add_all("day_end_truncation")
+            return
+        if isinstance(feat, FeatureRejection):
+            counter.add_all("feature_rejection")
+            return
+        if feat.t_feature_start < partition_start_ns:
+            counter.add_all("before_start")
+            return
+        if bar.t_event - feat.t_feature_start > lookback_cap_ns:
+            counter.add_all("lookback_cap")
+            return
+        seg_records.append(_Candidate(
+            day=day, t_event=bar.t_event,
+            emitted_by_time_cap=bar.emitted_by_time_cap, feat=feat,
+            cost=cost_row(read, assumption=assumption),
+            label_mid=read.label.mid))
 
     for segment in _segments(days):
         seg_end_ns = _day_open_ns(segment[-1]) + _DAY_NS
         seg_records: list[_Candidate] = []
-        day_bars: dict[str, list] = {}
-        index_day: dict[int, str] = {}
+        # cross-day coalesce carry: each day's LAST decision is held back one day
+        # so an equal-watermark first bar of the next day supersedes it (the
+        # last-closing, most-informed decision — same rule as
+        # coalesce_decision_bars), without retaining any day's full bar list.
+        carry: tuple | None = None
         for day in segment:
             # every source open is an authorized single-venue open
             require_venue_allowed(BINANCE_SINGLE_VENUE, VENUE_BINANCE)
@@ -531,10 +620,10 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
             else:
                 source_sha256s[day] = verify_sha_for_day(day)
             trades = read_normalized_trades(paths[TRADES])
-            bars = list(bars_for_day(
+            day_bars = list(coalesce_decision_bars(bars_for_day(
                 trades, day=day, schedule=schedule,
                 time_cap_ns=int(config["clock"]["time_cap_ns"]),
-                initial_watermark_ns=watermark, start_index=next_index))
+                initial_watermark_ns=watermark, start_index=next_index)))
             day_threshold = schedule.threshold_for(day)
             realized_schedule.append({"day": day,
                                       "threshold": float(day_threshold.threshold),
@@ -543,68 +632,46 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
             schedule.record_day(day, notional, 1.0)
             history.append({"day": day, "completed_notional": float(notional),
                             "covered_fraction": 1.0})
-            day_bars[day] = bars
-            for b in bars:
-                index_day[b.index] = day
-            if bars:
-                watermark = bars[-1].t_event
-                next_index = bars[-1].index + 1
-
-        seg_bars = list(coalesce_decision_bars(
-            chain.from_iterable(day_bars[d] for d in segment)))
-        if seg_bars and last_emitted_t is not None \
-                and seg_bars[0].t_event <= last_emitted_t:
-            raise ValueError(
-                f"decision watermark {seg_bars[0].t_event} does not increase past "
-                f"the previous segment's last decision {last_emitted_t}; the "
-                "certified received-lag cap should make cross-gap ties impossible")
-        if seg_bars:
-            last_emitted_t = seg_bars[-1].t_event
-
-        for day in segment:
-            bars_of_day = [b for b in seg_bars if index_day[b.index] == day]
-            if not bars_of_day:
-                continue
-            paths = paths_for_day(day)
+            del trades
+            if not day_bars:
+                continue  # a trade-free day: the carry is held for a later tie
+            watermark = day_bars[-1].t_event
+            next_index = day_bars[-1].index + 1
+            if prev_segment_last_t is not None \
+                    and day_bars[0].t_event <= prev_segment_last_t:
+                raise ValueError(
+                    f"decision watermark {day_bars[0].t_event} does not "
+                    f"increase past the previous segment's last decision "
+                    f"{prev_segment_last_t}; the certified received-lag cap "
+                    "should make cross-gap ties impossible")
+            prev_segment_last_t = None  # only guards the segment's first bars
+            if carry is not None:
+                if day_bars[0].t_event == carry[1].t_event:
+                    carry = None  # superseded by the more-informed later bar
+                elif day_bars[0].t_event < carry[1].t_event:
+                    raise ValueError(  # impossible under the chained watermark
+                        f"decision watermark regressed across the {day} boundary")
+                else:
+                    classify(carry[0], carry[1], carry[2], seg_records)
+                    carry = None
             reads_iter = dual_book_reads(
                 _seed_day_book_events(day, paths[L2_SNAPSHOT], paths[L2_DELTA]),
-                [b.t_event for b in bars_of_day],
+                [b.t_event for b in day_bars],
                 staleness_cap_ns=staleness_cap_ns, top_k=runtime.top_k)
-            for bar, read in zip(bars_of_day, reads_iter):
-                if isinstance(read, SnapshotRejection):
-                    if bar.is_warmup:
-                        counter.add_all("warmup")
-                    elif bar.close_reason == CLOSE_DAY_END:
-                        counter.add_all("day_end_truncation")
-                    elif read.reason == REJECT_STALE:
-                        counter.add_all("staleness")
-                    else:
-                        counter.add_all("book_rejection")
-                    continue
-                feat = builder.build(bar, read.observable)
-                if bar.is_warmup:
-                    counter.add_all("warmup")
-                    continue
-                if bar.close_reason == CLOSE_DAY_END:
-                    counter.add_all("day_end_truncation")
-                    continue
-                if isinstance(feat, FeatureRejection):
-                    counter.add_all("feature_rejection")
-                    continue
-                if feat.t_feature_start < partition_start_ns:
-                    counter.add_all("before_start")
-                    continue
-                if bar.t_event - feat.t_feature_start > lookback_cap_ns:
-                    counter.add_all("lookback_cap")
-                    continue
-                seg_records.append(_Candidate(
-                    day=day, bar=bar, reads=read, feat=feat,
-                    cost=cost_row(read, assumption=assumption)))
+            pairs = list(zip(day_bars, reads_iter))
+            for bar, read in pairs[:-1]:
+                classify(day, bar, read, seg_records)
+            carry = (day, pairs[-1][0], pairs[-1][1])
+            del day_bars, pairs
+        if carry is not None:
+            classify(carry[0], carry[1], carry[2], seg_records)
+            prev_segment_last_t = carry[1].t_event
+            carry = None
 
         for tag, horizon_ns in ladder:
             surviving: list[_Candidate] = []
             for rec in seg_records:
-                upper = rec.bar.t_event + horizon_ns + guard_ns
+                upper = rec.t_event + horizon_ns + guard_ns
                 if upper >= partition_end_ns:
                     counter.add("prefilter", tag)
                     continue
@@ -617,7 +684,7 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
             params = _barrier_params(config, runtime, {tag: horizon_ns})
             labels = triple_barrier_labels(
                 _segment_mid_path(segment, paths_for_day),
-                ((rec.bar.t_event, rec.reads.label.mid) for rec in surviving),
+                ((rec.t_event, rec.label_mid) for rec in surviving),
                 params=params,
                 coverage_end_ns=min(seg_end_ns, partition_end_ns))
             bound_ns = min(seg_end_ns, partition_end_ns)
@@ -650,11 +717,11 @@ def _assemble_row(rec: _Candidate, tag: str, label: LabelRow,
     row.update({
         "y_fwd_bps": float(label.y_fwd_bps),
         "label": int(label.label),
-        "t_event": int(rec.bar.t_event),
+        "t_event": int(rec.t_event),
         "t_barrier": int(label.t_barrier),
         "t_feature_start": int(feat.t_feature_start),
         # availability_lag_ns == 0: synchronous decide-and-act (spec §3.2)
-        "t_available": int(rec.bar.t_event),
+        "t_available": int(rec.t_event),
         "cost_bps": float(rec.cost.cost_bps),
         "half_spread_bps": float(rec.cost.half_spread_bps),
         "uniqueness": 0.0,  # filled per horizon after assembly
@@ -664,7 +731,7 @@ def _assemble_row(rec: _Candidate, tag: str, label: LabelRow,
     if "latency_drift_bps" in extra_cols:
         row["latency_drift_bps"] = float(rec.cost.latency_drift_bps)
     if "emitted_by_time_cap" in extra_cols:
-        row["emitted_by_time_cap"] = bool(rec.bar.emitted_by_time_cap)
+        row["emitted_by_time_cap"] = bool(rec.emitted_by_time_cap)
     return row
 
 
@@ -1089,6 +1156,11 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
         "manifest_sha256": write.manifest_sha256,
         "matrix_file_sha256": write.matrix_file_sha256,
         "physical_schema_sha256": write.physical_schema_sha256,
+        # audit context, deliberately hash-bearing: the attestation is a one-shot
+        # record of THIS materialization (67-E preflights/pins the output paths
+        # pre-burn and binds this attestation hash into the matrix claim as
+        # produced); rematerialization identity lives in build_id/logical-row/
+        # counts/schedule hashes, never in the attestation self-hash
         "matrix_path": str(write.matrix_path),
         "manifest_path": str(write.manifest_path),
         "row_count": write.row_count,

@@ -28,8 +28,13 @@ from bars.produce import (
 from eval.g0bn_identity import development_data_identity
 from eval.writer import classify_manifest
 from eval.manifest import load_manifest
-from tests.g0bn_dev_fixtures import dev_config
-from tests.g0bn_protocol_fixtures import make_clock, make_exclusions
+from tests.g0bn_dev_fixtures import dev_config, runtime_cv
+from tests.g0bn_protocol_fixtures import (
+    make_clock,
+    make_exclusions,
+    make_features,
+    make_producer,
+)
 from tests.produce_fixtures import (
     SEED_THRESHOLD,
     TARGET_BARS_PER_DAY,
@@ -138,17 +143,18 @@ def dev_build(tmp_path_factory):
     world = SyntheticWorld()
     config = produce_config()
     days = ("2025-11-01", "2025-11-02", "2025-11-03")
-    day_objects = {}
+    day_objects, day_shas = {}, {}
     for day in days:
-        paths, _ = write_day_objects(world, day, root)
+        paths, shas = write_day_objects(world, day, root)
         day_objects[day] = paths
+        day_shas[day] = shas
     result = produce_development(
         config, runtime=make_runtime(), day_objects=day_objects,
         matrix_path=root / "model_matrix.parquet",
         manifest_path=root / "feature_manifest.json",
         generated_at=GEN_AT)
     return {"config": config, "root": root, "result": result,
-            "day_objects": day_objects}
+            "day_objects": day_objects, "day_shas": day_shas}
 
 
 def test_development_build_publishes_valid_g0bn_artifacts(dev_build):
@@ -168,6 +174,10 @@ def test_development_build_publishes_valid_g0bn_artifacts(dev_build):
     for col in ("cost_bps", "half_spread_bps", "latency_drift_bps"):
         assert str(frame[col].dtype) == "float64"
     assert (frame["latency_drift_bps"] >= 0).all()
+    # the varying capture lag makes the observable and true reads genuinely
+    # differ on some bars: a wiring bug collapsing the two cuts (or destroying
+    # the received gate) would zero the drift everywhere
+    assert (frame["latency_drift_bps"] > 0).any()
     assert frame.duplicated(["t_event", "horizon"]).sum() == 0
 
 
@@ -356,6 +366,123 @@ def test_glob_and_missing_paths_are_refused(tmp_path):
     with pytest.raises(ValueError, match="existing regular file"):
         produce_development(
             config, runtime=make_runtime(), day_objects={"2025-11-01": gone},
+            matrix_path=tmp_path / "m.parquet",
+            manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
+
+
+def test_dev_manifest_source_hashes_reconcile_with_the_real_files(dev_build):
+    manifest = load_manifest(dev_build["result"].write.manifest_path)
+    by_day_product = {(s["day"], s["name"]): s["sha256"]
+                      for s in manifest["sources"]
+                      if isinstance(s, dict) and "day" in s}
+    expected = {(day, product): sha
+                for day, shas in dev_build["day_shas"].items()
+                for product, sha in shas.items()}
+    assert by_day_product == expected
+
+
+def test_midnight_watermark_spillover_bars_are_masked(tmp_path):
+    # a pre-midnight burst whose capture lag crosses the day end: the closing
+    # bars' watermarks land past their day's midnight, so their true origin cut
+    # is not constructible from the day-scoped feed — they must be masked as
+    # day-boundary truncation artifacts, never labeled with a truncated P0
+    result, _ = _build(tmp_path, [("2025-11-07", {}),
+                                  ("2025-11-08", {"midnight_burst": True}),
+                                  ("2025-11-09", {})])
+    assert all(n >= 2 for n in result.drop_counts["day_end_truncation"].values())
+    assert all(n > 0 for n in result.row_counts.values())
+
+
+def test_post_open_snapshot_origin_fails_closed(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from tests.produce_fixtures import day_open_ns
+
+    world = SyntheticWorld()
+    config = produce_config()
+    paths, _ = write_day_objects(world, "2025-11-01", tmp_path)
+    bad_origin = day_open_ns("2025-11-01") + 10
+    pq.write_table(pa.table({
+        "origin_time": pa.array([bad_origin], pa.int64()),
+        "received_time": pa.array([bad_origin + 1], pa.int64()),
+        "seq": pa.array([1], pa.int64()),
+        "side": pa.array(["bid"]),
+        "price": pa.array([99.99], pa.float64()),
+        "size": pa.array([5.0], pa.float64()),
+    }), paths["binance_futures_l2_snapshot"])
+    with pytest.raises(ValueError, match="after the day open"):
+        produce_development(
+            config, runtime=make_runtime(), day_objects={"2025-11-01": paths},
+            matrix_path=tmp_path / "m.parquet",
+            manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
+
+
+def test_empty_build_is_never_published(tmp_path):
+    # a single fresh dev day is entirely warm-up: every row drops and the build
+    # must refuse to publish an empty matrix
+    with pytest.raises(ValueError, match="no surviving rows"):
+        _build(tmp_path, [("2025-11-01", {})])
+    assert not (tmp_path / "matrix.parquet").exists()
+
+
+def test_l2_objects_stream_batchwise(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+
+    real_pf = pq.ParquetFile
+
+    class GuardedParquetFile:
+        """Full-table .read() is forbidden for L2 objects: the bounded-memory
+        contract streams book events batchwise (trades may materialize a day)."""
+
+        def __init__(self, path, *args, **kwargs):
+            self._l2 = ("l2_snapshot" in str(path)) or ("l2_delta" in str(path))
+            self._pf = real_pf(path, *args, **kwargs)
+
+        def read(self, *args, **kwargs):
+            if self._l2:
+                raise AssertionError(
+                    "L2 book objects must stream via iter_batches, never a "
+                    "full-day read()")
+            return self._pf.read(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._pf, name)
+
+    monkeypatch.setattr(pq, "ParquetFile", GuardedParquetFile)
+    result, _ = _build(tmp_path, [("2025-11-01", {}), ("2025-11-02", {})])
+    assert all(n > 0 for n in result.row_counts.values())
+
+
+def test_foreign_clock_rule_identities_fail_closed(tmp_path):
+    world = SyntheticWorld()
+    paths, _ = write_day_objects(world, "2025-11-01", tmp_path)
+    for override, match in (
+            ({"adaptive_threshold_update_rule": "median_of_medians_v9"},
+             "adaptive_threshold_update_rule"),
+            ({"coverage_normalization": "no_normalization_v3"},
+             "coverage_normalization")):
+        config = produce_config(clock=make_clock(
+            target_bars_per_day=TARGET_BARS_PER_DAY, time_cap_ns=TIME_CAP_NS,
+            **override))
+        with pytest.raises(ValueError, match=match):
+            produce_development(
+                config, runtime=make_runtime(),
+                day_objects={"2025-11-01": paths},
+                matrix_path=tmp_path / "m.parquet",
+                manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
+
+
+def test_day_bridging_lookback_cap_fails_closed(tmp_path):
+    world = SyntheticWorld()
+    paths, _ = write_day_objects(world, "2025-11-01", tmp_path)
+    config = produce_config(
+        producer=make_producer(lookback_cap_ns=2 * 86_400 * 10**9),
+        features=make_features(max_lookback_ns=2 * 86_400 * 10**9),
+        cv=runtime_cv(embargo_ns=2 * 86_400 * 10**9))
+    with pytest.raises(ValueError, match="under one UTC day"):
+        produce_development(
+            config, runtime=make_runtime(), day_objects={"2025-11-01": paths},
             matrix_path=tmp_path / "m.parquet",
             manifest_path=tmp_path / "m.json", generated_at=GEN_AT)
 

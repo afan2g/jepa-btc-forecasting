@@ -279,6 +279,8 @@ def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatc
     order = []
     real_open = builtins.open
     real_pf = pq.ParquetFile
+    real_meta = pq.read_metadata
+    real_schema = pq.read_schema
 
     def spy_open(file, mode="r", *args, **kwargs):
         order.append((str(file), mode))
@@ -288,10 +290,27 @@ def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatc
                str(tmp_path / "oos_manifest.json"),
                str(tmp_path / "g0bn-materialization-attestation-v1.json")}
 
-    def spy_parquet(path, *args, **kwargs):
+    def _reject_derived(path):
         if str(path) in derived:
             raise AssertionError(f"derived artifact reopened via parquet: {path}")
+
+    # every pyarrow entry that can touch a parquet payload OR footer records into
+    # the same order log, so the claim-precedes-source assertion is closed over
+    # footer/metadata reads too, not only builtins.open events
+    def spy_parquet(path, *args, **kwargs):
+        _reject_derived(path)
+        order.append((str(path), "parquet"))
         return real_pf(path, *args, **kwargs)
+
+    def spy_metadata(path, *args, **kwargs):
+        _reject_derived(path)
+        order.append((str(path), "parquet-metadata"))
+        return real_meta(path, *args, **kwargs)
+
+    def spy_schema(path, *args, **kwargs):
+        _reject_derived(path)
+        order.append((str(path), "parquet-schema"))
+        return real_schema(path, *args, **kwargs)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("generic pandas/pyarrow table loaders must not run "
@@ -299,6 +318,8 @@ def test_read_spy_claim_precedes_every_source_open(custody, tmp_path, monkeypatc
 
     monkeypatch.setattr(builtins, "open", spy_open)
     monkeypatch.setattr(pq, "ParquetFile", spy_parquet)
+    monkeypatch.setattr(pq, "read_metadata", spy_metadata)
+    monkeypatch.setattr(pq, "read_schema", spy_schema)
     monkeypatch.setattr(pq, "read_table", forbidden)
     monkeypatch.setattr(pq, "read_pandas", forbidden)
     import pandas as pd
@@ -378,12 +399,26 @@ def test_foreign_object_hash_rejects_before_any_decode(custody, tmp_path,
 # --------------------------------------------------------- allowlist discipline
 
 
-def test_missing_extra_duplicate_and_glob_objects_reject(custody, tmp_path):
+def test_missing_extra_duplicate_and_glob_objects_reject(custody, tmp_path,
+                                                         monkeypatch):
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    object_files = {str(p) for p in custody["object_paths"].values()}
+
     paths = dict(custody["object_paths"])
     oid = "custody/normalized/binance_futures_l2_delta/2026-01-03"
     removed = paths.pop(oid)
     with pytest.raises(ValueError, match="missing sealed normalized object"):
         _materialize(custody, tmp_path, object_paths=paths)
+    # allowlist-discipline rejections happen before ANY sealed payload byte is
+    # opened (issue #94: reject before payload access where possible)
+    assert not (set(opened) & object_files)
 
     paths = dict(custody["object_paths"])
     paths["custody/normalized/binance_futures_trades/2026-01-14"] = removed
@@ -400,6 +435,8 @@ def test_missing_extra_duplicate_and_glob_objects_reject(custody, tmp_path):
     paths[oid] = str(tmp_path / "*.parquet")
     with pytest.raises(ValueError, match="glob"):
         _materialize(custody, tmp_path, object_paths=paths)
+    # none of the four rejections opened a sealed payload
+    assert not (set(opened) & object_files)
 
 
 def test_incompatible_drop_count_schema_fails_closed(custody, tmp_path):

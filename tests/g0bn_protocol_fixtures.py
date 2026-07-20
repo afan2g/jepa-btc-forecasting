@@ -311,9 +311,12 @@ def make_clock(**over) -> dict:
         "target_bars_per_day": 5000,
         "time_cap_ns": 60_000_000_000,
         "warmup_bars": 50,
-        "coverage_normalization": "coverage_normalized_threshold_v1",
+        # The rule identities the T9 producer actually implements and reconciles
+        # (bars/produce.py _ADAPTIVE_THRESHOLD_RULE/_COVERAGE_NORMALIZATION_RULE);
+        # a foreign spelling here fails _validate_runtime, never a silent re-pin.
+        "coverage_normalization": "full_day_coverage_v1",
         "monotone_watermark": True,
-        "adaptive_threshold_update_rule": "causal_daily_ewma_threshold_v1",
+        "adaptive_threshold_update_rule": "trailing_window_mean_threshold_v1",
         "development_end_state_sha256": sha_hex("clock-dev-end-state"),
     }
     d.update(over)
