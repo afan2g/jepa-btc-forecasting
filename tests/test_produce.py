@@ -347,6 +347,28 @@ def test_invalid_true_book_stretch_drops_crossing_windows(tmp_path):
     assert all(n > 0 for n in result.row_counts.values())
 
 
+def test_l2_objects_stream_a_constant_number_of_times(tmp_path, monkeypatch):
+    # Codex round 15: label passes must share ONE segment path stream across the
+    # horizon ladder — per-horizon replays would scale L2 I/O linearly with the
+    # ladder. Expected passes per delta object: validity scan + dual reads +
+    # one shared label path = 3, independent of the horizon count.
+    import pyarrow.parquet as pq
+
+    opens = []
+    real_pf = pq.ParquetFile
+
+    def spy(path, *args, **kwargs):
+        opens.append(str(path))
+        return real_pf(path, *args, **kwargs)
+
+    monkeypatch.setattr(pq, "ParquetFile", spy)
+    result, _ = _build(tmp_path, [("2025-11-01", {}), ("2025-11-02", {})])
+    assert all(n > 0 for n in result.row_counts.values())
+    for day in ("2025-11-01", "2025-11-02"):
+        delta = str(tmp_path / f"binance_futures_l2_delta-{day}.parquet")
+        assert opens.count(delta) == 3, (day, opens.count(delta))
+
+
 def test_transient_same_timestamp_invalidity_is_not_a_gap(tmp_path):
     # Codex round 10: a remove/re-add at ONE origin_time is transiently invalid
     # per event, but the state AT that instant is the last event's (T2/T5

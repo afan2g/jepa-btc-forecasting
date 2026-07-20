@@ -66,6 +66,7 @@ import json
 import math
 import os
 import stat as _stat
+from itertools import tee
 from typing import Iterator, Mapping, NamedTuple
 
 import pandas as pd
@@ -870,9 +871,10 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
             prev_segment_last_t = carry[1].t_event
             carry = None
 
-        for tag, horizon_ns in ladder:
-            surviving: list[_Candidate] = []
-            for rec in seg_records:
+        # per-(candidate, horizon) survival gates first (pure arithmetic, no I/O)
+        survivors: dict[str, list] = {tag: [] for tag, _ in ladder}
+        for rec in seg_records:
+            for tag, horizon_ns in ladder:
                 upper = rec.t_event + horizon_ns + guard_ns
                 if upper >= partition_end_ns:
                     counter.add("prefilter", tag)
@@ -884,25 +886,41 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
                                         seg_invalid):
                     counter.add("coverage_gap", tag)
                     continue
-                surviving.append(rec)
-            if not surviving:
-                continue
-            params = _barrier_params(config, runtime, {tag: horizon_ns})
-            labels = triple_barrier_labels(
-                _segment_mid_path(segment, paths_for_day),
-                ((rec.t_event, rec.label_mid) for rec in surviving),
-                params=params,
-                coverage_end_ns=min(seg_end_ns, partition_end_ns))
-            bound_ns = min(seg_end_ns, partition_end_ns)
-            for rec, out in zip(surviving, labels):
-                if isinstance(out, LabelRejection):
-                    counter.add("label_rejection", tag)
-                    continue
-                if out.t_barrier + guard_ns >= bound_ns:
-                    counter.add("actual_span", tag)
-                    continue
-                rows.append(_assemble_row(rec, tag, out,
-                                          boundary_spread_tick, extra_cols))
+                survivors[tag].append(rec)
+        live = [(tag, hns) for tag, hns in ladder if survivors[tag]]
+        if not live:
+            continue
+        # ONE shared segment path pass, tee'd across the live horizons and
+        # consumed in lockstep per candidate below: every branch's frontier
+        # stays within (max horizon - min horizon) of the others, so the tee
+        # buffer holds only that sliver of path points — never a replayed
+        # per-horizon stream over multi-GB January objects (dead horizons get
+        # no branch: an unconsumed tee branch would pin the whole stream)
+        bound_ns = min(seg_end_ns, partition_end_ns)
+        branches = tee(_segment_mid_path(segment, paths_for_day), len(live))
+        label_iters = {
+            tag: triple_barrier_labels(
+                branch,
+                ((rec.t_event, rec.label_mid) for rec in survivors[tag]),
+                params=_barrier_params(config, runtime, {tag: hns}),
+                coverage_end_ns=bound_ns)
+            for (tag, hns), branch in zip(live, branches)
+        }
+        ptr = {tag: 0 for tag, _ in live}
+        for rec in seg_records:
+            for tag, _hns in live:
+                s = survivors[tag]
+                if ptr[tag] < len(s) and s[ptr[tag]] is rec:
+                    ptr[tag] += 1
+                    out = next(label_iters[tag])
+                    if isinstance(out, LabelRejection):
+                        counter.add("label_rejection", tag)
+                        continue
+                    if out.t_barrier + guard_ns >= bound_ns:
+                        counter.add("actual_span", tag)
+                        continue
+                    rows.append(_assemble_row(rec, tag, out,
+                                              boundary_spread_tick, extra_cols))
 
     if not rows:
         raise ValueError(
