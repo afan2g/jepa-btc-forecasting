@@ -268,6 +268,19 @@ CAPTURE_METHODS_BY_MECHANISM = {
 }
 _LOCAL_CAPTURE_MARKERS = ("chmod", "umask", "chown", "setfacl")
 
+# Excluded-day reasons the emitter admits into the PUBLIC sealed inventory:
+# integrity/availability categories only (spec section 5.1 — "outcome-blind
+# exclusions only"). Free text could smuggle outcome prose ("price crashed"),
+# so a reason is an allowlisted code, never a sentence; the exact condition
+# details stay inside custody behind the per-day evidence_sha256 pin.
+OUTCOME_BLIND_EXCLUSION_REASONS = (
+    "custody_source_gap",        # vendor partition absent or incomplete
+    "custody_sequence_gap",      # certified sequence-continuity failure
+    "custody_schema_drift",      # vendor schema failed the certified contract
+    "custody_one_sided_book",    # book integrity failure (one-sided/crossed)
+    "custody_transfer_failure",  # download failed after the retry policy
+)
+
 # Identities are interpolated into the packet's copy-paste shell commands and
 # into canonical hashes, so they must be shell-inert single tokens.
 _IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]*\Z")
@@ -1177,6 +1190,13 @@ def build_custody_inventory(*, custodian_identity: str, operator_identity: str,
                          f"[{HOLDOUT_DAYS[0]}, {HOLDOUT_DAYS[-1]}]")
         _dict(epath, entry, ("reason", "evidence_sha256"))
         _str(f"{epath}.reason", entry["reason"])
+        if entry["reason"] not in OUTCOME_BLIND_EXCLUSION_REASONS:
+            _fail(f"{epath}.reason",
+                  f"{entry['reason']!r} is not an outcome-blind exclusion code "
+                  f"(allowed: {OUTCOME_BLIND_EXCLUSION_REASONS}); free-text "
+                  "reasons could publish outcome/activity information in the "
+                  "sealed inventory (spec section 5.1) — details stay inside "
+                  "custody behind evidence_sha256")
         _sha256(f"{epath}.evidence_sha256", entry["evidence_sha256"])
     included = [d for d in HOLDOUT_DAYS if d not in excluded_days]
     if not isinstance(objects, list) or not objects:

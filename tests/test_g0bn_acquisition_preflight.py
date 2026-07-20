@@ -693,7 +693,14 @@ def test_builder_rejects_activity_proxies_and_mismatches():
             custodian_identity="someone-else",))
     with pytest.raises(ValueError, match="holdout"):
         build_inventory(excluded_days={
-            "2026-02-01": {"reason": "x", "evidence_sha256": sha_hex("x")}})
+            "2026-02-01": {"reason": "custody_source_gap",
+                           "evidence_sha256": sha_hex("x")}})
+    # Free-text exclusion reasons could publish outcome prose in the sealed
+    # inventory; only allowlisted outcome-blind codes pass (Codex P2, PR #103).
+    with pytest.raises(ValueError, match="outcome-blind"):
+        build_inventory(excluded_days={
+            "2026-01-14": {"reason": "price crashed 5%",
+                           "evidence_sha256": sha_hex("x")}})
     # Malformed object VALUES fail closed before the canonical sort — a
     # config-less mint must never seal a garbage body (typed like the consumer).
     mixed = make_objects(included)
