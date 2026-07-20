@@ -466,17 +466,22 @@ def test_packet_commands_are_exact_inert_and_lock_serialized():
     assert "--feeds book_delta_v2,trades" in dev_dl
     assert f"--days-file {plan['development']['days_file']}" in dev_dl
     assert f"--out {plan['development']['raw_root']}" in dev_dl
-    assert "--allow-broad" in dev_dl
+    assert "--max-gb" in dev_dl
     assert "--jobs 1" in dev_dl
     hold_dl = by_step["holdout-download"]["command"]
     assert f"--out {plan['holdout']['raw_root']}" in hold_dl
     assert by_step["holdout-download"]["run_as"] == "custodian"
     assert by_step["holdout-recon"]["run_as"] == "custodian"
     assert by_step["development-download"]["run_as"] == "operator"
-    blob = json.dumps(commands)
+    # Executable command strings only (notes may legitimately NAME a forbidden
+    # flag while explaining its absence). --allow-broad would bypass the
+    # est_gb > --max-gb refusal in lake_binance.check_broad_gate, so no packet
+    # command may carry it: the approved cap is expressed by raising --max-gb
+    # (Codex P1 on PR #103).
+    cmd_blob = " ".join(c["command"] for c in commands)
     for forbidden in ("funding", "open_interest", "liquidations", "binance-spot",
-                      "--start", "--end", "--overwrite"):
-        assert forbidden not in blob
+                      "--start", "--end", "--overwrite", "--allow-broad"):
+        assert forbidden not in cmd_blob
 
 
 def test_packet_caps_cover_estimates_within_quota():

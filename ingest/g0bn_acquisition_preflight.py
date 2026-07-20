@@ -653,7 +653,11 @@ def _download_command(plan: dict, block: dict, cap_gb: float) -> str:
         f"--days-file {block['days_file']} "
         f"--out {block['raw_root']} "
         f"--report-dir {block['report_root']}/download "
-        f"--max-gb {cap_gb:g} --allow-broad "
+        # NO --allow-broad: it would bypass exactly the est_gb > max_gb soft
+        # gate (lake_binance.check_broad_gate), turning the advertised cap into
+        # a no-op. The approved cap is expressed by RAISING --max-gb instead,
+        # so any estimate drift above it refuses before transfer (Codex P1).
+        f"--max-gb {cap_gb:g} "
         f"--retries {ex['retries']} --jobs {ex['jobs']} --resume")
 
 
@@ -710,8 +714,10 @@ def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dic
             "approval_required": True,
             "notes": "First vendor-I/O step. Resumable and atomic; hard-stops "
                      "on quota/auth (exit 2), partial (exit 3), gate (exit 4). "
-                     "Before running, verify sha256sum of the days file equals "
-                     "the plan's development.days_file_sha256.",
+                     "--allow-broad is deliberately absent so --max-gb remains "
+                     "a binding refusal. Before running, verify sha256sum of "
+                     "the days file equals the plan's "
+                     "development.days_file_sha256.",
         },
         {
             "step": "development-recon",
@@ -829,7 +835,9 @@ def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dic
             "quota_gb_per_month": lb.QUOTA_GB,
             "headroom_gb": lb.DEFAULT_HEADROOM_GB,
             "jobs": 1,
-            "allow_broad_required": True,
+            # --allow-broad would disable the est_gb > max_gb refusal, so the
+            # cap is expressed by raising --max-gb and the flag is forbidden.
+            "allow_broad_forbidden": True,
         },
         "vendor_cost": {
             "vendor_cost_model": "Crypto Lake individual subscription "
