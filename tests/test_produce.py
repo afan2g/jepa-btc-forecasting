@@ -359,19 +359,33 @@ def test_insufficient_vol_history_counts_label_rejections(tmp_path):
 
 
 def test_invalid_true_book_stretch_drops_crossing_windows(tmp_path):
-    # Codex round 9: a one-sided/crossed true book INSIDE a forward label window
-    # means the window has no contiguous covered true-mid support — rows whose
-    # guarded window crosses the invalid stretch must drop (coverage_gap), never
-    # resolve over an as-of-carried stale mid
+    # Codex round 9 + round 18: a one-sided/crossed true book inside the
+    # RESOLVED label span [t_event, t_barrier] means the resolution has no
+    # covered true-mid support — those rows drop (coverage_gap). But a row
+    # whose barrier touches BEFORE the stretch resolved entirely on covered
+    # points and must be KEPT even though its nominal window crosses.
+    import pandas as pd
+
+    from tests.produce_fixtures import day_open_ns
+
     result, _ = _build(tmp_path, [("2025-11-01", {}),
                                   ("2025-11-02", {"invalid_midday": True})])
     coverage = result.drop_counts["coverage_gap"]
-    # 60s windows from the first ~30s of day 2 cross the [30s, 32s) hole
+    # rows whose RESOLUTION reaches into/past the [30s, 32s) hole drop
     assert coverage["60s"] > 0
     assert coverage["60s"] >= coverage["10s"] >= coverage["2s"]
     # anchors AT invalid instants were already bar-level book rejections
     assert all(n >= 1 for n in result.drop_counts["book_rejection"].values())
     assert all(n > 0 for n in result.row_counts.values())
+    # early-resolving 60s rows with a nominally-crossing window are KEPT: their
+    # resolved span ended on covered points before the stretch began
+    frame = pd.read_parquet(result.write.matrix_path)
+    stretch_start = day_open_ns("2025-11-02") + 30 * 10**9
+    sixty = frame[frame["horizon"] == "60s"]
+    kept_crossing = sixty[(sixty["t_event"] < stretch_start)
+                          & (sixty["t_event"] + 60 * 10**9 > stretch_start)
+                          & (sixty["t_barrier"] <= stretch_start)]
+    assert len(kept_crossing) > 0
 
 
 def test_l2_objects_stream_a_constant_number_of_times(tmp_path, monkeypatch):

@@ -879,7 +879,11 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
             prev_segment_last_t = carry[1].t_event
             carry = None
 
-        # per-(candidate, horizon) survival gates first (pure arithmetic, no I/O)
+        # per-(candidate, horizon) survival gates first (pure arithmetic, no
+        # I/O). The invalid-stretch gate deliberately does NOT run here: an
+        # early-touching barrier can resolve entirely on covered points before
+        # a later invalid stretch, so that check runs post-labeling against the
+        # RESOLVED span (t_event, t_barrier] below (Codex round 18).
         survivors: dict[str, list] = {tag: [] for tag, _ in ladder}
         for rec in seg_records:
             for tag, horizon_ns in ladder:
@@ -888,10 +892,6 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
                     counter.add("prefilter", tag)
                     continue
                 if seg_end_ns < partition_end_ns and upper >= seg_end_ns:
-                    counter.add("coverage_gap", tag)
-                    continue
-                if _window_hits_invalid(rec.t_event, rec.t_event + horizon_ns,
-                                        seg_invalid):
                     counter.add("coverage_gap", tag)
                     continue
                 survivors[tag].append(rec)
@@ -923,6 +923,14 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
                     out = next(label_iters[tag])
                     if isinstance(out, LabelRejection):
                         counter.add("label_rejection", tag)
+                        continue
+                    if _window_hits_invalid(rec.t_event, out.t_barrier,
+                                            seg_invalid):
+                        # the RESOLUTION consumed the gapped stretch (a late
+                        # touch or an as-of vertical over missing support);
+                        # an early touch before the stretch resolved entirely
+                        # on covered points and is kept
+                        counter.add("coverage_gap", tag)
                         continue
                     if out.t_barrier + guard_ns >= bound_ns:
                         counter.add("actual_span", tag)
