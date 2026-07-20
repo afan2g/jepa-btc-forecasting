@@ -83,6 +83,8 @@ def make_evidence(**over) -> dict:
         "custodian_identity": CUSTODIAN,
         "operator_identity": OPERATOR,
         "resource": "s3://g0bn-custody/holdout",
+        "covered_paths": [pf.HOLDOUT_RAW_ROOT, pf.HOLDOUT_NORMALIZED_ROOT,
+                          pf.HOLDOUT_REPORT_ROOT],
         "custodian_owns_objects": True,
         "operator_payload_read_denied": True,
         "operator_footer_read_denied": True,
@@ -395,6 +397,7 @@ def test_days_file_content_commitment_matches_written_files(tmp_path,
                                                             monkeypatch):
     plan = build_plan()
     monkeypatch.setattr(pf, "_free_gb", lambda path: 100000.0)
+    monkeypatch.chdir(tmp_path)
     out = tmp_path / "out"
     assert run_cli(["plan", "--custodian-identity", CUSTODIAN,
                     "--operator-identity", OPERATOR,
@@ -404,6 +407,12 @@ def test_days_file_content_commitment_matches_written_files(tmp_path,
                         ("holdout_days.txt", plan["holdout"])):
         digest = hashlib.sha256((out / name).read_bytes()).hexdigest()
         assert digest == block["days_file_sha256"]
+        # A custom --out-dir run must ALSO refresh the plan-pinned paths the
+        # packet commands reference, so they can never be missing or stale
+        # (Codex P2 on PR #103).
+        pinned = tmp_path / block["days_file"]
+        assert hashlib.sha256(pinned.read_bytes()).hexdigest() == \
+            block["days_file_sha256"]
     tampered = copy.deepcopy(plan)
     tampered["holdout"]["days_file_sha256"] = sha_hex("tampered-days")
     with pytest.raises(ValueError, match="days_file_sha256"):
@@ -690,6 +699,30 @@ def test_handoff_rejects_foreign_evidence_and_forged_seal():
     forged["objects"][0]["sha256"] = sha_hex("forged-object")
     with pytest.raises(ValueError, match="custodian seal|checksum"):
         pf.validate_custody_handoff(forged, ev, config)
+
+
+def test_handoff_binds_evidence_coverage_to_plan_custody_scope():
+    plan = build_plan()
+    ev = make_evidence()
+    inv = build_inventory(evidence=ev)
+    config = sealed_config(inv, ev)
+    # Full coverage of custody.holdout_custody_scope passes with the plan...
+    assert pf.validate_custody_handoff(inv, ev, config, plan=plan) is inv
+    # ...but evidence captured for only a subset of the planned destinations
+    # (e.g. missing the report root, whose run records carry January
+    # rows/bytes) cannot vouch (Codex P2 on PR #103).
+    partial = make_evidence(covered_paths=[pf.HOLDOUT_RAW_ROOT,
+                                           pf.HOLDOUT_NORMALIZED_ROOT])
+    inv_partial = build_inventory(evidence=partial)
+    config_partial = sealed_config(inv_partial, partial)
+    with pytest.raises(ValueError, match="holdout custody scope"):
+        pf.validate_custody_handoff(inv_partial, partial, config_partial,
+                                    plan=plan)
+    # Evidence must always carry a coverage attestation at all.
+    incomplete = make_evidence()
+    del incomplete["covered_paths"]
+    with pytest.raises(ValueError, match="missing"):
+        pf.validate_permission_policy_evidence(incomplete)
 
 
 def test_consumer_rejects_insufficient_included_days():

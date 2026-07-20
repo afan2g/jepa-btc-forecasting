@@ -235,7 +235,7 @@ _CUSTODY_FIELDS = (
 
 _EVIDENCE_FIELDS = (
     "schema", "mechanism", "custodian_identity", "operator_identity", "resource",
-    "custodian_owns_objects", "operator_payload_read_denied",
+    "covered_paths", "custodian_owns_objects", "operator_payload_read_denied",
     "operator_footer_read_denied", "operator_storage_listing_denied",
     "operator_policy_write_denied", "effective_policy_capture", "captured_at",
 )
@@ -807,12 +807,16 @@ def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dic
                        "--objects <sealed_objects.json> "
                        "--excluded-days <excluded_days.json> "
                        "--config <g0bn_protocol_config.json> "
+                       f"--plan {DEFAULT_OUT_DIR}/g0bn_acquisition_plan.json "
                        "--out <custody_inventory.json>",
             "approval_required": True,
             "notes": "Offline, custodian-only. Must reproduce the custody-seal "
                      "step's custodian_seal_sha256 byte-identically; a "
                      "mismatch or validation failure means the seal is NOT "
-                     "final and nothing downstream may consume it.",
+                     "final and nothing downstream may consume it. --plan "
+                     "makes the handoff verify that the evidence covers every "
+                     "planned holdout destination "
+                     "(custody.holdout_custody_scope).",
         },
     ]
     packet = {
@@ -1040,6 +1044,20 @@ def validate_permission_policy_evidence(evidence: dict) -> dict:
         _fail(path, "custodian_identity and operator_identity must be distinct "
                     "(separation of custody; spec section 5.1)")
     _str(f"{path}.resource", evidence["resource"])
+    # The storage-layer `resource` names the policy target in that layer's own
+    # vocabulary (bucket/prefix/mount); `covered_paths` attests, in PLAN
+    # vocabulary, exactly which planned destinations that policy covers — the
+    # handoff validator checks it against custody.holdout_custody_scope so
+    # evidence captured for the wrong prefix or a subset cannot vouch.
+    covered = evidence["covered_paths"]
+    if not isinstance(covered, list) or not covered:
+        _fail(f"{path}.covered_paths",
+              "must be a non-empty array of the planned destination paths the "
+              "captured policy covers")
+    for i, p in enumerate(covered):
+        _str(f"{path}.covered_paths[{i}]", p)
+    if len(set(covered)) != len(covered):
+        _fail(f"{path}.covered_paths", "must be unique")
     _exact(f"{path}.custodian_owns_objects",
            evidence["custodian_owns_objects"], True)
     _exact(f"{path}.operator_payload_read_denied",
@@ -1169,13 +1187,18 @@ def build_custody_inventory(*, custodian_identity: str, operator_identity: str,
     return inventory
 
 
-def validate_custody_handoff(inventory: dict, evidence: dict, config: dict) -> dict:
+def validate_custody_handoff(inventory: dict, evidence: dict, config: dict, *,
+                             plan: dict | None = None) -> dict:
     """The full custodian->operator handoff gate: the REUSED
     `validate_custody_inventory` consumer contract first (identities, day
     accounting, canonical allowlist, seal-content commitment against the
     config's pins), then the couplings only this module defines — the
     permission-policy evidence must be valid, hash to the inventory's
-    `permission_policy_sha256`, and name the same identities."""
+    `permission_policy_sha256`, and name the same identities. With `plan`
+    (the packet's custody-seal-verify step always passes it), the evidence
+    must additionally attest coverage of EVERY planned holdout destination
+    (`custody.holdout_custody_scope`): a policy captured for the wrong prefix
+    or only a subset of the stores/manifests/report root cannot vouch."""
     validate_custody_inventory(inventory, config)
     validate_permission_policy_evidence(evidence)
     expected = hash_obj(evidence)
@@ -1189,6 +1212,21 @@ def validate_custody_handoff(inventory: dict, evidence: dict, config: dict) -> d
             _fail("custody handoff",
                   f"evidence {k} {evidence[k]!r} does not match the sealed "
                   f"inventory identity {inventory[k]!r}")
+    if plan is not None:
+        validate_acquisition_plan(plan)
+        for k in ("custodian_identity", "operator_identity"):
+            if plan["custody"][k] != inventory[k]:
+                _fail("custody handoff",
+                      f"plan custody {k} {plan['custody'][k]!r} does not match "
+                      f"the sealed inventory identity {inventory[k]!r}")
+        missing = [p for p in plan["custody"]["holdout_custody_scope"]
+                   if p not in evidence["covered_paths"]]
+        if missing:
+            _fail("custody handoff",
+                  f"the permission-policy evidence does not cover the planned "
+                  f"holdout custody scope: uncovered destination(s) {missing}; "
+                  "a policy captured for the wrong prefix or a subset of the "
+                  "stores/manifests/report root cannot vouch for custody")
     return inventory
 
 
@@ -1277,6 +1315,17 @@ def _cmd_plan(args) -> int:
                            ("holdout_days.txt", plan["holdout"]["days"])):
             with open(os.path.join(out_dir, name), "w") as f:
                 f.write(_days_file_content(days))
+        # The packet commands reference the PLAN-PINNED day-file paths, not
+        # --out-dir, so refresh those too (cwd-relative, always under the
+        # ignored data/reports/ root by validation): a custom --out-dir run
+        # must never leave the referenced paths missing or stale.
+        for block in (plan["development"], plan["holdout"]):
+            pinned = os.path.abspath(block["days_file"])
+            if os.path.realpath(pinned) != os.path.realpath(
+                    os.path.join(out_dir, os.path.basename(block["days_file"]))):
+                os.makedirs(os.path.dirname(pinned), exist_ok=True)
+                with open(pinned, "w") as f:
+                    f.write(_days_file_content(block["days"]))
         # Measure the volume that will actually hold the raw/normalized stores:
         # data/ is commonly a symlink/mount onto a bigger disk than the repo.
         data_root = os.path.join(_ROOT, "data")
@@ -1314,6 +1363,11 @@ def _cmd_build_inventory(args) -> int:
         excluded_days = _read_json(args.excluded_days)
         objects = _read_json(args.objects)
         config = _read_json(args.config) if args.config else None
+        plan = _read_json(args.plan) if args.plan else None
+        if plan is not None and config is None:
+            raise ValueError("--plan requires --config: the scope-coverage "
+                             "check runs inside the config-anchored handoff "
+                             "validation")
         inventory = build_custody_inventory(
             custodian_identity=args.custodian_identity,
             operator_identity=args.operator_identity,
@@ -1321,7 +1375,7 @@ def _cmd_build_inventory(args) -> int:
             evidence=evidence, excluded_days=excluded_days, objects=objects,
             config=config)
         if config is not None:
-            validate_custody_handoff(inventory, evidence, config)
+            validate_custody_handoff(inventory, evidence, config, plan=plan)
         _write_json(out_path, inventory)
     except (ValueError, OSError, json.JSONDecodeError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -1372,6 +1426,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                        help="optional validated g0bn-protocol-config-v1 JSON; "
                             "when given, the inventory is validated through "
                             "eval.g0bn_freeze.validate_custody_inventory")
+    inv_p.add_argument("--plan", default=None,
+                       help="optional g0bn-acquisition-plan-v1 JSON (requires "
+                            "--config); the evidence must then cover every "
+                            "planned holdout destination")
     inv_p.add_argument("--out", required=True, help="output inventory JSON path")
     return ap.parse_args(argv)
 
