@@ -632,12 +632,18 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
             else:
                 counter.add_all("book_rejection")
             return
+        if day_end_like:
+            # a boundary-truncation read is computed from a knowingly truncated
+            # event basis (the day-scoped feed omits next-day events observable
+            # at its post-midnight watermark), so unlike ordinary rejections it
+            # must NOT advance the feature builder's prior-read state — the next
+            # retained bar's OFI/t_feature_start would difference against an
+            # incomplete observation (Codex round 2)
+            counter.add_all("warmup" if bar.is_warmup else "day_end_truncation")
+            return
         feat = builder.build(bar, read.observable)
         if bar.is_warmup:
             counter.add_all("warmup")
-            return
-        if day_end_like:
-            counter.add_all("day_end_truncation")
             return
         if isinstance(feat, FeatureRejection):
             counter.add_all("feature_rejection")

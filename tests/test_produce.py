@@ -393,6 +393,36 @@ def test_midnight_watermark_spillover_bars_are_masked(tmp_path):
     assert all(n > 0 for n in result.row_counts.values())
 
 
+def test_boundary_spillover_reads_never_advance_feature_state(tmp_path,
+                                                              monkeypatch):
+    # Codex round-2 P2: a bar whose watermark crosses its day's midnight carries
+    # a read computed from a knowingly truncated event basis (the day-scoped
+    # feed omits next-day events observable at that t_event); it must be dropped
+    # WITHOUT advancing the feature builder's prior-read state
+    import bars.produce as produce_mod
+    from tests.produce_fixtures import DAY_NS
+
+    seen = []
+    real_builder = produce_mod.BarFeatureBuilder
+
+    class SpyBuilder(real_builder):
+        def build(self, bar, read):
+            seen.append(bar)
+            return super().build(bar, read)
+
+    monkeypatch.setattr(produce_mod, "BarFeatureBuilder", SpyBuilder)
+    # late_active keeps the book fresh at the burst, so the spillover bars carry
+    # VALID observable reads — the exact case that must not advance state
+    _build(tmp_path, [("2025-11-07", {}),
+                      ("2025-11-08", {"late_active": True,
+                                      "midnight_burst": True}),
+                      ("2025-11-09", {})])
+    spillover = [b for b in seen
+                 if b.t_event >= (b.interval_start_ns // DAY_NS + 1) * DAY_NS]
+    assert spillover == [], \
+        f"{len(spillover)} boundary-spillover bar(s) reached the feature builder"
+
+
 def test_post_open_snapshot_origin_fails_closed(tmp_path):
     import pyarrow as pa
     import pyarrow.parquet as pq

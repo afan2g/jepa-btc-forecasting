@@ -187,10 +187,23 @@ class SyntheticWorld:
         if midnight_burst:
             # enough rapid prints to cross the trailing threshold several times,
             # every one captured ~700ms late: each burst-closing bar's watermark
-            # lands past midnight while every origin stays inside the day
+            # lands past midnight while every origin stays inside the day. A few
+            # promptly-captured churn deltas inside the burst window keep the
+            # observable book FRESH at those watermarks, so the spillover bars
+            # carry valid reads (the state-advance case, not the stale case).
+            burst_start = open_ns + DAY_NS - 500_000_000
+            for j in range(5):
+                origin = burst_start + j * 100_000_000
+                side = "bid" if j % 2 == 0 else "ask"
+                price = self.best(side)
+                seq = self._next_seq()
+                deltas.append({"origin_time": origin,
+                               "received_time": origin + 1_000_000,
+                               "seq": seq, "side": side,
+                               "price": price, "size": LEVEL_SIZE})
             n_burst = 40
             for i in range(n_burst):
-                origin = open_ns + DAY_NS - 500_000_000 + i * 10_000_000
+                origin = burst_start + i * 10_000_000
                 trades.append({"origin_time": origin,
                                "received_time": origin + 700_000_000,
                                "seq": self._next_seq(), "side": "buy",
