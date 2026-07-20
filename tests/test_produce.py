@@ -124,6 +124,27 @@ def test_iter_normalized_book_events_fails_closed_on_disorder(tmp_path):
         list(iter_normalized_book_events(path))
 
 
+def test_read_normalized_trades_rejects_receipt_before_origin(tmp_path):
+    # Codex round 7: a trade captured "before" it happened breaks the two-axis
+    # contract and would understate the monotone decision watermark (lookahead);
+    # the trade reader must enforce received_time >= origin_time like the L2 one
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    t0 = 1_800_000_000_000_000_000
+    path = tmp_path / "trades.parquet"
+    pq.write_table(pa.table({
+        "origin_time": pa.array([t0], pa.int64()),
+        "received_time": pa.array([t0 - 1], pa.int64()),
+        "seq": pa.array([1], pa.int64()),
+        "side": pa.array(["buy"]),
+        "price": pa.array([100.0], pa.float64()),
+        "quantity": pa.array([0.5], pa.float64()),
+    }), path)
+    with pytest.raises(ValueError, match="received_time"):
+        read_normalized_trades(path)
+
+
 def test_read_normalized_trades_rejects_missing_column(tmp_path):
     import pyarrow as pa
     import pyarrow.parquet as pq

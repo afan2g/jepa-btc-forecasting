@@ -272,7 +272,17 @@ def read_normalized_trades(source) -> list:
         pf.close()
         if stream is not None:
             stream.close()
-    return clock_trades_from_df(df)
+    trades = clock_trades_from_df(df)
+    for t in trades:
+        # the two-axis contract at the reader boundary (mirrors the L2 check):
+        # a trade captured "before" it happened would understate the monotone
+        # decision watermark — a lookahead the clock cannot detect itself
+        if t.received_time < t.origin_time:
+            raise ValueError(
+                f"trade at (origin_time, seq)=({t.origin_time}, {t.seq}) has "
+                f"received_time {t.received_time} < origin_time — the source's "
+                "timestamp contract is broken (certify/normalize at ingestion)")
+    return trades
 
 
 def iter_normalized_book_events(source) -> Iterator[BookDelta]:
