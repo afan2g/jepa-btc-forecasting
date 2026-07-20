@@ -604,6 +604,28 @@ def test_evidence_rejects_identity_and_denial_failures():
             make_evidence(custodian_identity="ops team; rm -rf"))
 
 
+def test_evidence_binds_capture_to_mechanism():
+    # A chmod-flavored capture cannot hide under an approved mechanism name
+    # (Codex P2 on PR #103): methods are pinned per mechanism...
+    bad_method = make_evidence()
+    bad_method["effective_policy_capture"] = dict(
+        bad_method["effective_policy_capture"], method="chmod")
+    with pytest.raises(ValueError, match="capture method"):
+        pf.validate_permission_policy_evidence(bad_method)
+    mismatched = make_evidence()
+    mismatched["effective_policy_capture"] = dict(
+        mismatched["effective_policy_capture"], method="getfacl")
+    with pytest.raises(ValueError, match="capture method"):
+        pf.validate_permission_policy_evidence(mismatched)
+    # ...and the captured command may not contain local mutation spellings.
+    bad_command = make_evidence()
+    bad_command["effective_policy_capture"] = dict(
+        bad_command["effective_policy_capture"],
+        command="chmod 600 /data && aws s3api get-bucket-policy")
+    with pytest.raises(ValueError, match="mutation"):
+        pf.validate_permission_policy_evidence(bad_command)
+
+
 def test_evidence_rejects_malformed_shape():
     with pytest.raises(ValueError, match="unknown"):
         pf.validate_permission_policy_evidence(make_evidence(surprise=1))

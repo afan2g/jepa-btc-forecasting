@@ -256,6 +256,18 @@ INDEPENDENT_CUSTODY_MECHANISMS = ("aws_s3_bucket_policy", "aws_iam_policy",
                                   "distinct_os_user_acl")
 LOCAL_ONLY_MECHANISMS = ("chmod", "posix_mode_bits", "umask", "developer_copy")
 
+# The capture must READ BACK the effective policy of the SELECTED mechanism —
+# a free-text method/command would let developer-local chmod evidence hide
+# under an approved mechanism name. Methods are pinned per mechanism, and the
+# captured command may not contain a local permission-mutation spelling.
+CAPTURE_METHODS_BY_MECHANISM = {
+    "aws_s3_bucket_policy": ("aws_s3api_get_bucket_policy",),
+    "aws_iam_policy": ("aws_iam_get_policy_version",
+                       "aws_iam_simulate_principal_policy"),
+    "distinct_os_user_acl": ("getfacl",),
+}
+_LOCAL_CAPTURE_MARKERS = ("chmod", "umask", "chown", "setfacl")
+
 # Identities are interpolated into the packet's copy-paste shell commands and
 # into canonical hashes, so they must be shell-inert single tokens.
 _IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]*\Z")
@@ -1088,7 +1100,21 @@ def validate_permission_policy_evidence(evidence: dict) -> dict:
     cpath = f"{path}.effective_policy_capture"
     _dict(cpath, capture, _CAPTURE_FIELDS)
     _str(f"{cpath}.method", capture["method"])
+    allowed_methods = CAPTURE_METHODS_BY_MECHANISM[mechanism]
+    if capture["method"] not in allowed_methods:
+        _fail(f"{cpath}.method",
+              f"{capture['method']!r} is not an effective-policy capture method "
+              f"for mechanism {mechanism!r} (allowed: {allowed_methods}); a "
+              "free-text capture could smuggle developer-local chmod evidence "
+              "under an approved mechanism name")
     _str(f"{cpath}.command", capture["command"])
+    lowered = capture["command"].lower()
+    local = [m for m in _LOCAL_CAPTURE_MARKERS if m in lowered]
+    if local:
+        _fail(f"{cpath}.command",
+              f"contains local permission-mutation spelling(s) {local}; the "
+              "capture must READ the effective policy, not set developer-local "
+              "modes (spec section 5.1)")
     _sha256(f"{cpath}.policy_document_sha256", capture["policy_document_sha256"])
     try:
         _validate_generated_at(evidence["captured_at"])
