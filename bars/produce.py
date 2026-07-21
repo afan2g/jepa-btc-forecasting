@@ -905,7 +905,17 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
         # I/O). The invalid-stretch gate deliberately does NOT run here: an
         # early-touching barrier can resolve entirely on covered points before
         # a later invalid stretch, so that check runs post-labeling against the
-        # RESOLVED span (t_event, t_barrier] below (Codex round 18).
+        # RESOLVED span (t_event, t_barrier] below (Codex round 18). Boundary
+        # overhang, by contrast, stays NOMINAL and pre-label — a deliberate
+        # asymmetry, not an oversight: an invalid stretch sits inside COMPLETE
+        # declared coverage (the path exists, so the realized span is
+        # knowable), while at a partition/segment end the path physically ends.
+        # T5 refuses any window overhanging coverage_end BEFORE consuming the
+        # path (data/labels.py boundary refusal; plan section E pins "the
+        # caller's per-horizon prefilter owns boundary drops — T5 never opens
+        # the next partition"), an unresolved candidate there is undecidable,
+        # and the nominal rule keeps boundary row selection outcome-independent
+        # (no touch-dependent inclusion bias at coverage edges).
         survivors: dict[str, list] = {tag: [] for tag, _ in ladder}
         for rec in seg_records:
             for tag, horizon_ns in ladder:
