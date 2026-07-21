@@ -110,6 +110,34 @@ def test_process_unit_writes_parquet_and_ok_manifest(tmp_path):
     assert r["sha256"] == dl._sha256_file(str(final))            # digest is of the PUBLISHED bytes
 
 
+def test_stream_cancel_checked_before_next_vendor_batch(tmp_path, monkeypatch):
+    cancel_event = threading.Event()
+
+    class CountingStream:
+        reads = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.reads += 1
+            return object()
+
+    def one_batch_then_stop(_):
+        yield _batch(1)
+        cancel_event.set()
+
+    stream = CountingStream()
+    monkeypatch.setattr(dl, "_iter_record_batches", one_batch_then_stop)
+    with pytest.raises(dl.CancelledByHardStop):
+        dl._stream_to_parquet(
+            stream, str(tmp_path / "data.parquet.tmp"),
+            schema_version=lb.RAW_SCHEMA_VERSION, feed="trades",
+            exchange=PERP[0], symbol=PERP[1], day_iso="2026-04-01",
+            cancel_event=cancel_event)
+    assert stream.reads == 1
+
+
 def test_process_unit_rejects_partition_missing_engine_time(tmp_path):
     # a drifted partition with no engine-time column must fail loud (status error), NOT be copied and
     # stamped ok — so vendor drift surfaces at download time, not later in Stage-2 after quota spent.

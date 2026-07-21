@@ -257,13 +257,22 @@ def _stream_to_parquet(stream, dest_tmp: str, *, schema_version: str, feed: str,
 
     writer = None
     rows = 0
+    iterator = iter(stream)
+
+    def _raise_if_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledByHardStop("run hard-stopped while streaming temporary output")
+
     try:
-        for item in stream:
-            if cancel_event is not None and cancel_event.is_set():
-                raise CancelledByHardStop("run hard-stopped while streaming temporary output")
+        while True:
+            _raise_if_cancelled()  # advancing the live iterator may issue the next S3 row-group read
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            _raise_if_cancelled()  # discard a batch if the stop arrived during the blocking read
             for batch in _iter_record_batches(item):
-                if cancel_event is not None and cancel_event.is_set():
-                    raise CancelledByHardStop("run hard-stopped while streaming temporary output")
+                _raise_if_cancelled()
                 if writer is None:
                     meta = dict(batch.schema.metadata or {})
                     meta[b"schema_version"] = schema_version.encode()
