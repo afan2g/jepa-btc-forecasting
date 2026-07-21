@@ -35,7 +35,13 @@ from eval.hashing import hash_obj
 from eval.writer import classify_manifest
 from tests.g0bn_dev_fixtures import dev_bundle, dev_config, durable_ledger
 from tests.g0bn_holdout_fixtures import make_inventory, sealed_config_kwargs
-from tests.g0bn_protocol_fixtures import make_clock, make_partition, sha_hex
+from tests.g0bn_protocol_fixtures import (
+    dev_days,
+    make_clock,
+    make_exclusions,
+    make_partition,
+    sha_hex,
+)
 from tests.produce_fixtures import (
     SEED_THRESHOLD,
     TARGET_BARS_PER_DAY,
@@ -57,7 +63,9 @@ RUNTIME = RuntimeParams(
     top_k=3, tick_size=0.01, min_returns=2, vol_floor_bps=0.25)
 
 # frozen development-end clock state: three recorded December days at the synthetic
-# world's daily notional, giving January 1 a live (non-warm-up) trailing threshold
+# world's daily notional, giving January 1 a live (non-warm-up) trailing threshold.
+# They must be INCLUDED development days (the validator rejects out-of-scope
+# history), so the custody config below includes them explicitly.
 CLOCK_STATE = {
     "schema": CLOCK_STATE_SCHEMA,
     "threshold_config": {
@@ -70,6 +78,19 @@ CLOCK_STATE = {
         for d in ("2025-12-29", "2025-12-30", "2025-12-31")
     ],
 }
+
+
+def _custody_exclusions() -> dict:
+    """Outcome-blind day accounting whose included set ends at 2025-12-31: the
+    frozen clock state must embed included days inside the trailing window
+    before January 1 (the plain dev fixture includes the first 24 November
+    days only, which would make every January day warm-up)."""
+    days = dev_days()
+    included = days[:21] + days[-3:]
+    excluded = {d: {"reason": "synthetic_out_of_scope",
+                    "evidence_sha256": sha_hex(f"excl-{d}")}
+                for d in days if d not in included}
+    return make_exclusions(included_days=included, excluded_days=excluded)
 
 # January day quirks exercising the drop taxonomy end to end:
 # - Jan 1 delays its first delta 5s: bar 1 is no_prior_read (feature_rejection),
@@ -131,6 +152,7 @@ def custody(tmp_path_factory):
         clock=make_clock(target_bars_per_day=TARGET_BARS_PER_DAY,
                          time_cap_ns=TIME_CAP_NS,
                          development_end_state_sha256=state_sha),
+        exclusions=_custody_exclusions(),
         **sealed_config_kwargs(inventory))
     frame, manifest, config, identity = dev_bundle(config=config)
     run = run_g0bn_development(frame, manifest, config, identity, durable_ledger())
@@ -292,6 +314,38 @@ def test_existing_outputs_refuse_before_any_source_open(custody, materialized,
         _materialize(custody, materialized["out"])
     object_files = {str(p) for p in custody["object_paths"].values()}
     assert not (set(opened) & object_files)
+
+
+def test_aliasing_output_paths_reject_before_any_source_open(custody, tmp_path,
+                                                             monkeypatch):
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path)
+    cases = [
+        {"manifest_path": tmp_path / "oos_matrix.parquet"},
+        {"attestation_path": tmp_path / "oos_matrix.parquet"},
+        {"matrix_path":
+         tmp_path / "g0bn-materialization-attestation-v1.json.tmp"},
+        # different literal strings resolving to the same file via a symlinked
+        # parent must also reject (resolved aliasing, not string equality)
+        {"manifest_path": alias / "oos_matrix.parquet"},
+    ]
+    for over in cases:
+        with pytest.raises(ValueError, match="pairwise distinct"):
+            _materialize(custody, tmp_path, **over)
+    object_files = {str(p) for p in custody["object_paths"].values()}
+    assert not (set(opened) & object_files)
+    for name in ("oos_matrix.parquet", "oos_manifest.json",
+                 "g0bn-materialization-attestation-v1.json",
+                 "g0bn-materialization-attestation-v1.json.tmp"):
+        assert not (tmp_path / name).exists()
 
 
 # ------------------------------------------------------------------- read spies
@@ -533,3 +587,26 @@ def test_clock_state_must_reproduce_the_frozen_pin(custody, tmp_path):
         window_days=5))
     with pytest.raises(ValueError, match="threshold_config"):
         _materialize(custody, tmp_path, runtime=wrong_runtime)
+
+
+def test_clock_state_history_must_stay_in_included_development_days(custody):
+    """Even a hash-matching frozen pin is rejected when its history embeds a day
+    outside the config's outcome-blind included development scope (a pin minted
+    over an out-of-window or excluded day would otherwise smuggle out-of-scope
+    volume into the holdout schedule seed)."""
+    import bars.produce as produce_mod
+
+    for bad_day in ("2025-10-31",   # before the development window
+                    "2025-12-25"):  # an explicitly excluded development day
+        state = copy.deepcopy(CLOCK_STATE)
+        state["history"].insert(0, {"day": bad_day,
+                                    "completed_notional": 36_000.0,
+                                    "covered_fraction": 1.0})
+        config2 = copy.deepcopy(custody["config"])
+        config2["clock"]["development_end_state_sha256"] = clock_state_sha256(
+            state)
+        with pytest.raises(ValueError, match="included development days"):
+            produce_mod._validate_clock_state(
+                state, runtime=RUNTIME, config=config2,
+                before_ns=int(
+                    custody["config"]["partition"]["holdout_start_ns"]))

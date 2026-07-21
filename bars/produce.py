@@ -429,6 +429,7 @@ def _validate_clock_state(state, *, runtime: RuntimeParams, config: dict,
         _fail(f"{path}.history", "must be a non-empty array of recorded prior days "
                                  "(the frozen development-end schedule input)")
     seen = set()
+    included_dev_days = set(config["exclusions"]["included_days"])
     for i, entry in enumerate(state["history"]):
         epath = f"{path}.history[{i}]"
         _dict(epath, entry, _HISTORY_FIELDS)
@@ -437,6 +438,12 @@ def _validate_clock_state(state, *, runtime: RuntimeParams, config: dict,
             _fail(f"{epath}.day", f"{day!r} is not a prior day before the build "
                                   "partition (the frozen state may not embed "
                                   "in-partition volume)")
+        if day not in included_dev_days:
+            _fail(f"{epath}.day",
+                  f"{day!r} is not one of the config's outcome-blind included "
+                  "development days; even a hash-matching frozen state may only "
+                  "embed in-scope development volume (out-of-window or excluded "
+                  "days must not seed the holdout schedule)")
         if day in seen:
             _fail(f"{epath}.day", f"duplicate recorded day {day}")
         seen.add(day)
@@ -1357,6 +1364,17 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
     # spec section 5.1); write_holdout re-checks matrix/manifest with O_EXCL
     fresh = [os.fspath(matrix_path), os.fspath(manifest_path),
              os.fspath(attestation_path), os.fspath(attestation_path) + ".tmp"]
+    resolved_outputs: dict[str, str] = {}
+    for p in fresh:
+        real = os.path.realpath(p)
+        if real in resolved_outputs:
+            _fail("output paths",
+                  f"{resolved_outputs[real]!r} and {p!r} resolve to the same "
+                  f"file {real!r}; the matrix, manifest, attestation, and "
+                  "attestation-temp paths must be pairwise distinct (an "
+                  "aliasing path template would otherwise fail only mid-write, "
+                  "after the raw burn, stranding an unattested artifact)")
+        resolved_outputs[real] = p
     existing = [p for p in fresh if os.path.exists(p)]
     if existing:
         raise FileExistsError(
