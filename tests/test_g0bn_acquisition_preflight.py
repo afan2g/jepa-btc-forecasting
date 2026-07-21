@@ -1099,6 +1099,31 @@ def test_cli_verify_execution_gate(tmp_path, monkeypatch, capsys):
     assert "days_file_sha256" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("stage", "jobs", "max_field"),
+    [("download", "4", "download_jobs_max"),
+     ("recon", "1", "recon_jobs_max")],
+)
+def test_cli_verify_execution_rejects_malformed_jobs_max(
+        tmp_path, monkeypatch, capsys, stage, jobs, max_field):
+    monkeypatch.setattr(pf, "_free_gb", lambda path: 100000.0)
+    monkeypatch.chdir(tmp_path)
+    assert run_cli(["plan", "--custodian-identity", CUSTODIAN,
+                    "--operator-identity", OPERATOR]) == 0
+    plan_path = pf.DEFAULT_OUT_DIR + "/g0bn_acquisition_plan.json"
+    with open(plan_path) as f:
+        plan = json.load(f)
+    plan["execution"][max_field] = None
+    with open(plan_path, "w") as f:
+        json.dump(resha(plan), f)
+
+    rc = run_cli(["verify-execution", "--partition", "development",
+                  "--stage", stage, "--jobs", jobs, "--plan", plan_path])
+
+    assert rc == 2
+    assert f"execution.{max_field}" in capsys.readouterr().err
+
+
 # ------------------------------------------------------------- network isolation
 
 

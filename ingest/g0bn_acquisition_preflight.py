@@ -703,14 +703,16 @@ def validate_acquisition_plan(plan: dict) -> dict:
 
     execution = plan["execution"]
     _dict("execution", execution, _EXECUTION_FIELDS)
+    download_jobs_max = _strict_jobs(
+        "execution.download_jobs_max", execution["download_jobs_max"],
+        expected=DOWNLOAD_JOBS_MAX, maximum=dl.MAX_DOWNLOAD_JOBS)
     _strict_jobs("execution.download_jobs", execution["download_jobs"],
-                 expected=DOWNLOAD_JOBS, maximum=DOWNLOAD_JOBS_MAX)
-    _strict_jobs("execution.download_jobs_max", execution["download_jobs_max"],
-                 expected=DOWNLOAD_JOBS_MAX, maximum=dl.MAX_DOWNLOAD_JOBS)
+                 expected=DOWNLOAD_JOBS, maximum=download_jobs_max)
+    recon_jobs_max = _strict_jobs(
+        "execution.recon_jobs_max", execution["recon_jobs_max"],
+        expected=RECON_JOBS_MAX, maximum=RECON_JOBS_MAX)
     _strict_jobs("execution.recon_jobs", execution["recon_jobs"],
-                 expected=RECON_JOBS, maximum=RECON_JOBS_MAX)
-    _strict_jobs("execution.recon_jobs_max", execution["recon_jobs_max"],
-                 expected=RECON_JOBS_MAX, maximum=RECON_JOBS_MAX)
+                 expected=RECON_JOBS, maximum=recon_jobs_max)
     _exact("execution", execution, {
         "downloader": "ingest/download_lake_binance.py",
         "recon_runner": "scripts/run_binance_recon.py",
@@ -1076,14 +1078,16 @@ def validate_approval_packet(packet: dict, plan: dict) -> dict:
     _exact("schema", packet["schema"], APPROVAL_PACKET_SCHEMA)
     caps = packet["caps"]
     _dict("caps", caps, _CAP_FIELDS)
+    download_jobs_max = _strict_jobs(
+        "caps.download_jobs_max", caps["download_jobs_max"],
+        expected=DOWNLOAD_JOBS_MAX, maximum=dl.MAX_DOWNLOAD_JOBS)
     _strict_jobs("caps.download_jobs", caps["download_jobs"],
-                 expected=DOWNLOAD_JOBS, maximum=DOWNLOAD_JOBS_MAX)
-    _strict_jobs("caps.download_jobs_max", caps["download_jobs_max"],
-                 expected=DOWNLOAD_JOBS_MAX, maximum=dl.MAX_DOWNLOAD_JOBS)
+                 expected=DOWNLOAD_JOBS, maximum=download_jobs_max)
+    recon_jobs_max = _strict_jobs(
+        "caps.recon_jobs_max", caps["recon_jobs_max"],
+        expected=RECON_JOBS_MAX, maximum=RECON_JOBS_MAX)
     _strict_jobs("caps.recon_jobs", caps["recon_jobs"],
-                 expected=RECON_JOBS, maximum=RECON_JOBS_MAX)
-    _strict_jobs("caps.recon_jobs_max", caps["recon_jobs_max"],
-                 expected=RECON_JOBS_MAX, maximum=RECON_JOBS_MAX)
+                 expected=RECON_JOBS, maximum=recon_jobs_max)
     _exact("caps.concurrency_rationale", caps["concurrency_rationale"],
            CONCURRENCY_RATIONALE)
     embedded = _sha256("sha256", packet.get("sha256"))
