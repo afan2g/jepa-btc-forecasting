@@ -44,6 +44,7 @@ from tests.produce_fixtures import (
     TARGET_BARS_PER_DAY,
     TIME_CAP_NS,
     SyntheticWorld,
+    day_open_ns,
     write_day_objects,
 )
 
@@ -304,12 +305,33 @@ def _build(tmp_path, days_spec, config=None, runtime=None, **over):
         **over), config
 
 
-def test_gap_between_days_drops_first_post_gap_bar_via_lookback_cap(tmp_path):
+def test_gap_between_days_drops_first_post_gap_bar(tmp_path):
     result, _ = _build(tmp_path, [("2025-11-01", {}), ("2025-11-02", {}),
                                   ("2025-11-04", {})])
     # the prior observable read carries across the excluded 11-03 gap; the first
-    # 11-04 bar's look-back spans the gap and must be dropped, never clipped
-    assert all(n >= 1 for n in result.drop_counts["lookback_cap"].values())
+    # 11-04 bar's feature window escapes the segment's trusted span and must be
+    # dropped (before_start), never clipped
+    assert all(n >= 1 for n in result.drop_counts["before_start"].values())
+
+
+def test_post_gap_windows_never_cross_the_excluded_day(tmp_path):
+    """Plan §C.3 coverage integrity MID-partition: a segment-start day after an
+    excluded/missing day must not emit rows whose feature window reaches into
+    the gap. The day-open snapshot originates inside the excluded day, so a
+    delayed first delta yields snapshot-only reads whose windows cross it —
+    those bars drop as before_start (dropped, never clipped), exactly as the
+    partition-start check already masks them on the partition's first day."""
+    import pandas as pd
+
+    result, _ = _build(tmp_path, [("2025-11-01", {}), ("2025-11-02", {}),
+                                  ("2025-11-04",
+                                   {"first_delta_offset_ns": 5_000_000_000})])
+    open_1104 = day_open_ns("2025-11-04")
+    frame = pd.read_parquet(tmp_path / "matrix.parquet")
+    rows = frame[frame["t_event"] >= open_1104]
+    assert len(rows)
+    assert (rows["t_feature_start"] >= open_1104).all()
+    assert all(n >= 1 for n in result.drop_counts["before_start"].values())
 
 
 def test_full_scope_schedule_pin_gate(tmp_path):

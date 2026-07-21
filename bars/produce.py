@@ -161,7 +161,9 @@ DROP_COUNT_CATEGORIES = (
     "book_rejection",     # T2 missing/one-sided/invalid/crossed observable or label book
     "staleness",          # T2 observable book older than the certified staleness cap
     "feature_rejection",  # T3 no_prior_read / insufficient_depth
-    "before_start",       # feature support (t_feature_start) precedes the partition start
+    "before_start",       # feature support (t_feature_start) precedes the segment's
+                          # trusted span (partition start, or a post-excluded-day
+                          # segment's first day open — plan §C.3 coverage)
     "lookback_cap",       # observed look-back exceeds the pinned cap (drop, never clip)
     "prefilter",          # t_event + horizon + guard >= partition end (spec §2.2 rule)
     "coverage_gap",       # horizon window lacks contiguous covered true-mid
@@ -761,6 +763,13 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
     watermark = 0
     next_index = 0
     prev_segment_last_t: int | None = None
+    # rebound at the top of each segment; classify() reads the current value.
+    # The feature-window floor is the SEGMENT start, not the partition start: a
+    # post-excluded-day segment's day-open snapshot originates inside the
+    # excluded day, and a window reaching into that gap consumes state the
+    # exclusion declared untrusted (plan §C.3 coverage integrity) even when it
+    # is well inside the partition (Codex round 27).
+    seg_start_ns = partition_start_ns
 
     def classify(day: str, bar: Bar, read, seg_records: list) -> None:
         """First-failure-wins drop accounting for one coalesced decision, in the
@@ -797,7 +806,7 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
         if isinstance(feat, FeatureRejection):
             counter.add_all("feature_rejection")
             return
-        if feat.t_feature_start < partition_start_ns:
+        if feat.t_feature_start < seg_start_ns:
             counter.add_all("before_start")
             return
         if bar.t_event - feat.t_feature_start > lookback_cap_ns:
@@ -810,6 +819,7 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
             label_mid=read.label.mid))
 
     for segment in _segments(days):
+        seg_start_ns = max(partition_start_ns, _day_open_ns(segment[0]))
         seg_end_ns = _day_open_ns(segment[-1]) + _DAY_NS
         seg_records: list[_Candidate] = []
         seg_invalid: list = []  # invalid true-book intervals across the segment
