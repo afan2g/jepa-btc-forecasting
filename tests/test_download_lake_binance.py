@@ -579,12 +579,21 @@ def test_run_noop_resume_makes_no_vendor_call(tmp_path, monkeypatch):
             "--end", "2026-04-01", "--out", str(raw), "--report-dir", str(tmp_path / "rep")]
     assert dl.main(argv, reader=FakeReader({"trades": [_batch(2)]}), used_data_fn=lambda: 0.0,
                    sleep=lambda *_: None) == 0                  # first run completes the range
+    requested_tmp = pathlib.Path(
+        lb.raw_parquet_path(str(raw), "trades", *SPOT, "2026-04-01") + ".tmp")
+    unrelated_tmp = pathlib.Path(
+        lb.raw_parquet_path(str(raw), "trades", *SPOT, "2026-03-01") + ".tmp")
+    requested_tmp.write_bytes(b"stale requested temp")
+    unrelated_tmp.parent.mkdir(parents=True, exist_ok=True)
+    unrelated_tmp.write_bytes(b"unrelated temp")
     # resume via the LIVE path (no injected reader/used_data_fn); make setup explode if reached.
     monkeypatch.setattr(dl, "lake_session",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no creds")))
     def _boom_used():
         raise AssertionError("used_data must not be called on a no-op resume")
     assert dl.main(argv, used_data_fn=_boom_used, sleep=lambda *_: None) == 0
+    assert not requested_tmp.exists()
+    assert unrelated_tmp.exists()
     rep = json.loads(sorted((tmp_path / "rep").glob("*.json"))[-1].read_text())
     assert rep["n_pending"] == 0 and rep["used_data_before"] is None
 

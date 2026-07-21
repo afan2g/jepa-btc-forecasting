@@ -459,6 +459,22 @@ class Unit:
     day: str
 
 
+def _cleanup_unit_tmps(out_root: str, units: list[Unit]) -> int:
+    """Remove stale temps only for the validated request, never scan the raw store."""
+    tmp_paths = {
+        lb.raw_parquet_path(out_root, unit.feed, unit.exchange, unit.symbol, unit.day) + ".tmp"
+        for unit in units
+    }
+    removed = 0
+    for path in sorted(tmp_paths):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        removed += 1
+    return removed
+
+
 def runtime_projection(units: list[Unit], jobs: int) -> dict:
     """Caveated arithmetic runtime reference from the certified serial smoke, never a live bound."""
     validate_download_jobs(jobs)
@@ -823,10 +839,10 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
 
-    # A SIGINT may leave a closed but incomplete .tmp. It is never complete and every inert/local
-    # resume removes it before either a no-op decision or a restarted unit.
+    # A SIGINT may leave a closed but incomplete .tmp. It is never complete; every inert/local
+    # resume removes requested-unit temps without scanning unrelated raw-store partitions.
     if not args.dry_run:
-        lb.cleanup_tmp(args.out)
+        _cleanup_unit_tmps(args.out, units)
     # ---- no-op fast path: a resume whose range is already complete (nothing pending, incl.
     # sparse-accepted quiet days) needs NO Lake session, NO used_data probe, and NO gate. Short-circuit
     # before any vendor touch so an idempotent resume never makes a live call or exits 2 on absent
