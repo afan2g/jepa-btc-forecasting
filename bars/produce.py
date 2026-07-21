@@ -1363,7 +1363,15 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
     handing the operator-plane materializer raw payload access it does not need
     would widen the custody boundary, not tighten it. The attestation binds the
     plan hash (which pins BOTH layers' sealed hashes) but attests consumption
-    of the normalized scope only."""
+    of the normalized scope only. Spec section 6.3 step 4's "opens only those
+    allowlisted January raw/normalized objects" (like the plan table's "accepts
+    only the exact frozen raw/normalized allowlist") is an EXCLUSIVITY bound —
+    nothing outside the allowlist may be opened — not an obligation to open
+    every allowlisted object: T9 derives nothing from raw payloads, so opening
+    them here would widen the burn surface without adding integrity the sealed
+    hash chain does not already provide, and raw-layer intactness remains
+    claimed (and independently auditable) through the #68 seal evidence rather
+    than through this attestation."""
     validate_protocol_config(config)
     if (not isinstance(plan, dict)
             or list(plan.get("drop_count_categories", [])) != list(DROP_COUNT_CATEGORIES)):
