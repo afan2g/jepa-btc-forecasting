@@ -133,6 +133,71 @@ def test_backoff_seconds_grows_and_is_capped():
     assert dl._backoff_seconds(1, 1.0, 60.0, lambda: 0.0) == 0.5
 
 
+def test_implemented_cli_plan_uses_supported_instrument_selector():
+    plan = (_ROOT / "docs" / "superpowers" / "plans" /
+            "2026-07-02-binance-downloader-plan.md").read_text()
+    cli_contract = plan.split("## Requirement 8", 1)[1].split("**Exit codes**", 1)[0]
+    stage1_contract = cli_contract.split("scripts/run_binance_recon.py", 1)[0]
+
+    args = dl.parse_args(["--instrument", "binance-perp"])
+    assert args.instrument == "binance-perp"
+    assert "--instrument binance-perp,binance-spot" in stage1_contract
+    assert "--exchange" not in stage1_contract
+    assert "--symbol" not in stage1_contract
+
+
+def test_validate_download_jobs_rejects_bool_and_out_of_bounds():
+    for value in (True, False, None, 1.0, 0, -1, dl.MAX_DOWNLOAD_JOBS + 1):
+        with pytest.raises(ValueError, match="jobs"):
+            dl.validate_download_jobs(value)
+    assert dl.validate_download_jobs(1) == 1
+    assert dl.validate_download_jobs(dl.MAX_DOWNLOAD_JOBS) == 4
+
+
+def test_runtime_projection_is_caveated_arithmetic_not_live_guarantee():
+    days = dl.daterange("2025-11-01", "2025-12-31")
+    units = dl.plan_units(["binance-perp"], "book_delta_v2,trades", days)
+    projection = dl.runtime_projection(units, 4)
+    assert projection["available"] is True
+    assert projection["basis"]["exchange"] == "BINANCE_FUTURES"
+    assert projection["basis"]["symbol"] == "BTC-USDT-PERP"
+    assert projection["basis"]["seconds_by_feed"] == {
+        "book_delta_v2": 1441.344,
+        "book": 242.671,
+        "trades": 24.936,
+    }
+    assert projection["basis"]["minutes_per_three_product_day"] == 28.483
+    assert projection["serial_reference_seconds"] == pytest.approx(104246.011)
+    assert projection["idealized_jobs_floor_seconds"] == pytest.approx(26061.503)
+    assert "not a bound" in projection["caveat"]
+    assert "does not guarantee 4x live scaling" in projection["caveat"]
+
+
+def test_runtime_projection_refuses_unmeasured_spot_scope():
+    units = dl.plan_units(["binance-spot"], "trades", ["2026-04-01"])
+    projection = dl.runtime_projection(units, 1)
+    assert projection["available"] is False
+    assert projection["unmeasured_units"] == ["BINANCE/BTC-USDT/trades"]
+    no_op = dl.runtime_projection([], 1, scope_units=units)
+    assert no_op["available"] is False
+
+
+@pytest.mark.parametrize("jobs", ["0", "-1", "5"])
+def test_run_rejects_unsafe_jobs_before_any_vendor_or_quota_call(tmp_path, jobs):
+    reader = _NullReader()
+
+    def used_data():
+        raise AssertionError("used_data must not be called for invalid --jobs")
+
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",
+                    "--start", "2026-04-01", "--end", "2026-04-01",
+                    "--jobs", jobs, "--out", str(tmp_path / "raw"),
+                    "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=used_data)
+    assert code == 2
+    assert reader.calls == []
+
+
 # --------------------------------------------------------------------------- CLI exit-code contract
 def test_run_reversed_date_range_exits_2(tmp_path):
     code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",

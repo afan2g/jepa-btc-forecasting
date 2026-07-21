@@ -218,7 +218,7 @@ def test_e2e_certifies_topk_and_normalizes_all_tables(tmp_path):
 
 
 def test_jobs_parallel_path_produces_same_outputs(tmp_path):
-    rc, out, _ = run_cli(tmp_path, write_store(tmp_path), "--jobs", "3")
+    rc, out, _ = run_cli(tmp_path, write_store(tmp_path), "--jobs", "3", "--max-jobs", "3")
     assert rc == 0
     assert {r["status"] for r in last_by_output(out).values()} == {"ok"}
     assert os.path.exists(outpath(out, "topk_l2"))
@@ -633,3 +633,27 @@ def test_bad_args_exit_2(tmp_path):
     assert rbr.main(["--instrument", "binance-perp", "--start", DAY, "--end", DAY,
                      "--raw", raw, "--out", out, "--feeds", "funding",
                      "--instrument", "binance-spot"]) == rbr.SETUP_ERROR_EXIT  # invalid pair
+
+
+@pytest.mark.parametrize("max_args", [(), ("--max-jobs", "1")],
+                         ids=["default-ceiling", "packet-ceiling"])
+def test_approved_max_jobs_rejects_work_side_drift_before_file_access(
+        tmp_path, monkeypatch, capsys, max_args):
+    out = tmp_path / "out"
+    report_dir = tmp_path / "reports"
+
+    def forbid_file_access(*args, **kwargs):
+        raise AssertionError("recon touched files after concurrency refusal")
+
+    monkeypatch.setattr(rbr.lb, "cleanup_tmp", forbid_file_access)
+    rc = rbr.main([
+        "--instrument", "binance-perp", "--feeds", "trades",
+        "--start", DAY, "--end", DAY,
+        "--raw", str(tmp_path / "missing-raw"),
+        "--out", str(out), "--report-dir", str(report_dir),
+        "--jobs", "4", *max_args,
+    ])
+
+    assert rc == rbr.SETUP_ERROR_EXIT
+    assert "--jobs 4 exceeds --max-jobs 1" in capsys.readouterr().err
+    assert not out.exists()

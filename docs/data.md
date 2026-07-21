@@ -1196,6 +1196,47 @@ the `g0bn-custodian-seal-content-v1` inventory emitter consumed by
 approval packet under `data/reports/g0bn_acquisition_preflight/`. It performs
 no vendor I/O; its commands stay inert until explicit approval on #68.
 
+**Stage-1 acquisition performance amendment (#105, 2026-07-21; no vendor I/O
+authorized).** The immutable v2 plan/packet separates Stage-1
+`download_jobs=4` (maximum 4) from Stage-2 `recon_jobs=1` (maximum 1).
+Stage 1 overlaps independent high-latency S3 streams while each worker remains
+bounded to one PyArrow row-group pre-buffer; Stage 2 stays serial because
+reconstruction is memory-heavy. The exact Stage-2 work command carries
+`--max-jobs 1`, so work-side concurrency drift fails before raw-file access.
+The outer
+`flock -w 14400 /tmp/jepa-expensive-compute.lock`, exact dates/products/
+destinations, quota/GB caps, custody, atomic publication, retries, and resume
+rules are unchanged. Serial and parallel runs now report each unit's
+completed/total state, identity/status, rows/output bytes/time where available,
+aggregate throughput, and a caveated observed-rate ETA. A SIGINT may leave
+`data.parquet.tmp`, but it never counts as complete and startup removes it only
+for requested units before restarting the unit.
+
+Certified serial evidence from the completed `2026-04-01` perpetual smoke is
+`book_delta_v2=1441.344s`, `book=242.671s`, and `trades=24.936s`: about
+**28.5 minutes/day** and about **29 serial hours for 61 development days**.
+The arithmetic 4-worker reference range is about **7.2-29.0 hours** for that
+exact measured perpetual scope, not a bound: projections are unavailable for
+spot or other unmeasured units; object layout, latency, contention, retries,
+and quota can put actual runtime outside it, and no 4x live scaling is
+guaranteed. Coinbase's prior path used threaded `lakeapi` plus its cache; this
+downloader streams into its own persistent normalized raw store, so the timings
+are not like-for-like.
+
+A deterministic local 120,000-row/eight-row-group Parquet benchmark with 3 ms
+injected latency per file read reduced range calls from **65 to 9** while
+reading the same **5,596,304 bytes** and rows (one local run: **0.210s to
+0.034s**). This demonstrates the expected high-latency benefit without Lake,
+S3, HTTP, metadata, SDK, or vendor access; it is not a live throughput claim.
+
+The v1 plan
+`62cca478f1c47ce3981c246d6e928b62709bbcc6c75259a1e16d9aa2bcd80f86`,
+packet
+`c0e8b6e46ab65cb9231c732e0bf7653f94baf83e147c86ebd49eff3c451a9a12`,
+and approval are superseded operational evidence only. After #105 merges, the
+v2 packet must be regenerated and receive fresh explicit human approval on
+#68 before any retry; the prior approval must not be reused.
+
 **Deferred six-month cross-venue budget:** the former `2025-11-01` through
 `2026-04-30` nine-unit plan remains approximately **222.63 GB** under the
 downloader's conservative `1.23 GB/day` estimate. It is no longer the next pull:

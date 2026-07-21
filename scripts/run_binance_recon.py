@@ -618,6 +618,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--jobs", type=int, default=1,
                     help="parallel (instrument, feed, day) units (default 1; keep small for perp "
                          "book days — Requirement 7 RAM bound)")
+    ap.add_argument("--max-jobs", type=int, default=1,
+                    help="approval/workflow ceiling for --jobs (default 1; raise explicitly only "
+                         "for a separately reviewed workflow)")
     ap.add_argument("--overwrite", action="store_true",
                     help="re-run every unit, replacing outputs and superseding verdicts")
     ap.add_argument("--resume", action="store_true",
@@ -663,8 +666,12 @@ def main(argv=None) -> int:
         build_grid(dt.date.fromisoformat(days[0]), grid_ms)     # validate divisibility once
         if args.k <= 0:
             raise ValueError(f"--k must be positive (got {args.k})")
-        if args.jobs is not None and args.jobs < 1:
+        if args.jobs < 1:
             raise ValueError(f"--jobs must be >=1 (got {args.jobs})")
+        if args.max_jobs < 1:
+            raise ValueError(f"--max-jobs must be >=1 (got {args.max_jobs})")
+        if args.jobs > args.max_jobs:
+            raise ValueError(f"--jobs {args.jobs} exceeds --max-jobs {args.max_jobs}")
         if args.book_stride_ms < 1:
             # stride <=0 would silently disable seed thinning and materialize EVERY row of a
             # multi-million-row `book` day as a BookSnapshot (recon/reseed.py thins only for >0)
@@ -752,7 +759,8 @@ def main(argv=None) -> int:
     report = {"args": {"instruments": instrument_keys, "feeds": args.feeds,
                        "days": [days[0], days[-1]], "n_days": len(days), "raw": args.raw,
                        "out": args.out, "k": args.k, "grid_ms": grid_ms,
-                       "engine": args.engine, "jobs": args.jobs, "overwrite": args.overwrite},
+                       "engine": args.engine, "jobs": args.jobs, "max_jobs": args.max_jobs,
+                       "overwrite": args.overwrite},
               "engine_by_instrument": engine_report,
               "policy": policy.as_dict(), "thresholds": cfg.thresholds.as_dict(),
               "n_units": len(units), "n_pending": len(pending), "counts": counts,
