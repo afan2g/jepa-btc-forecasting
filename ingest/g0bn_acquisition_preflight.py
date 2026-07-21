@@ -809,7 +809,8 @@ def _recon_command(plan: dict, block: dict) -> str:
         f"--raw {block['raw_root']} "
         f"--out {block['normalized_root']} "
         f"--report-dir {block['report_root']}/recon "
-        f"--engine native --k 10 --grid-s 1.0 --jobs {ex['recon_jobs']} --resume")
+        f"--engine native --k 10 --grid-s 1.0 --jobs {ex['recon_jobs']} "
+        f"--max-jobs {ex['recon_jobs_max']} --resume")
 
 
 def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dict:

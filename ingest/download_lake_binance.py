@@ -71,6 +71,7 @@ MAX_DOWNLOAD_JOBS = 4
 
 # Certified serial evidence from the completed 2026-04-01 Binance-perp smoke. These timings are used
 # only for clearly caveated runtime projections; quota and approval gates never depend on them.
+CERTIFIED_SERIAL_SCOPE = ("BINANCE_FUTURES", "BTC-USDT-PERP")
 CERTIFIED_SERIAL_DAY = "2026-04-01"
 CERTIFIED_SERIAL_SECS_BY_FEED = {
     "book_delta_v2": 1441.344,
@@ -484,23 +485,32 @@ def _cleanup_unit_tmps(out_root: str, units: list[Unit]) -> int:
     return removed
 
 
-def runtime_projection(units: list[Unit], jobs: int) -> dict:
+def runtime_projection(units: list[Unit], jobs: int, *,
+                       scope_units: list[Unit] | None = None) -> dict:
     """Caveated arithmetic runtime reference from the certified serial smoke, never a live bound."""
     validate_download_jobs(jobs)
-    unknown_feeds = sorted({u.feed for u in units if u.feed not in CERTIFIED_SERIAL_SECS_BY_FEED})
+    scope_units = units if scope_units is None else scope_units
+    unmeasured_units = sorted({
+        f"{u.exchange}/{u.symbol}/{u.feed}"
+        for u in scope_units
+        if ((u.exchange, u.symbol) != CERTIFIED_SERIAL_SCOPE
+            or u.feed not in CERTIFIED_SERIAL_SECS_BY_FEED)
+    })
     caveat = (
-        "Certified serial timings are an arithmetic reference only. Object layout, latency, "
-        "contention, retries, and quota can put actual runtime outside this range. It is not a "
-        "bound and does not guarantee 4x live scaling."
+        "Certified serial timings apply only to the measured Binance-perp scope and are an "
+        "arithmetic reference. Object layout, latency, contention, retries, and quota can put "
+        "actual runtime outside this range. It is not a bound and does not guarantee 4x live scaling."
     )
     basis = {
         "day": CERTIFIED_SERIAL_DAY,
+        "exchange": CERTIFIED_SERIAL_SCOPE[0],
+        "symbol": CERTIFIED_SERIAL_SCOPE[1],
         "seconds_by_feed": dict(CERTIFIED_SERIAL_SECS_BY_FEED),
         "minutes_per_three_product_day": round(
             sum(CERTIFIED_SERIAL_SECS_BY_FEED.values()) / 60, 3),
     }
-    if unknown_feeds:
-        return {"available": False, "basis": basis, "unknown_feeds": unknown_feeds,
+    if unmeasured_units:
+        return {"available": False, "basis": basis, "unmeasured_units": unmeasured_units,
                 "caveat": caveat}
 
     serial_seconds = sum(CERTIFIED_SERIAL_SECS_BY_FEED[u.feed] for u in units)
@@ -843,7 +853,8 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         pending = pending_units(units, args.out, overwrite=args.overwrite,
                                 manifest_root=manifest_root)
         est_gb = sum(unit_gb(u) for u in pending)     # gate/estimate ONLY the not-yet-done units
-        projection = runtime_projection(pending, args.jobs)
+        projection = runtime_projection(
+            pending, args.jobs, scope_units=pending or units)
     except (ValueError, KeyError, FileNotFoundError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
@@ -965,7 +976,7 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
               f"{projection['caveat']}")
     else:
         print(f"Starting {len(pending)} unit(s) with jobs={args.jobs}. Runtime reference unavailable "
-              f"for feeds {projection['unknown_feeds']}. {projection['caveat']}")
+              f"for units {projection['unmeasured_units']}. {projection['caveat']}")
 
     def _do(u: Unit) -> UnitResult:
         return process_unit(reader, args.out, u.feed, u.exchange, u.symbol, u.day,

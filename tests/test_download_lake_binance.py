@@ -493,6 +493,9 @@ def test_serial_progress_reports_units_throughput_eta_and_terminal_state(tmp_pat
     report = json.loads(next(report_dir.glob("*.json")).read_text())
     assert report["progress"]["completed"] == report["progress"]["total"] == 2
     assert report["progress"]["terminal_state"] == "complete"
+    assert report["runtime_projection"]["available"] is False
+    assert report["runtime_projection"]["unmeasured_units"] == [
+        "BINANCE/BTC-USDT/trades"]
     assert report["progress"]["observed_eta_seconds"] == 0
     assert report["total_out_bytes"] > 0
     assert all(unit["status"] == "ok" and unit["secs"] >= 0
@@ -624,6 +627,9 @@ def test_run_noop_resume_makes_no_vendor_call(tmp_path, monkeypatch):
     assert unrelated_tmp.exists()
     rep = json.loads(sorted((tmp_path / "rep").glob("*.json"))[-1].read_text())
     assert rep["n_pending"] == 0 and rep["used_data_before"] is None
+    assert rep["runtime_projection"]["available"] is False
+    assert rep["runtime_projection"]["unmeasured_units"] == [
+        "BINANCE/BTC-USDT/trades"]
 
 
 def test_run_resume_retries_required_missing(tmp_path):

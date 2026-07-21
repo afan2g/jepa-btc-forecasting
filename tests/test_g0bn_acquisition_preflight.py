@@ -523,7 +523,10 @@ def test_packet_commands_are_exact_inert_and_lock_serialized():
             f"verify-execution --partition {partition} --stage {stage} --jobs {jobs} "
             "--plan data/reports/g0bn_acquisition_preflight/g0bn_acquisition_plan.json"
         )
-        assert work.endswith(f"--jobs {jobs} --resume")
+        if stage == "recon":
+            assert work.endswith("--jobs 1 --max-jobs 1 --resume")
+        else:
+            assert work.endswith(f"--jobs {jobs} --resume")
         assert cmd.count(f"--jobs {jobs}") == 2
         assert cmd.index("verify-execution") < cmd.index("--days-file")
         assert " && " in cmd

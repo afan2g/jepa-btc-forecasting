@@ -1201,23 +1201,27 @@ authorized).** The immutable v2 plan/packet separates Stage-1
 `download_jobs=4` (maximum 4) from Stage-2 `recon_jobs=1` (maximum 1).
 Stage 1 overlaps independent high-latency S3 streams while each worker remains
 bounded to one PyArrow row-group pre-buffer; Stage 2 stays serial because
-reconstruction is memory-heavy. The outer
+reconstruction is memory-heavy. The exact Stage-2 work command carries
+`--max-jobs 1`, so work-side concurrency drift fails before raw-file access.
+The outer
 `flock -w 14400 /tmp/jepa-expensive-compute.lock`, exact dates/products/
 destinations, quota/GB caps, custody, atomic publication, retries, and resume
 rules are unchanged. Serial and parallel runs now report each unit's
 completed/total state, identity/status, rows/output bytes/time where available,
 aggregate throughput, and a caveated observed-rate ETA. A SIGINT may leave
-`data.parquet.tmp`, but it never counts as complete and startup removes it
-before restarting the unit.
+`data.parquet.tmp`, but it never counts as complete and startup removes it only
+for requested units before restarting the unit.
 
 Certified serial evidence from the completed `2026-04-01` perpetual smoke is
 `book_delta_v2=1441.344s`, `book=242.671s`, and `trades=24.936s`: about
 **28.5 minutes/day** and about **29 serial hours for 61 development days**.
-The arithmetic 4-worker reference range is about **7.2-29.0 hours**, not a
-bound: object layout, latency, contention, retries, and quota can put actual
-runtime outside it, and no 4x live scaling is guaranteed. Coinbase's prior path
-used threaded `lakeapi` plus its cache; this downloader streams into its own
-persistent normalized raw store, so the timings are not like-for-like.
+The arithmetic 4-worker reference range is about **7.2-29.0 hours** for that
+exact measured perpetual scope, not a bound: projections are unavailable for
+spot or other unmeasured units; object layout, latency, contention, retries,
+and quota can put actual runtime outside it, and no 4x live scaling is
+guaranteed. Coinbase's prior path used threaded `lakeapi` plus its cache; this
+downloader streams into its own persistent normalized raw store, so the timings
+are not like-for-like.
 
 A deterministic local 120,000-row/eight-row-group Parquet benchmark with 3 ms
 injected latency per file read reduced range calls from **65 to 9** while

@@ -233,7 +233,7 @@ Per-day sizes (docs §6 rows are **measured**, BTC 2026-04-01; the `book` seed p
 | **Binance-only, output feeds + `book` seed** | **~1.23 GB/day** (derived: all-feeds 1.17 §6 − Coinbase 0.30 + ~0.36 seed) | — |
 
 - **109 M rows/day (perp `book_delta_v2`) is the binding row count.** Stage 1 streams row-groups (never materializes the day). Stage 2 recon needs columnar arrays (`ts:int64, seq:int64, price:f64, size:f64, side:bool` ≈ 3.6 GB for 109 M rows) — acceptable within 32 GB for **one** day at a time; a streaming Arrow row-group reader into the native core is the documented follow-on (`docs/superpowers/plans/2026-07-01-native-recon-engine.md` §Follow-on architecture: "streaming Arrow/parquet read is the next bottleneck after replay") and is the required path before high perp `--jobs`.
-- **32 GB RAM is the binding constraint.** The immutable G0-BN v2 contract pins Stage-1 `download_jobs=4` with a hard maximum of 4: each independent worker streams and pre-buffers at most one row group. It separately pins Stage-2 `recon_jobs=1` with a hard maximum of 1 because a 109 M-row perpetual reconstruction is memory-heavy and the native engine already parallelizes internally. These are operational bounds, not a guaranteed speedup.
+- **32 GB RAM is the binding constraint.** The immutable G0-BN v2 contract pins Stage-1 `download_jobs=4` with a hard maximum of 4: each independent worker streams and pre-buffers at most one row group. It separately pins Stage-2 `recon_jobs=1` with a hard maximum of 1 because a 109 M-row perpetual reconstruction is memory-heavy and the native engine already parallelizes internally. The runner defaults its work-process ceiling to 1 and the exact G0-BN command carries `--max-jobs 1`, so omitted or unchanged-ceiling work-side drift fails before raw-file access; the generic runner retains parallelism only when another reviewed workflow explicitly raises that ceiling. These are operational bounds, not a guaranteed speedup.
 - **2 TB SSD:** Binance-only raw ≈ 1.23 GB/day (output feeds + `book` seed) → ~671 GB for 18 mo (547 d); processed top-K collapses to GB-scale (docs §7: "≤60 GB processed"). Comfortable on 2 TB. Keep raw compressed; **never** decompress `book_delta_v2` to disk (docs §7).
 - **Stream/chunk per day; avoid multi-day raw loads.** Both stages operate one `(instrument, day)` at a time. Never `load_data` a multi-day range into one DataFrame.
 - **Parallelism by day/instrument only.** A single book stream is sequential; `(instrument, day)` jobs are the only parallel axis. Quota-aware: parallel *download* still shares the one monthly budget — the gate estimates the whole batch, not per-job.
@@ -242,8 +242,9 @@ Per-day sizes (docs §6 rows are **measured**, BTC 2026-04-01; the `book` seed p
 perpetual serial units measured `book_delta_v2=1441.344s`, `book=242.671s`,
 and `trades=24.936s`: about 28.5 minutes/day and about 29 serial hours for 61
 development days. At four workers, 7.2-29.0 hours is an arithmetic reference
-range only; actual runtime may fall outside it and 4x live scaling is not
-guaranteed.
+range only for that exact measured perpetual scope; projection is unavailable
+for spot or other unmeasured units. Actual runtime may fall outside it and 4x
+live scaling is not guaranteed.
 
 **Quota / storage budget (derived from docs §6):** Binance-only (output feeds + `book` seed) 18 mo ≈ **~671 GB** (≈ 1.23 GB/day × 547 d) > two 300 GB/month windows → stage across **~3** quota windows (matching docs §6's all-feed staging), or use a higher plan. The batch planner enforces this.
 
@@ -269,7 +270,7 @@ ingest/download_lake_binance.py                              # Stage 1
   --jobs     N                1..4 independent streaming units; G0-BN v2 pins 4
 
 scripts/run_binance_recon.py                                 # Stage 2 (local, quota-free)
-  --start/--end/--instrument/--feeds/--k 10/--grid-s 1.0/--engine auto|native|python/--jobs 1  # G0-BN v2 pin
+  --start/--end/--instrument/--feeds/--k 10/--grid-s 1.0/--engine auto|native|python/--jobs 1/--max-jobs 1  # exact G0-BN v2 pin
   --raw  data/raw/lake        --out data/processed
 
 scripts/plan_lake_binance_batches.py                         # staging (planning only, no vendor I/O)
@@ -304,7 +305,7 @@ All synthetic; **no live vendor calls in tests** (inject fakes for any lister/re
 8. **Engine-time selection + `origin_time` fallback** (`test_lake_binance_engine_time.py`): exercises the Requirement 4 policy so an implementation cannot satisfy the plan while Stage 2 still crashes on a partial day — (a) 100% `origin_time` → selected, recon-ready; (b) **99.x%-but-not-100%** `origin_time` with fully-populated `received_time` → falls back to `received_time` for the whole day and stamps `engine_time_col`; (c) neither clock fully populated → the invalid-timestamp rows are dropped from the returned frame and the drop count is recorded; **(d) joint clock** — a delta frame and the `book` seed frame resolve to the **same** column (a partial-`origin_time` delta frame forces the seed frame to `received_time` too, never a mixed exchange/capture axis). In every case, assert every returned cleaned frame (the exact frames handed to recon) passes `recon.ingest._require_populated` on the **one** shared column — recon never receives a partially-populated or mixed-clock engine-time axis.
 9. **Seed-source crossed-rate gate** (`test_lake_binance_seed_source.py`): a synthetic `book` seed frame with **>5%** crossed candidates → the day classifies `inconclusive` and **no** certified top-K frame is emitted, even when one individually-valid snapshot exists; a clean (**<5%**) source certifies normally. Asserts `seed_source_crossed_frac` is recorded and drives the gate (mirrors the Coinbase `run_coinbase_quality_map.py` contract; no vendor access).
 
-10. **Concurrency contract** (`test_g0bn_acquisition_preflight.py`, `test_download_lake_binance_pure.py`): reject missing, bool-as-int, zero/negative, excessive, and within-bound drift for Stage-1/Stage-2 jobs before any vendor/quota call; exact packet commands bind matching stage/jobs in both the offline gate and work command.
+10. **Concurrency contract** (`test_g0bn_acquisition_preflight.py`, `test_download_lake_binance_pure.py`, `test_run_binance_recon.py`): reject missing, bool-as-int, zero/negative, excessive, and within-bound drift for Stage-1/Stage-2 jobs before any vendor/quota/raw-file access; exact packet commands bind matching stage/jobs in the offline gate and bind the Stage-2 maximum in the work process.
 11. **Parallel cancellation and progress** (`test_download_lake_binance.py`): a quota race starts no more than the bounded initial wave, publishes no partial, leaves a valid deterministic manifest, accounts every hard-stop/cancelled unit in the report, skips post-stop vendor telemetry, and emits serial/parallel/error terminal progress.
 12. **SIGINT resume** (`test_download_lake_binance.py`): an interrupted stream may leave only `.tmp`; it is not complete or manifested, and `--resume` removes/restarts it into one valid final record.
 13. **Bounded high-latency read** (`test_download_lake_binance.py`): local synthetic Parquet proves one-row-group pre-buffering preserves rows/bytes and batch bounds while materially reducing modeled high-latency range calls, with no network or vendor access.

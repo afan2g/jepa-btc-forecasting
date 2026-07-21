@@ -146,6 +146,8 @@ def test_runtime_projection_is_caveated_arithmetic_not_live_guarantee():
     units = dl.plan_units(["binance-perp"], "book_delta_v2,trades", days)
     projection = dl.runtime_projection(units, 4)
     assert projection["available"] is True
+    assert projection["basis"]["exchange"] == "BINANCE_FUTURES"
+    assert projection["basis"]["symbol"] == "BTC-USDT-PERP"
     assert projection["basis"]["seconds_by_feed"] == {
         "book_delta_v2": 1441.344,
         "book": 242.671,
@@ -156,6 +158,15 @@ def test_runtime_projection_is_caveated_arithmetic_not_live_guarantee():
     assert projection["idealized_jobs_floor_seconds"] == pytest.approx(26061.503)
     assert "not a bound" in projection["caveat"]
     assert "does not guarantee 4x live scaling" in projection["caveat"]
+
+
+def test_runtime_projection_refuses_unmeasured_spot_scope():
+    units = dl.plan_units(["binance-spot"], "trades", ["2026-04-01"])
+    projection = dl.runtime_projection(units, 1)
+    assert projection["available"] is False
+    assert projection["unmeasured_units"] == ["BINANCE/BTC-USDT/trades"]
+    no_op = dl.runtime_projection([], 1, scope_units=units)
+    assert no_op["available"] is False
 
 
 @pytest.mark.parametrize("jobs", ["0", "-1", "5"])
