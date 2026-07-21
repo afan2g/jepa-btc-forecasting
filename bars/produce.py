@@ -961,7 +961,19 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
                         # the RESOLUTION consumed the gapped stretch (a late
                         # touch or an as-of vertical over missing support);
                         # an early touch before the stretch resolved entirely
-                        # on covered points and is kept
+                        # on covered points and is kept. This span is NOT
+                        # guard-extended, deliberately: the plan's ±guard_ns
+                        # window geometry (§C.3) masks VENDOR SEAMS — fuzzy
+                        # joints between feeds — while an invalid true-book
+                        # stretch is an exact, observed interval in ONE
+                        # hash-verified feed; a touch resolved on exact points
+                        # before the stretch cannot be contaminated by it
+                        # retroactively, anchor-side quality is owned by T2
+                        # rejections and the staleness cap, and with
+                        # partition_guard_ns >= the longest horizon a guard
+                        # extension here would blanket-mask every nominally
+                        # non-crossing row near any glitch and make the
+                        # early-touch keep above unreachable by construction.
                         counter.add("coverage_gap", tag)
                         continue
                     if out.t_barrier + guard_ns >= bound_ns:
