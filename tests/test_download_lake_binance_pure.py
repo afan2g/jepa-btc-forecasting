@@ -133,6 +133,19 @@ def test_backoff_seconds_grows_and_is_capped():
     assert dl._backoff_seconds(1, 1.0, 60.0, lambda: 0.0) == 0.5
 
 
+def test_implemented_cli_plan_uses_supported_instrument_selector():
+    plan = (_ROOT / "docs" / "superpowers" / "plans" /
+            "2026-07-02-binance-downloader-plan.md").read_text()
+    cli_contract = plan.split("## Requirement 8", 1)[1].split("**Exit codes**", 1)[0]
+    stage1_contract = cli_contract.split("scripts/run_binance_recon.py", 1)[0]
+
+    args = dl.parse_args(["--instrument", "binance-perp"])
+    assert args.instrument == "binance-perp"
+    assert "--instrument binance-perp,binance-spot" in stage1_contract
+    assert "--exchange" not in stage1_contract
+    assert "--symbol" not in stage1_contract
+
+
 def test_validate_download_jobs_rejects_bool_and_out_of_bounds():
     for value in (True, False, None, 1.0, 0, -1, dl.MAX_DOWNLOAD_JOBS + 1):
         with pytest.raises(ValueError, match="jobs"):

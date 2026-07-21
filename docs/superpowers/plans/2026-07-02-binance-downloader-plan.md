@@ -256,8 +256,7 @@ live scaling is not guaranteed.
 ingest/download_lake_binance.py                              # Stage 1
   --start YYYY-MM-DD          inclusive
   --end   YYYY-MM-DD          inclusive
-  --exchange BINANCE_FUTURES  (or BINANCE)      # or use --instrument {binance-perp,binance-spot}
-  --symbol   BTC-USDT-PERP    (or BTC-USDT)
+  --instrument binance-perp,binance-spot        comma list; default both in-scope instruments
   --feeds    book_delta_v2,trades,funding,open_interest,liquidations   # default: all valid; book_delta_v2 also pulls the `book` seed product
   --out      data/raw/lake    normalized store root
   --manifest PATH             override _manifest.jsonl location (per-day/feed state)
