@@ -28,7 +28,11 @@ from bars.produce import (
 from eval.g0bn_identity import development_data_identity
 from eval.writer import classify_manifest
 from eval.manifest import load_manifest
-from tests.g0bn_dev_fixtures import dev_config, runtime_cv
+from tests.g0bn_dev_fixtures import (
+    dev_config,
+    included_days as dev_included_days,
+    runtime_cv,
+)
 from tests.g0bn_protocol_fixtures import (
     make_clock,
     make_exclusions,
@@ -285,7 +289,7 @@ def test_development_realized_schedule_is_causal_and_recorded(dev_build):
 # ---------------------------------------------------------- targeted drop paths
 
 
-def _build(tmp_path, days_spec, config=None, runtime=None):
+def _build(tmp_path, days_spec, config=None, runtime=None, **over):
     """days_spec: iterable of (day, day_kwargs)."""
     world = SyntheticWorld()
     config = config or produce_config()
@@ -296,7 +300,8 @@ def _build(tmp_path, days_spec, config=None, runtime=None):
     return produce_development(
         config, runtime=runtime or make_runtime(), day_objects=day_objects,
         matrix_path=tmp_path / "matrix.parquet",
-        manifest_path=tmp_path / "manifest.json", generated_at=GEN_AT), config
+        manifest_path=tmp_path / "manifest.json", generated_at=GEN_AT,
+        **over), config
 
 
 def test_gap_between_days_drops_first_post_gap_bar_via_lookback_cap(tmp_path):
@@ -305,6 +310,38 @@ def test_gap_between_days_drops_first_post_gap_bar_via_lookback_cap(tmp_path):
     # the prior observable read carries across the excluded 11-03 gap; the first
     # 11-04 bar's look-back spans the gap and must be dropped, never clipped
     assert all(n >= 1 for n in result.drop_counts["lookback_cap"].values())
+
+
+def test_full_scope_schedule_pin_gate(tmp_path):
+    """Canonical (full included-day scope) development builds must reproduce
+    `config.clock.development_schedule_sha256` exactly before anything is
+    published; subset builds skip the gate (they cannot match a full-scope pin
+    by construction); the pin-minting bootstrap runs with
+    verify_schedule_pin=False and seals the realized hash it publishes."""
+    days_spec = [(d, {}) for d in dev_included_days()]
+
+    # 1) bootstrap mint: full scope under the placeholder pin, explicit escape
+    mint_dir = tmp_path / "mint"
+    mint_dir.mkdir()
+    minted, _ = _build(mint_dir, days_spec, verify_schedule_pin=False)
+    realized = minted.realized_threshold_schedule_sha256
+
+    # 2) canonical run under the sealed pin: the default enforces equality
+    good_dir = tmp_path / "good"
+    good_dir.mkdir()
+    config = produce_config(clock=make_clock(
+        target_bars_per_day=TARGET_BARS_PER_DAY, time_cap_ns=TIME_CAP_NS,
+        development_schedule_sha256=realized))
+    result, _ = _build(good_dir, days_spec, config=config)
+    assert result.realized_threshold_schedule_sha256 == realized
+
+    # 3) a full-scope build under a non-matching pin fails closed pre-publish
+    bad_dir = tmp_path / "bad"
+    bad_dir.mkdir()
+    with pytest.raises(ValueError, match="development_schedule_sha256"):
+        _build(bad_dir, days_spec)
+    assert not (bad_dir / "matrix.parquet").exists()
+    assert not (bad_dir / "manifest.json").exists()
 
 
 def test_thin_horizon_below_n_groups_fails_closed(tmp_path):

@@ -1123,22 +1123,34 @@ def produce_development(config: dict, *, runtime: RuntimeParams,
                         generated_at: str,
                         extra_cols: tuple = ("latency_drift_bps",
                                              "emitted_by_time_cap"),
+                        verify_schedule_pin: bool | None = None,
                         ) -> DevelopmentBuild:
     """Deterministic development build over an EXPLICIT day/object allowlist
     (`{day: {normalized product: path}}` — never a range, glob, or discovery).
     Runs the full validate-then-write path (plan §H) and returns the logical
     development data identity trials bind to.
 
-    The realized threshold schedule hash is REPORTED (manifest bar_clock +
-    result), never verified against `config.clock.development_schedule_sha256`
-    here: subset/calibration builds cannot match a full-scope pin by
-    construction, and the pin-minting bootstrap run predates the pin. The 67-E
-    pre-burn preflight owns that reconciliation — it compares the canonical
-    full-scope development manifest's realized hash against the config pin
+    Realized-schedule pin (`config.clock.development_schedule_sha256`,
+    `verify_schedule_pin`): with the default None, the realized threshold
+    schedule hash is verified against the config pin exactly when the build
+    covers the config's FULL included-day scope — a canonical, trial-bindable
+    build must realize the sealed schedule, and a wrong RuntimeParams.threshold
+    fails closed before anything is published. Subset/calibration builds cannot
+    match a full-scope pin by construction and skip the gate (their manifests
+    still REPORT the realized hash, and their build identity commits to the
+    actual runtime used). Pass False only for the pin-minting bootstrap run,
+    which predates the pin and publishes the realized hash the operator seals;
+    pass True to force the gate on any build. The 67-E pre-burn preflight
+    additionally reconciles the canonical manifest against the sealed pin
     before any burn (the one-shot's own load-bearing pin, the development-END
     clock state, IS hash-enforced by materialize_holdout)."""
     validate_protocol_config(config)
     _validate_runtime(runtime, config)
+    if verify_schedule_pin is not None and not isinstance(verify_schedule_pin,
+                                                          bool):
+        _fail("verify_schedule_pin",
+              f"must be None or a plain bool; got "
+              f"{type(verify_schedule_pin).__name__}")
     _validate_generated_at(generated_at)
     if not isinstance(day_objects, Mapping) or not day_objects:
         _fail("day_objects", "must be a non-empty {day: {product: path}} mapping "
@@ -1169,6 +1181,17 @@ def produce_development(config: dict, *, runtime: RuntimeParams,
         extra_cols=tuple(extra_cols))
 
     schedule_sha = _realized_schedule_sha256(build.realized_schedule)
+    enforce_pin = (verify_schedule_pin if verify_schedule_pin is not None
+                   else sorted(days) == sorted(included))
+    if enforce_pin:
+        pinned = config["clock"]["development_schedule_sha256"]
+        if schedule_sha != pinned:
+            _fail("realized threshold schedule",
+                  f"hash {schedule_sha} does not reproduce the config's "
+                  f"development_schedule_sha256 pin {pinned} for a canonical "
+                  "full-scope build; a trial-bindable development matrix must "
+                  "realize exactly the sealed schedule (only the pin-minting "
+                  "bootstrap run may pass verify_schedule_pin=False)")
     sources = [
         {"name": product, "day": day, "sha256": build.source_sha256s[day][product]}
         for day in days for product in G0BN_DATA_SOURCES
@@ -1356,6 +1379,10 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
     oc = plan["output_contract"]
     extra_cols = tuple(oc["extra_cols"])
     _validate_runtime(runtime, config)
+    # config-deterministic cost identity: a mistyped/copied assumption source
+    # must fail in this no-I/O preflight, never after the claim read and the
+    # sealed-object hash pass (Codex round 25)
+    _cost_assumption(config)
     _validate_generated_at(generated_at)
     part = config["partition"]
     holdout_start_ns = int(part["holdout_start_ns"])

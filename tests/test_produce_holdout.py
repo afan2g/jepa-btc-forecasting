@@ -38,6 +38,7 @@ from tests.g0bn_holdout_fixtures import make_inventory, sealed_config_kwargs
 from tests.g0bn_protocol_fixtures import (
     dev_days,
     make_clock,
+    make_costs,
     make_exclusions,
     make_partition,
     sha_hex,
@@ -382,6 +383,48 @@ def test_missing_output_parent_rejects_before_any_source_open(custody, tmp_path,
                  "g0bn-materialization-attestation-v1.json",
                  "g0bn-materialization-attestation-v1.json.tmp"):
         assert not (tmp_path / name).exists()
+
+
+def test_mistyped_cost_source_rejects_before_claim_and_sources(custody, tmp_path,
+                                                               monkeypatch):
+    """A copied/mistyped cost-assumption source is deterministic from the config
+    alone, so it must fail in the no-I/O preflight — never after the claim read
+    and sealed-object pinning (a pure config error must not consume the
+    one-shot)."""
+    bad_costs = make_costs()
+    bad_costs["cost_assumption"] = dict(bad_costs["cost_assumption"],
+                                        source="coinbase_normalized_v1")
+    state_sha = clock_state_sha256(CLOCK_STATE)
+    config2 = dev_config(
+        clock=make_clock(target_bars_per_day=TARGET_BARS_PER_DAY,
+                         time_cap_ns=TIME_CAP_NS,
+                         development_end_state_sha256=state_sha),
+        exclusions=_custody_exclusions(),
+        costs=bad_costs,
+        **sealed_config_kwargs(custody["inventory"]))
+    frame, manifest, config2, identity = dev_bundle(config=config2)
+    run2 = run_g0bn_development(frame, manifest, config2, identity,
+                                durable_ledger())
+    plan2 = build_holdout_plan(config2, custody["inventory"], generated_at=GEN_AT)
+    freeze2 = build_freeze(run2, plan2, inventory=custody["inventory"],
+                           generated_at=GEN_AT)
+    claim_path = tmp_path / "g0bn-raw-access-claim-v1.json"
+    _write_claim(claim_path, config=config2, plan=plan2, freeze=freeze2)
+
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    with pytest.raises(ValueError, match="cost assumption identity mismatch"):
+        _materialize(custody, tmp_path, config=config2, plan=plan2,
+                     freeze=freeze2, raw_access_claim_path=claim_path)
+    object_files = {str(p) for p in custody["object_paths"].values()}
+    assert not (set(opened) & object_files)
+    assert str(claim_path) not in opened
 
 
 def test_dangling_output_symlink_rejects_before_any_source_open(custody, tmp_path,
