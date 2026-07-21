@@ -147,7 +147,7 @@ def walk_keys(obj):
 
 def test_plan_scope_is_exactly_92_days_and_three_products():
     plan = build_plan()
-    assert plan["schema"] == "g0bn-acquisition-plan-v1"
+    assert plan["schema"] == "g0bn-acquisition-plan-v2"
     assert plan["provider"] == "crypto-lake"
     assert plan["fallback_policy"] == "none"
     assert plan["instrument"] == INSTRUMENT
@@ -222,7 +222,40 @@ def test_plan_execution_pins_match_downloader_constants():
     assert ex["backoff_base_s"] == dl.DEFAULT_BACKOFF_BASE_S
     assert ex["backoff_cap_s"] == dl.DEFAULT_BACKOFF_CAP_S
     assert ex["expensive_compute_lock"] == "/tmp/jepa-expensive-compute.lock"
-    assert ex["jobs"] == 1
+    assert ex["download_jobs"] == ex["download_jobs_max"] == dl.MAX_DOWNLOAD_JOBS == 4
+    assert ex["recon_jobs"] == ex["recon_jobs_max"] == 1
+    assert "row-group pre-buffer" in ex["concurrency_rationale"]
+    assert "memory-heavy" in ex["concurrency_rationale"]
+    assert "guaranteed" in ex["concurrency_rationale"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "drop"),
+    [
+        ("download_jobs", True, False),       # bool is an int subclass in Python
+        ("download_jobs", None, True),        # missing immutable input
+        ("download_jobs", 5, False),          # above the Stage-1 ceiling
+        ("download_jobs", 3, False),          # within bounds but drifted from approval
+        ("download_jobs_max", True, False),
+        ("download_jobs_max", None, True),
+        ("download_jobs_max", 5, False),
+        ("download_jobs_max", 3, False),
+        ("recon_jobs", True, False),
+        ("recon_jobs", None, True),
+        ("recon_jobs", 2, False),             # above the memory-safe Stage-2 ceiling
+        ("recon_jobs_max", True, False),
+        ("recon_jobs_max", None, True),
+        ("recon_jobs_max", 2, False),
+    ],
+)
+def test_plan_validator_rejects_invalid_or_drifted_stage_concurrency(field, value, drop):
+    plan = copy.deepcopy(build_plan())
+    if drop:
+        plan["execution"].pop(field)
+    else:
+        plan["execution"][field] = value
+    with pytest.raises(ValueError, match=field):
+        pf.validate_acquisition_plan(resha(plan))
 
 
 def test_plan_quota_fits_a_single_monthly_window():
@@ -449,7 +482,7 @@ def test_validator_pins_custody_disclosures():
 def test_packet_builds_and_validates_against_plan():
     plan = build_plan()
     packet = pf.build_approval_packet(plan)
-    assert packet["schema"] == "g0bn-acquisition-approval-packet-v1"
+    assert packet["schema"] == "g0bn-acquisition-approval-packet-v2"
     assert packet["inert"] is True
     assert packet["plan_sha256"] == plan["sha256"]
     assert packet["no_vendor_io_statement"] == pf.NO_VENDOR_IO_STATEMENT
@@ -481,6 +514,17 @@ def test_packet_commands_are_exact_inert_and_lock_serialized():
         # holdout custodian identity) before the real work (Codex deep P1s).
         partition = "holdout" if step.startswith("holdout") else "development"
         assert f"verify-execution --partition {partition}" in cmd
+        stage = "download" if step.endswith("download") else "recon"
+        jobs = 4 if stage == "download" else 1
+        prefix = "flock -w 14400 /tmp/jepa-expensive-compute.lock sh -c \""
+        verify, work = cmd[len(prefix):-1].split(" && ")
+        assert verify == (
+            ".venv/bin/python -m ingest.g0bn_acquisition_preflight "
+            f"verify-execution --partition {partition} --stage {stage} --jobs {jobs} "
+            "--plan data/reports/g0bn_acquisition_preflight/g0bn_acquisition_plan.json"
+        )
+        assert work.endswith(f"--jobs {jobs} --resume")
+        assert cmd.count(f"--jobs {jobs}") == 2
         assert cmd.index("verify-execution") < cmd.index("--days-file")
         assert " && " in cmd
     dev_dl = by_step["development-download"]["command"]
@@ -489,7 +533,7 @@ def test_packet_commands_are_exact_inert_and_lock_serialized():
     assert f"--days-file {plan['development']['days_file']}" in dev_dl
     assert f"--out {plan['development']['raw_root']}" in dev_dl
     assert "--max-gb" in dev_dl
-    assert "--jobs 1" in dev_dl
+    assert dev_dl.count("--jobs 4") == 2 and "--stage download" in dev_dl
     hold_dl = by_step["holdout-download"]["command"]
     assert f"--out {plan['holdout']['raw_root']}" in hold_dl
     assert by_step["holdout-download"]["run_as"] == "custodian"
@@ -518,6 +562,9 @@ def test_packet_caps_cover_estimates_within_quota():
     assert caps["development_max_gb"] + caps["holdout_max_gb"] <= \
         lb.QUOTA_GB - lb.DEFAULT_HEADROOM_GB
     cost = pf.build_approval_packet(plan)["vendor_cost"]
+    assert caps["download_jobs"] == caps["download_jobs_max"] == 4
+    assert caps["recon_jobs"] == caps["recon_jobs_max"] == 1
+    assert caps["concurrency_rationale"] == plan["execution"]["concurrency_rationale"]
     assert cost["incremental_usd_within_quota"] == 0.0
     assert cost["quota_consumed_gb_estimate"] == plan["estimates"]["total_gb"]
 
@@ -539,12 +586,68 @@ def test_packet_rejects_tampering_and_unknown_fields():
                                     plan)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "drop"),
+    [
+        ("download_jobs", True, False),
+        ("download_jobs", None, True),
+        ("download_jobs", 5, False),
+        ("download_jobs", 3, False),
+        ("download_jobs_max", True, False),
+        ("download_jobs_max", None, True),
+        ("download_jobs_max", 5, False),
+        ("download_jobs_max", 3, False),
+        ("recon_jobs", True, False),
+        ("recon_jobs", None, True),
+        ("recon_jobs", 2, False),
+        ("recon_jobs_max", True, False),
+        ("recon_jobs_max", None, True),
+        ("recon_jobs_max", 2, False),
+    ],
+)
+def test_packet_rejects_invalid_or_drifted_stage_concurrency(field, value, drop):
+    plan = build_plan()
+    packet = copy.deepcopy(pf.build_approval_packet(plan))
+    if drop:
+        packet["caps"].pop(field)
+    else:
+        packet["caps"][field] = value
+    with pytest.raises(ValueError, match=field):
+        pf.validate_approval_packet(resha(packet), plan)
+
+
+def test_packet_pins_serial_runtime_assumptions_and_supersedes_v1_approval():
+    packet = pf.build_approval_packet(build_plan())
+    runtime = packet["runtime_assumptions"]
+    assert runtime["certified_serial_day"] == "2026-04-01"
+    assert runtime["certified_serial_seconds_by_product"] == {
+        "book": 242.671,
+        "book_delta_v2": 1441.344,
+        "trades": 24.936,
+    }
+    assert runtime["serial_minutes_per_day_approx"] == 28.5
+    assert runtime["development_days"] == 61
+    assert runtime["development_serial_hours_approx"] == 29.0
+    assert runtime["idealized_development_runtime_range_hours"] == [7.2, 29.0]
+    assert "threaded lakeapi" in runtime["comparison"]
+    assert "persistent normalized raw store" in runtime["comparison"]
+    assert "no 4x live scaling is guaranteed" in runtime["caveat"]
+
+    prior = packet["superseded_operational_evidence"]
+    assert prior["prior_plan_sha256"] == pf.PRIOR_PLAN_SHA256
+    assert prior["prior_packet_sha256"] == pf.PRIOR_PACKET_SHA256
+    assert prior["status"] == "superseded_operational_evidence_only"
+    assert "regenerate" in prior["required_action"]
+    assert "fresh explicit human approval" in prior["required_action"]
+    assert "must not be reused" in prior["required_action"]
+
+
 def test_packet_stop_conditions_and_custody_section():
     plan = build_plan()
     packet = pf.build_approval_packet(plan)
     stops = "\n".join(packet["stop_conditions"])
     for needle in ("exit 2", "exit 3", "exit 4", "quota", "disk",
-                   "schema drift", "fallback"):
+                   "schema drift", "fallback", "superseded", "fresh explicit"):
         assert needle in stops
     custody = packet["custody"]
     assert custody["custodian_identity"] == CUSTODIAN
@@ -564,6 +667,12 @@ def test_packet_markdown_renders_every_command():
     for c in packet["commands"]:
         assert c["command"] in md
     assert pf.NO_VENDOR_IO_STATEMENT in md
+    assert "FRESH APPROVAL REQUIRED" in md
+    assert "1441.344s" in md and "242.671s" in md and "24.936s" in md
+    assert "28.5 minutes/day" in md and "29.0 serial hours" in md
+    assert "threaded lakeapi" in md and "persistent normalized raw store" in md
+    assert "no 4x live scaling is guaranteed" in md
+    assert pf.PRIOR_PLAN_SHA256 in md and pf.PRIOR_PACKET_SHA256 in md
 
 
 # ------------------------------------------------------- permission-policy evidence
@@ -957,24 +1066,35 @@ def test_cli_verify_execution_gate(tmp_path, monkeypatch, capsys):
     assert run_cli(["plan", "--custodian-identity", CUSTODIAN,
                     "--operator-identity", OPERATOR]) == 0
     plan_path = pf.DEFAULT_OUT_DIR + "/g0bn_acquisition_plan.json"
-    # Development: days-file content matches the plan commitment -> OK.
+    # Development: days-file content and exact stage concurrency match the plan commitment -> OK.
     assert run_cli(["verify-execution", "--partition", "development",
-                    "--plan", plan_path]) == 0
+                    "--stage", "download", "--jobs", "4", "--plan", plan_path]) == 0
+    assert run_cli(["verify-execution", "--partition", "development",
+                    "--stage", "recon", "--jobs", "1", "--plan", plan_path]) == 0
+
+    # A within-bound download drift and a download/recon mix-up both refuse.
+    assert run_cli(["verify-execution", "--partition", "development",
+                    "--stage", "download", "--jobs", "3", "--plan", plan_path]) == 2
+    assert "verify-execution.jobs" in capsys.readouterr().err
+    assert run_cli(["verify-execution", "--partition", "development",
+                    "--stage", "recon", "--jobs", "4", "--plan", plan_path]) == 2
+    assert "verify-execution.jobs" in capsys.readouterr().err
+
     # Holdout refuses for anyone who is not the provisioned custodian identity
     # (the packet's run_as is documentation; this is the enforcement).
     rc = run_cli(["verify-execution", "--partition", "holdout",
-                  "--plan", plan_path])
+                  "--stage", "download", "--jobs", "4", "--plan", plan_path])
     assert rc == 2
     assert "custodian" in capsys.readouterr().err
     monkeypatch.setattr(pf.getpass, "getuser", lambda: CUSTODIAN)
     assert run_cli(["verify-execution", "--partition", "holdout",
-                    "--plan", plan_path]) == 0
+                    "--stage", "download", "--jobs", "4", "--plan", plan_path]) == 0
     # An edited/stale days file refuses BEFORE any vendor I/O could start.
     days_file = pf.DEV_DAYS_FILE
     with open(days_file, "a") as f:
         f.write("2026-02-01\n")
     rc = run_cli(["verify-execution", "--partition", "development",
-                  "--plan", plan_path])
+                  "--stage", "download", "--jobs", "4", "--plan", plan_path])
     assert rc == 2
     assert "days_file_sha256" in capsys.readouterr().err
 

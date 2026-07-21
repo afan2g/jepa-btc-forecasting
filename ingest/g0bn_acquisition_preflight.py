@@ -96,8 +96,8 @@ from eval.writer import G0BN_DATA_SOURCES  # noqa: E402
 from ingest import download_lake_binance as dl  # noqa: E402
 from ingest import lake_binance as lb  # noqa: E402
 
-ACQUISITION_PLAN_SCHEMA = "g0bn-acquisition-plan-v1"
-APPROVAL_PACKET_SCHEMA = "g0bn-acquisition-approval-packet-v1"
+ACQUISITION_PLAN_SCHEMA = "g0bn-acquisition-plan-v2"
+APPROVAL_PACKET_SCHEMA = "g0bn-acquisition-approval-packet-v2"
 PERMISSION_EVIDENCE_SCHEMA = "g0bn-permission-policy-evidence-v1"
 
 INSTRUMENT_KEY = "binance-perp"
@@ -128,6 +128,62 @@ HOLDOUT_DAYS_FILE = DEFAULT_OUT_DIR + "/holdout_days.txt"
 
 EXPENSIVE_COMPUTE_LOCK = "/tmp/jepa-expensive-compute.lock"
 LOCK_WRAPPER = f"flock -w 14400 {EXPENSIVE_COMPUTE_LOCK}"
+
+# Stage-specific concurrency is part of the immutable approval contract. Four Stage-1 workers each
+# own one independent streaming unit and at most one pre-buffered row group. Stage 2 remains serial
+# because reconstruction is memory-heavy and already uses internal native-engine parallelism.
+DOWNLOAD_JOBS = 4
+DOWNLOAD_JOBS_MAX = dl.MAX_DOWNLOAD_JOBS
+RECON_JOBS = 1
+RECON_JOBS_MAX = 1
+CONCURRENCY_RATIONALE = (
+    "Stage 1 may overlap four independent high-latency S3 streams while each worker remains bounded "
+    "to one row-group pre-buffer; Stage 2 remains one worker because reconstruction is memory-heavy. "
+    "The four-worker ceiling is operational, not a guaranteed live speedup."
+)
+
+PRIOR_PLAN_SHA256 = "62cca478f1c47ce3981c246d6e928b62709bbcc6c75259a1e16d9aa2bcd80f86"
+PRIOR_PACKET_SHA256 = "c0e8b6e46ab65cb9231c732e0bf7653f94baf83e147c86ebd49eff3c451a9a12"
+SUPERSEDED_EVIDENCE = {
+    "prior_plan_sha256": PRIOR_PLAN_SHA256,
+    "prior_packet_sha256": PRIOR_PACKET_SHA256,
+    "prior_approval_scope": "development-download and development-recon only",
+    "status": "superseded_operational_evidence_only",
+    "required_action": (
+        "After this change merges, regenerate the v2 plan and packet and obtain fresh explicit human "
+        "approval on GitHub issue #68 before any retry. The prior approval must not be reused."
+    ),
+}
+
+
+def _runtime_assumptions() -> dict:
+    serial_seconds = sum(
+        dl.CERTIFIED_SERIAL_SECS_BY_FEED[product] for product in PRODUCTS)
+    development_serial_seconds = serial_seconds * len(DEV_DAYS)
+    return {
+        "evidence_kind": "certified_serial_smoke_plus_arithmetic_projection",
+        "certified_serial_day": dl.CERTIFIED_SERIAL_DAY,
+        "certified_serial_seconds_by_product": {
+            product: dl.CERTIFIED_SERIAL_SECS_BY_FEED[product] for product in PRODUCTS
+        },
+        "serial_seconds_per_day": round(serial_seconds, 3),
+        "serial_minutes_per_day_approx": 28.5,
+        "development_days": len(DEV_DAYS),
+        "development_serial_hours_approx": 29.0,
+        "idealized_development_runtime_range_hours": [
+            round(development_serial_seconds / DOWNLOAD_JOBS / 3600, 1),
+            round(development_serial_seconds / 3600, 1),
+        ],
+        "comparison": (
+            "The prior Coinbase path used threaded lakeapi plus lakeapi's cache. This Binance "
+            "downloader streams into its own persistent normalized raw store, so the timings are "
+            "not a like-for-like scaling baseline."
+        ),
+        "caveat": (
+            "The range is arithmetic context only. Object layout, latency, contention, retries, "
+            "and quota can put actual runtime outside it; no 4x live scaling is guaranteed."
+        ),
+    }
 
 # Per-command --max-gb cap: the ceiling of the partition estimate with 10% slack.
 # If the downloader's own pre-transfer estimate drifts above the cap it refuses
@@ -224,7 +280,8 @@ _DISK_FIELDS = ("raw_safety_factor", "normalized_allowance_gb", "required_free_g
 _EXECUTION_FIELDS = (
     "downloader", "recon_runner", "retries", "backoff_base_s", "backoff_cap_s",
     "atomic_write_rule", "resume_rule", "quota_gate_rule",
-    "expensive_compute_lock", "jobs",
+    "expensive_compute_lock", "download_jobs", "download_jobs_max",
+    "recon_jobs", "recon_jobs_max", "concurrency_rationale",
 )
 
 _CUSTODY_FIELDS = (
@@ -243,11 +300,18 @@ _EVIDENCE_FIELDS = (
 
 _CAPTURE_FIELDS = ("method", "command", "policy_document_sha256")
 
+_CAP_FIELDS = (
+    "development_max_gb", "holdout_max_gb", "cap_rule", "quota_gb_per_month",
+    "headroom_gb", "download_jobs", "download_jobs_max", "recon_jobs",
+    "recon_jobs_max", "concurrency_rationale", "allow_broad_forbidden",
+)
+
 _PACKET_FIELDS = (
     "schema", "protocol_id", "pilot_id", "holdout_universe_id", "transaction_id",
     "plan_sha256", "inert", "approval_authority", "window", "request_totals",
-    "caps", "vendor_cost", "commands", "stop_conditions", "custody",
-    "no_vendor_io_statement", "generated_at", "sha256",
+    "caps", "vendor_cost", "runtime_assumptions", "superseded_operational_evidence",
+    "commands", "stop_conditions", "custody", "no_vendor_io_statement",
+    "generated_at", "sha256",
 )
 
 # Effective-permission mechanisms that ARE independent custody (a policy layer
@@ -293,6 +357,16 @@ def _identity(path: str, value) -> str:
         _fail(path, f"must be a single shell-inert token matching "
                     f"[A-Za-z0-9][A-Za-z0-9._@-]* (it is interpolated into "
                     f"approved commands and canonical hashes); got {value!r}")
+    return value
+
+
+def _strict_jobs(path: str, value, *, expected: int, maximum: int) -> int:
+    """Validate concurrency without Python's bool-is-int equality loophole."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        _fail(path, f"must be an integer, not {type(value).__name__}")
+    if not 1 <= value <= maximum:
+        _fail(path, f"must be between 1 and {maximum}; got {value}")
+    _exact(path, value, expected)
     return value
 
 
@@ -398,7 +472,7 @@ def build_acquisition_plan(*, custodian_identity: str, operator_identity: str,
                            dev_normalized_root: str = DEV_NORMALIZED_ROOT,
                            holdout_normalized_root: str = HOLDOUT_NORMALIZED_ROOT,
                            generated_at: str | None = None) -> dict:
-    """Build (and fail-closed validate) the deterministic `g0bn-acquisition-plan-v1`.
+    """Build (and fail-closed validate) the deterministic `g0bn-acquisition-plan-v2`.
 
     Identical inputs produce an identical plan and identical `sha256`
     (`generated_at` is hash-excluded like every G0-BN artifact). All byte
@@ -462,7 +536,11 @@ def build_acquisition_plan(*, custodian_identity: str, operator_identity: str,
             "resume_rule": "skip_final_parquet_and_sparse_accepted_v1",
             "quota_gate_rule": "check_broad_gate_before_any_transfer_v1",
             "expensive_compute_lock": EXPENSIVE_COMPUTE_LOCK,
-            "jobs": 1,
+            "download_jobs": DOWNLOAD_JOBS,
+            "download_jobs_max": DOWNLOAD_JOBS_MAX,
+            "recon_jobs": RECON_JOBS,
+            "recon_jobs_max": RECON_JOBS_MAX,
+            "concurrency_rationale": CONCURRENCY_RATIONALE,
         },
         "custody": {
             "custodian_identity": custodian_identity,
@@ -519,7 +597,7 @@ def _validate_partition(path: str, block, name: str, days_expected, *,
 
 
 def validate_acquisition_plan(plan: dict) -> dict:
-    """Strict fail-closed validation of one `g0bn-acquisition-plan-v1`.
+    """Strict fail-closed validation of one `g0bn-acquisition-plan-v2`.
 
     Exact nested field sets everywhere (extra dates, products, providers,
     fallback sources, and activity-proxy fields are structurally rejected);
@@ -623,7 +701,17 @@ def validate_acquisition_plan(plan: dict) -> dict:
     _exact("disk.required_free_gb", disk["required_free_gb"],
            total_expected * RAW_DISK_SAFETY_FACTOR + NORMALIZED_DISK_ALLOWANCE_GB)
 
-    _exact("execution", plan["execution"], {
+    execution = plan["execution"]
+    _dict("execution", execution, _EXECUTION_FIELDS)
+    _strict_jobs("execution.download_jobs", execution["download_jobs"],
+                 expected=DOWNLOAD_JOBS, maximum=DOWNLOAD_JOBS_MAX)
+    _strict_jobs("execution.download_jobs_max", execution["download_jobs_max"],
+                 expected=DOWNLOAD_JOBS_MAX, maximum=dl.MAX_DOWNLOAD_JOBS)
+    _strict_jobs("execution.recon_jobs", execution["recon_jobs"],
+                 expected=RECON_JOBS, maximum=RECON_JOBS_MAX)
+    _strict_jobs("execution.recon_jobs_max", execution["recon_jobs_max"],
+                 expected=RECON_JOBS_MAX, maximum=RECON_JOBS_MAX)
+    _exact("execution", execution, {
         "downloader": "ingest/download_lake_binance.py",
         "recon_runner": "scripts/run_binance_recon.py",
         "retries": dl.DEFAULT_RETRIES,
@@ -633,7 +721,11 @@ def validate_acquisition_plan(plan: dict) -> dict:
         "resume_rule": "skip_final_parquet_and_sparse_accepted_v1",
         "quota_gate_rule": "check_broad_gate_before_any_transfer_v1",
         "expensive_compute_lock": EXPENSIVE_COMPUTE_LOCK,
-        "jobs": 1,
+        "download_jobs": DOWNLOAD_JOBS,
+        "download_jobs_max": DOWNLOAD_JOBS_MAX,
+        "recon_jobs": RECON_JOBS,
+        "recon_jobs_max": RECON_JOBS_MAX,
+        "concurrency_rationale": CONCURRENCY_RATIONALE,
     })
 
     custody = plan["custody"]
@@ -678,15 +770,11 @@ def _locked(command: str) -> str:
     return f"{LOCK_WRAPPER} {command}"
 
 
-def _verify_chain(partition_name: str, work: str) -> str:
-    """Chain the offline verify-execution gate BEFORE the real work under one
-    flock: run_as is packet metadata, not enforcement, so the approved command
-    itself must refuse when the days-file content drifts from the plan's
-    commitment or (holdout) when the effective OS user is not the custodian.
-    Every interpolated token is validated shell-inert, so the double-quoted
-    sh -c composition cannot be escaped."""
+def _verify_chain(partition_name: str, stage: str, jobs: int, work: str) -> str:
+    """Chain the stage/concurrency-aware offline gate before work under one flock."""
     verify = (f".venv/bin/python -m ingest.g0bn_acquisition_preflight "
-              f"verify-execution --partition {partition_name} "
+              f"verify-execution --partition {partition_name} --stage {stage} "
+              f"--jobs {jobs} "
               f"--plan {DEFAULT_OUT_DIR}/g0bn_acquisition_plan.json")
     return f'{LOCK_WRAPPER} sh -c "{verify} && {work}"'
 
@@ -694,7 +782,7 @@ def _verify_chain(partition_name: str, work: str) -> str:
 def _download_command(plan: dict, block: dict, cap_gb: float) -> str:
     ex = plan["execution"]
     return _verify_chain(
-        block["partition"],
+        block["partition"], "download", ex["download_jobs"],
         f".venv/bin/python {ex['downloader']} "
         f"--instrument {plan['instrument_key']} "
         f"--feeds {plan['feeds_argument']} "
@@ -703,16 +791,15 @@ def _download_command(plan: dict, block: dict, cap_gb: float) -> str:
         f"--report-dir {block['report_root']}/download "
         # NO --allow-broad: it would bypass exactly the est_gb > max_gb soft
         # gate (lake_binance.check_broad_gate), turning the advertised cap into
-        # a no-op. The approved cap is expressed by RAISING --max-gb instead,
-        # so any estimate drift above it refuses before transfer (Codex P1).
+        # a no-op. The approved cap is expressed by RAISING --max-gb instead.
         f"--max-gb {cap_gb:g} "
-        f"--retries {ex['retries']} --jobs {ex['jobs']} --resume")
+        f"--retries {ex['retries']} --jobs {ex['download_jobs']} --resume")
 
 
 def _recon_command(plan: dict, block: dict) -> str:
     ex = plan["execution"]
     return _verify_chain(
-        block["partition"],
+        block["partition"], "recon", ex["recon_jobs"],
         f".venv/bin/python {ex['recon_runner']} "
         f"--instrument {plan['instrument_key']} "
         f"--feeds {plan['feeds_argument']} "
@@ -720,11 +807,11 @@ def _recon_command(plan: dict, block: dict) -> str:
         f"--raw {block['raw_root']} "
         f"--out {block['normalized_root']} "
         f"--report-dir {block['report_root']}/recon "
-        f"--engine native --k 10 --grid-s 1.0 --jobs {ex['jobs']} --resume")
+        f"--engine native --k 10 --grid-s 1.0 --jobs {ex['recon_jobs']} --resume")
 
 
 def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dict:
-    """Derive the INERT `g0bn-acquisition-approval-packet-v1` from a validated
+    """Derive the INERT `g0bn-acquisition-approval-packet-v2` from a validated
     plan. Everything in the packet is a pure function of the plan, so
     `validate_approval_packet` can reject any tampered command by rebuilding."""
     validate_acquisition_plan(plan)
@@ -889,7 +976,11 @@ def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dic
             "cap_rule": "ceil_of_partition_estimate_times_1.1_v1",
             "quota_gb_per_month": lb.QUOTA_GB,
             "headroom_gb": lb.DEFAULT_HEADROOM_GB,
-            "jobs": 1,
+            "download_jobs": DOWNLOAD_JOBS,
+            "download_jobs_max": DOWNLOAD_JOBS_MAX,
+            "recon_jobs": RECON_JOBS,
+            "recon_jobs_max": RECON_JOBS_MAX,
+            "concurrency_rationale": CONCURRENCY_RATIONALE,
             # --allow-broad would disable the est_gb > max_gb refusal, so the
             # cap is expressed by raising --max-gb and the flag is forbidden.
             "allow_broad_forbidden": True,
@@ -903,8 +994,13 @@ def build_approval_packet(plan: dict, *, generated_at: str | None = None) -> dic
             "incremental_usd_within_quota": 0.0,
             "quota_consumed_gb_estimate": plan["estimates"]["total_gb"],
         },
+        "runtime_assumptions": _runtime_assumptions(),
+        "superseded_operational_evidence": dict(SUPERSEDED_EVIDENCE),
         "commands": commands,
         "stop_conditions": [
+            "The prior v1 plan, packet, and approval are superseded operational "
+            "evidence only; regenerate this v2 packet after merge and obtain "
+            "fresh explicit human approval on #68 before any execution.",
             "Vendor quota/credit exhaustion or auth failure: the downloader "
             "hard-stops with exit 2; do not retry, report on #68.",
             "Any errored or required-missing unit: the downloader stops with "
@@ -977,6 +1073,19 @@ def validate_approval_packet(packet: dict, plan: dict) -> dict:
     # Shape first (canonical_json on a non-JSON value would raise TypeError,
     # not the module's fail-closed ValueError), hash second, rebuild last.
     _dict("g0bn approval packet", packet, _PACKET_FIELDS)
+    _exact("schema", packet["schema"], APPROVAL_PACKET_SCHEMA)
+    caps = packet["caps"]
+    _dict("caps", caps, _CAP_FIELDS)
+    _strict_jobs("caps.download_jobs", caps["download_jobs"],
+                 expected=DOWNLOAD_JOBS, maximum=DOWNLOAD_JOBS_MAX)
+    _strict_jobs("caps.download_jobs_max", caps["download_jobs_max"],
+                 expected=DOWNLOAD_JOBS_MAX, maximum=dl.MAX_DOWNLOAD_JOBS)
+    _strict_jobs("caps.recon_jobs", caps["recon_jobs"],
+                 expected=RECON_JOBS, maximum=RECON_JOBS_MAX)
+    _strict_jobs("caps.recon_jobs_max", caps["recon_jobs_max"],
+                 expected=RECON_JOBS_MAX, maximum=RECON_JOBS_MAX)
+    _exact("caps.concurrency_rationale", caps["concurrency_rationale"],
+           CONCURRENCY_RATIONALE)
     embedded = _sha256("sha256", packet.get("sha256"))
     recomputed = g0bn_artifact_sha256(packet)
     if embedded != recomputed:
@@ -990,10 +1099,14 @@ def validate_approval_packet(packet: dict, plan: dict) -> dict:
 
 def render_approval_packet(packet: dict) -> str:
     """Human-readable Markdown for the approval packet (deterministic)."""
+    runtime = packet["runtime_assumptions"]
+    superseded = packet["superseded_operational_evidence"]
     lines = [
         "# G0-BN bounded acquisition — human approval packet (INERT)",
         "",
         f"> {packet['no_vendor_io_statement']}",
+        "",
+        f"> **FRESH APPROVAL REQUIRED:** {superseded['required_action']}",
         "",
         f"- packet schema: `{packet['schema']}`",
         f"- acquisition plan sha256: `{packet['plan_sha256']}`",
@@ -1018,11 +1131,37 @@ def render_approval_packet(packet: dict) -> str:
         f"({packet['caps']['cap_rule']})",
         f"- monthly quota {packet['caps']['quota_gb_per_month']:g} GB with "
         f"{packet['caps']['headroom_gb']:g} GB headroom; single window; "
-        f"jobs={packet['caps']['jobs']}",
+        f"Stage-1 download jobs={packet['caps']['download_jobs']} "
+        f"(max {packet['caps']['download_jobs_max']}); Stage-2 recon jobs="
+        f"{packet['caps']['recon_jobs']} (max {packet['caps']['recon_jobs_max']})",
+        f"- concurrency rationale: {packet['caps']['concurrency_rationale']}",
         f"- cost: {packet['vendor_cost']['vendor_cost_model']}; incremental "
         f"vendor charge within quota: "
         f"${packet['vendor_cost']['incremental_usd_within_quota']:g} "
         f"for ~{packet['vendor_cost']['quota_consumed_gb_estimate']:.2f} GB",
+        "",
+        "## Runtime assumptions",
+        "",
+        f"- certified serial {runtime['certified_serial_day']} Binance-perp evidence: "
+        f"book_delta_v2={runtime['certified_serial_seconds_by_product']['book_delta_v2']:.3f}s; "
+        f"book={runtime['certified_serial_seconds_by_product']['book']:.3f}s; "
+        f"trades={runtime['certified_serial_seconds_by_product']['trades']:.3f}s",
+        f"- about {runtime['serial_minutes_per_day_approx']:.1f} minutes/day and about "
+        f"{runtime['development_serial_hours_approx']:.1f} serial hours for "
+        f"{runtime['development_days']} development days",
+        f"- idealized arithmetic range at Stage-1 jobs={packet['caps']['download_jobs']}: "
+        f"{runtime['idealized_development_runtime_range_hours'][0]:.1f} to "
+        f"{runtime['idealized_development_runtime_range_hours'][1]:.1f} hours",
+        f"- comparison: {runtime['comparison']}",
+        f"- caveat: {runtime['caveat']}",
+        "",
+        "## Superseded v1 operational evidence",
+        "",
+        f"- prior plan sha256: `{superseded['prior_plan_sha256']}`",
+        f"- prior packet sha256: `{superseded['prior_packet_sha256']}`",
+        f"- prior approval scope: {superseded['prior_approval_scope']}",
+        f"- status: {superseded['status']}",
+        f"- required action: {superseded['required_action']}",
         "",
         "## Commands (inert until #68 approval)",
         "",
@@ -1417,6 +1556,16 @@ def _cmd_plan(args) -> int:
           f"(dev {plan['development']['n_units']} / "
           f"holdout {plan['holdout']['n_units']}), "
           f"estimated {plan['estimates']['total_gb']:.2f} GB")
+    print(f"  execution: Stage-1 download_jobs={plan['execution']['download_jobs']} "
+          f"(max {plan['execution']['download_jobs_max']}); Stage-2 "
+          f"recon_jobs={plan['execution']['recon_jobs']} "
+          f"(max {plan['execution']['recon_jobs_max']})")
+    runtime = packet["runtime_assumptions"]
+    print(f"  certified serial reference: {runtime['serial_minutes_per_day_approx']:.1f} "
+          f"minutes/day, {runtime['development_serial_hours_approx']:.1f} hours for "
+          f"{runtime['development_days']} development days; no live scaling guarantee")
+    print(f"  FRESH APPROVAL REQUIRED: "
+          f"{packet['superseded_operational_evidence']['required_action']}")
     print(f"  {NO_VENDOR_IO_STATEMENT}")
     required = plan["disk"]["required_free_gb"]
     print(f"  disk (repo filesystem): free {free:.1f} GB vs required "
@@ -1479,6 +1628,16 @@ def _cmd_verify_execution(args) -> int:
     local JSON/file reads and one OS-user lookup only."""
     try:
         plan = validate_acquisition_plan(_read_json(args.plan))
+        stage_fields = {
+            "download": ("download_jobs", "download_jobs_max"),
+            "recon": ("recon_jobs", "recon_jobs_max"),
+        }
+        if args.stage not in stage_fields:
+            raise ValueError(f"unknown execution stage {args.stage!r}")
+        jobs_field, max_field = stage_fields[args.stage]
+        execution = plan["execution"]
+        _strict_jobs("verify-execution.jobs", args.jobs,
+                     expected=execution[jobs_field], maximum=execution[max_field])
         block = plan[args.partition]
         try:
             with open(block["days_file"], "rb") as f:
@@ -1510,7 +1669,7 @@ def _cmd_verify_execution(args) -> int:
     scope = ("custodian identity confirmed" if args.partition == "holdout"
              else "development scope confirmed")
     print(f"verify-execution OK: {args.partition} days file matches "
-          f"{block['days_file_sha256']}; {scope}")
+          f"{block['days_file_sha256']}; stage={args.stage} jobs={args.jobs}; {scope}")
     return 0
 
 
@@ -1518,7 +1677,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         prog="g0bn_acquisition_preflight",
         description="Deterministic no-I/O G0-BN acquisition/custody preflight "
-                    "(issue #102). Plans, validates, and emits inert approval "
+                    "(issues #102/#105). Plans, validates, and emits inert approval "
                     "artifacts; performs no vendor I/O.")
     sub = ap.add_subparsers(dest="command", required=True)
     plan_p = sub.add_parser("plan", help="build the acquisition plan, approval "
@@ -1548,7 +1707,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                             "when given, the inventory is validated through "
                             "eval.g0bn_freeze.validate_custody_inventory")
     inv_p.add_argument("--plan", default=None,
-                       help="optional g0bn-acquisition-plan-v1 JSON (requires "
+                       help="optional g0bn-acquisition-plan-v2 JSON (requires "
                             "--config); the evidence must then cover every "
                             "planned holdout destination")
     inv_p.add_argument("--out", required=True, help="output inventory JSON path")
@@ -1559,8 +1718,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                                 "identity; no vendor I/O")
     ver_p.add_argument("--partition", required=True,
                        choices=("development", "holdout"))
+    ver_p.add_argument("--stage", required=True, choices=("download", "recon"),
+                       help="bind the gate to the matching execution stage")
+    ver_p.add_argument("--jobs", required=True, type=int,
+                       help="must exactly match the plan's concurrency for --stage")
     ver_p.add_argument("--plan", required=True,
-                       help="path to the g0bn-acquisition-plan-v1 JSON")
+                       help="path to the g0bn-acquisition-plan-v2 JSON")
     return ap.parse_args(argv)
 
 

@@ -12,6 +12,8 @@ helpers) lives in test_download_lake_binance_pure.py, which runs in the lightwei
 """
 import json
 import pathlib
+import threading
+import time
 
 import pytest
 
@@ -384,6 +386,37 @@ def test_process_unit_no_partial_parquet_on_midstream_failure(tmp_path):
     assert not (part / "data.parquet.tmp").exists()
 
 
+def test_sigint_tmp_never_counts_complete_and_resume_restarts_safely(tmp_path):
+    raw = tmp_path / "raw"
+
+    def interrupted_reader(feed, exchange, symbol, day_iso):
+        def stream():
+            yield _batch(2)
+            raise KeyboardInterrupt
+        return stream()
+
+    with pytest.raises(KeyboardInterrupt):
+        dl.process_unit(interrupted_reader, str(raw), "trades", *SPOT, "2026-04-01",
+                        sleep=lambda *_: None)
+
+    final = pathlib.Path(lb.raw_parquet_path(str(raw), "trades", *SPOT, "2026-04-01"))
+    tmp = pathlib.Path(str(final) + ".tmp")
+    assert tmp.exists() and not final.exists()
+    assert not lb.is_done(str(raw), "trades", *SPOT, "2026-04-01")
+    assert not (raw / lb.MANIFEST_NAME).exists()
+
+    reader = FakeReader({"trades": [_batch(3)]})
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",
+                    "--start", "2026-04-01", "--end", "2026-04-01", "--resume",
+                    "--out", str(raw), "--report-dir", str(tmp_path / "rep")],
+                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 0
+    assert final.exists() and not tmp.exists()
+    assert pq.read_table(final).num_rows == 3
+    records = [json.loads(line) for line in (raw / lb.MANIFEST_NAME).read_text().splitlines()]
+    assert [record["status"] for record in records] == ["ok"]
+
+
 # --------------------------------------------------------------------------- run() end to end
 def _perp_reader():
     return FakeReader({"book_delta_v2": [_batch(5)], "book": [_book_snapshot_frame(nrows=2)],
@@ -410,6 +443,32 @@ def test_run_end_to_end_writes_all_units_incl_book_seed(tmp_path):
     assert rep["counts"]["ok"] >= 5 and rep["counts"]["missing"] == 1
     assert rep["counts"]["missing_required"] == 0        # the lone miss is sparse liquidations
     assert rep["dry_run"] is False
+
+
+def test_serial_progress_reports_units_throughput_eta_and_terminal_state(tmp_path, capsys):
+    report_dir = tmp_path / "rep"
+    code = dl.main(["--instrument", "binance-spot", "--feeds", "trades",
+                    "--start", "2026-04-01", "--end", "2026-04-02", "--jobs", "1",
+                    "--out", str(tmp_path / "raw"), "--report-dir", str(report_dir)],
+                   reader=FakeReader({"trades": [_batch(2)]}),
+                   used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "[1/2]" in output and "[2/2]" in output
+    assert "trades BINANCE BTC-USDT 2026-04-01" in output
+    assert "status=ok rows=2" in output
+    assert "bytes=" in output and "unit=" in output
+    assert "aggregate elapsed=" in output and "rows/s=" in output and "output/s=" in output
+    assert "observed-rate projection; not a bound" in output
+    assert "does not guarantee 4x live scaling" in output
+
+    report = json.loads(next(report_dir.glob("*.json")).read_text())
+    assert report["progress"]["completed"] == report["progress"]["total"] == 2
+    assert report["progress"]["terminal_state"] == "complete"
+    assert report["progress"]["observed_eta_seconds"] == 0
+    assert report["total_out_bytes"] > 0
+    assert all(unit["status"] == "ok" and unit["secs"] >= 0
+               and unit["out_bytes"] > 0 for unit in report["per_unit"])
 
 
 def test_run_missing_required_feed_exits_3(tmp_path):
@@ -455,7 +514,7 @@ def test_run_resume_gates_only_pending_units_not_full_batch(tmp_path):
     assert {c[3] for c in reader.calls} == {days[-1]}     # only the leftover day transferred
 
 
-def test_run_partial_failure_exits_3(tmp_path):
+def test_run_partial_failure_exits_3(tmp_path, capsys):
     reader = _perp_reader()
     reader.plan["trades"] = dl.TransientError("RequestTimeout")     # one feed always fails
     code = dl.main(["--instrument", "binance-perp", "--start", "2026-04-01", "--end", "2026-04-01",
@@ -463,6 +522,14 @@ def test_run_partial_failure_exits_3(tmp_path):
                     "--retries", "2"],
                    reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
     assert code == 3
+    output = capsys.readouterr().out
+    assert "status=error" in output and "Finished partial." in output
+    report = json.loads(next((tmp_path / "rep").glob("*.json")).read_text())
+    assert report["counts"]["error"] == 1
+    assert report["progress"]["terminal_state"] == "partial"
+    assert report["progress"]["completed"] == report["progress"]["total"]
+    assert any(unit["status"] == "error" and "RequestTimeout" in unit["error"]
+               for unit in report["per_unit"])
 
 
 def test_run_quota_error_exits_2(tmp_path):
@@ -565,7 +632,7 @@ def test_run_overwrite_flag_rereads_existing_partition(tmp_path):
 
 
 # --------------------------------------------------------------------------- parallel (--jobs) path
-def test_run_jobs_parallel_writes_all_units_with_valid_manifest(tmp_path):
+def test_run_jobs_parallel_writes_all_units_with_valid_manifest(tmp_path, capsys):
     raw = tmp_path / "raw"
     reader = _perp_reader()
     code = dl.main(["--instrument", "binance-perp", "--start", "2026-04-01", "--end", "2026-04-03",
@@ -581,6 +648,13 @@ def test_run_jobs_parallel_writes_all_units_with_valid_manifest(tmp_path):
     ok = [r for r in recs if r["status"] == "ok"]
     assert any(r["feed"] == "book" for r in ok)           # book seed written under concurrency
     assert len({(r["feed"], r["dt"]) for r in ok}) == len(ok)   # no duplicate unit records
+    output = capsys.readouterr().out
+    assert "[18/18]" in output
+    assert "aggregate elapsed=" in output and "observed-rate projection; not a bound" in output
+    report = json.loads(next((tmp_path / "rep").glob("*.json")).read_text())
+    assert report["progress"]["completed"] == report["progress"]["total"] == 18
+    assert report["progress"]["terminal_state"] == "complete"
+    assert report["counts"]["cancelled"] == report["counts"]["hard_stop"] == 0
 
 
 def test_run_dedups_repeated_instrument_under_jobs(tmp_path):
@@ -598,19 +672,79 @@ def test_run_dedups_repeated_instrument_under_jobs(tmp_path):
     assert len([r for r in recs if r["status"] == "ok" and r["feed"] == "trades"]) == 1
 
 
-def test_run_jobs_quota_hard_stop_cancels_pending_units(tmp_path):
-    # a quota/credit wall under --jobs must exit 2 AND cancel the queued units (not drain them):
-    # only the ≤jobs already-in-flight units may run, so far fewer than all units are ever read.
+def test_run_jobs_quota_hard_stop_cancels_pending_units(tmp_path, monkeypatch, capsys):
+    # a quota/credit wall under --jobs must exit 2 AND cancel unstarted/in-flight units without
+    # draining the 60-unit plan or writing synthetic cancellation records into the resume manifest.
     raw = tmp_path / "raw"
-    reader = FakeReader({"book_delta_v2": dl.QuotaError("Quota exceeded"),
-                         "book": [_book_snapshot_frame(nrows=1)]})
+    cancel_event = threading.Event()
+    partial_tmp_seen = threading.Event()
+    monkeypatch.setattr(dl, "Event", lambda: cancel_event)
+
+    class RaceReader:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, feed, exchange, symbol, day_iso):
+            self.calls.append((feed, exchange, symbol, day_iso))
+            if day_iso == "2026-04-01":
+                def partial_stream():
+                    yield _batch(2)
+                    tmp = pathlib.Path(lb.raw_parquet_path(
+                        str(raw), feed, exchange, symbol, day_iso) + ".tmp")
+                    assert tmp.exists()
+                    partial_tmp_seen.set()
+                    assert cancel_event.wait(2.0)
+                    yield _batch(2)
+                return partial_stream()
+            if day_iso == "2026-04-02":
+                assert partial_tmp_seen.wait(2.0)
+                raise dl.QuotaError("Quota exceeded")
+
+            def wait_for_stop():
+                assert cancel_event.wait(2.0)
+                yield _batch(1)
+            return wait_for_stop()
+
+    reader = RaceReader()
+    used_calls = []
+
+    def used_data():
+        used_calls.append(True)
+        return 0.0
+
     code = dl.main(["--instrument", "binance-perp", "--feeds", "book_delta_v2",
-                    "--start", "2026-04-01", "--end", "2026-04-30", "--jobs", "2", "--allow-broad",
+                    "--start", "2026-04-01", "--end", "2026-04-30", "--jobs", "4",
+                    "--allow-broad",
                     "--out", str(raw), "--report-dir", str(tmp_path / "rep")],
-                   reader=reader, used_data_fn=lambda: 0.0, sleep=lambda *_: None)
+                   reader=reader, used_data_fn=used_data, sleep=lambda *_: None)
     assert code == 2
-    # 30 days × (book_delta_v2 + book seed) = 60 units; a drained pool would read most of them.
-    assert len(reader.calls) < 15                         # pending units were cancelled, not drained
+    assert partial_tmp_seen.is_set()                      # cancellation raced a real partial write
+    assert len(reader.calls) >= 2
+    assert len(reader.calls) <= 4                         # only the bounded initial wave may start
+    assert len(used_calls) == 1                           # no post-hard-stop vendor telemetry call
+    assert not list(raw.rglob("*.tmp"))
+
+    manifest = raw / lb.MANIFEST_NAME
+    records = ([json.loads(line) for line in manifest.read_text().splitlines()]
+               if manifest.exists() else [])
+    assert all(record["status"] in {"ok", "skip", "missing", "error"} for record in records)
+    assert not any(record["status"] in {"hard_stop", "cancelled"} for record in records)
+
+    report = json.loads(next((tmp_path / "rep").glob("*.json")).read_text())
+    counts = report["counts"]
+    assert counts["hard_stop"] >= 1 and counts["cancelled"] >= 56
+    assert sum(counts[key] for key in ("ok", "skip", "missing", "error",
+                                       "hard_stop", "cancelled")) == 60
+    assert len(report["per_unit"]) == 60
+    progress = report["progress"]
+    assert progress["completed"] == progress["total"] == 60
+    assert progress["observed_eta_seconds"] is None
+    assert progress["terminal_state"] == "hard_stop"
+    captured = capsys.readouterr()
+    assert "status=hard_stop" in captured.out
+    assert "status=cancelled" in captured.out
+    assert "ETA unavailable after hard stop" in captured.out
+    assert "post-stop quota telemetry was not called" in captured.err
 
 
 # --------------------------------------------------------------------------- live-path helpers (offline)
@@ -643,6 +777,7 @@ def test_process_unit_consumes_streaming_reader(tmp_path):
     import pyarrow as pa
     import pyarrow.fs as pafs
     src = tmp_path / "src.parquet"
+
     pq.write_table(pa.table({"origin_time": pa.array(range(2500), pa.int64())}),
                    src, row_group_size=1000)
     fs = pafs.LocalFileSystem()
@@ -655,3 +790,86 @@ def test_process_unit_consumes_streaming_reader(tmp_path):
     assert res.status == "ok" and res.rows == 2500
     assert pq.read_table(lb.raw_parquet_path(str(tmp_path / "raw"), "book_delta_v2", *PERP,
                                              "2026-04-01")).num_rows == 2500
+
+
+def test_row_group_prebuffer_coalesces_high_latency_reads_without_materializing_day(tmp_path):
+    class CountingRaw:
+        def __init__(self, path, delay_s):
+            self._file = open(path, "rb")
+            self.mode = "rb"
+            self.delay_s = delay_s
+            self.read_calls = 0
+            self.bytes_read = 0
+
+        @property
+        def closed(self):
+            return self._file.closed
+
+        def readable(self):
+            return True
+
+        def seekable(self):
+            return True
+
+        def read(self, size=-1):
+            self.read_calls += 1
+            time.sleep(self.delay_s)
+            data = self._file.read(size)
+            self.bytes_read += len(data)
+            return data
+
+        def seek(self, offset, whence=0):
+            return self._file.seek(offset, whence)
+
+        def tell(self):
+            return self._file.tell()
+
+        def close(self):
+            self._file.close()
+
+    class CountingFilesystem:
+        def __init__(self, delay_s):
+            self.delay_s = delay_s
+            self.sources = []
+
+        def open_input_file(self, path):
+            source = CountingRaw(path, self.delay_s)
+            self.sources.append(source)
+            return pa.PythonFile(source, mode="r")
+
+    path = tmp_path / "latency.parquet"
+    n_rows = 120_000
+    pq.write_table(
+        pa.table({f"c{i}": pa.array(range(n_rows), pa.int64()) for i in range(8)}),
+        path, row_group_size=15_000, compression="snappy",
+    )
+
+    delay_s = 0.003
+    baseline_fs = CountingFilesystem(delay_s=delay_s)
+    baseline_started = time.monotonic()
+    with baseline_fs.open_input_file(str(path)) as handle:
+        parquet = pq.ParquetFile(handle, pre_buffer=False)
+        baseline_rows = sum(batch.num_rows for batch in
+                            parquet.iter_batches(batch_size=15_000))
+    baseline_elapsed = time.monotonic() - baseline_started
+
+    optimized_fs = CountingFilesystem(delay_s=delay_s)
+    optimized_started = time.monotonic()
+    optimized = list(dl.stream_parquet_batches(optimized_fs, [str(path)],
+                                                batch_size=15_000))
+    optimized_elapsed = time.monotonic() - optimized_started
+    optimized_rows = sum(batch.num_rows for batch in optimized)
+    baseline_calls = sum(source.read_calls for source in baseline_fs.sources)
+    optimized_calls = sum(source.read_calls for source in optimized_fs.sources)
+    baseline_bytes = sum(source.bytes_read for source in baseline_fs.sources)
+    optimized_bytes = sum(source.bytes_read for source in optimized_fs.sources)
+    print(f"synthetic 3ms-read benchmark: baseline={baseline_calls} reads/"
+          f"{baseline_bytes} bytes/{baseline_elapsed:.3f}s; bounded-prebuffer="
+          f"{optimized_calls} reads/{optimized_bytes} bytes/{optimized_elapsed:.3f}s")
+
+    assert baseline_rows == optimized_rows == n_rows
+    assert len(optimized) == 8                         # one bounded batch per row group
+    assert baseline_calls >= optimized_calls * 4       # coalesced range reads, deterministic signal
+    assert optimized_calls <= 10
+    assert optimized_bytes == baseline_bytes           # no extra payload bytes
+    assert (baseline_calls - optimized_calls) * 0.003 >= 0.1  # >100 ms at modeled 3 ms RTT

@@ -39,9 +39,9 @@ import os
 import random
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from threading import Lock
+from threading import Event, Lock
 
 # Repo root on sys.path so `from ingest import lake_binance` works both as a script (script dir is
 # ingest/, not the root) and when imported by tests. lake_binance is pure (pandas-only, no vendor
@@ -64,6 +64,20 @@ DEFAULT_RETRIES = 5
 DEFAULT_BACKOFF_BASE_S = 1.0
 DEFAULT_BACKOFF_CAP_S = 60.0
 
+# Four independent streaming units keep the Stage-1 S3 path bounded while overlapping high-latency
+# reads. This is an operational ceiling, not a live-speedup guarantee. Stage 2 has a separate,
+# memory-bound concurrency contract in g0bn_acquisition_preflight.py.
+MAX_DOWNLOAD_JOBS = 4
+
+# Certified serial evidence from the completed 2026-04-01 Binance-perp smoke. These timings are used
+# only for clearly caveated runtime projections; quota and approval gates never depend on them.
+CERTIFIED_SERIAL_DAY = "2026-04-01"
+CERTIFIED_SERIAL_SECS_BY_FEED = {
+    "book_delta_v2": 1441.344,
+    "book": 242.671,
+    "trades": 24.936,
+}
+
 
 # ----------------------------------------------------------------------------- error taxonomy
 class HardStop(RuntimeError):
@@ -84,6 +98,10 @@ class AuthError(HardStop):
 
 class TransientError(RuntimeError):
     """A retryable transient vendor/network error (throttle, timeout, reset, 5xx)."""
+
+
+class CancelledByHardStop(RuntimeError):
+    """Internal cooperative cancellation after another unit hits a run-fatal hard stop."""
 
 
 # String markers so we never need to import botocore to classify a real ClientError (mirrors the
@@ -144,13 +162,42 @@ def _rm(path: str) -> None:
         os.remove(path)
 
 
-def _sha256_file(path: str) -> str:
+def _sha256_file(path: str, *, cancel_event=None) -> str:
     """Streaming sha256 of a file (never loads the whole parquet into RAM)."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledByHardStop("run hard-stopped while hashing temporary output")
             h.update(chunk)
     return h.hexdigest()
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _format_bytes(value: int) -> str:
+    value = int(value)
+    if value < 1_000_000:
+        return f"{value / 1_000:.1f}KB"
+    if value < 1_000_000_000:
+        return f"{value / 1_000_000:.1f}MB"
+    return f"{value / 1_000_000_000:.2f}GB"
+
+
+def validate_download_jobs(value: int) -> int:
+    """Return a strict Stage-1 unit concurrency, rejecting bool-as-int and unsafe fan-out."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("--jobs must be an integer (booleans are not valid concurrency values)")
+    if not 1 <= value <= MAX_DOWNLOAD_JOBS:
+        raise ValueError(f"--jobs must be between 1 and {MAX_DOWNLOAD_JOBS}; got {value}")
+    return value
 
 
 def _backoff_seconds(attempt: int, base: float, cap: float, rng) -> float:
@@ -195,7 +242,8 @@ def _iter_record_batches(item):
 
 
 def _stream_to_parquet(stream, dest_tmp: str, *, schema_version: str, feed: str,
-                       exchange: str, symbol: str, day_iso: str) -> int:
+                       exchange: str, symbol: str, day_iso: str,
+                       cancel_event=None) -> int:
     """Consume an iterable of batches/frames → one ZSTD Parquet file. Returns total rows written
     (0 when the stream yields no batches OR only zero-row batches — a present-but-empty partition;
     the caller treats rows==0 as empty/missing under the sparse/required policy rather than
@@ -211,7 +259,11 @@ def _stream_to_parquet(stream, dest_tmp: str, *, schema_version: str, feed: str,
     rows = 0
     try:
         for item in stream:
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledByHardStop("run hard-stopped while streaming temporary output")
             for batch in _iter_record_batches(item):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledByHardStop("run hard-stopped while streaming temporary output")
                 if writer is None:
                     meta = dict(batch.schema.metadata or {})
                     meta[b"schema_version"] = schema_version.encode()
@@ -276,7 +328,8 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
                  schema_version: str | None = None, overwrite: bool = False,
                  retries: int = DEFAULT_RETRIES, backoff_base: float = DEFAULT_BACKOFF_BASE_S,
                  backoff_cap: float = DEFAULT_BACKOFF_CAP_S, sleep=time.sleep, rng=None,
-                 manifest_root: str | None = None, lock=None, sparse_ok: bool = False) -> UnitResult:
+                 manifest_root: str | None = None, lock=None, sparse_ok: bool = False,
+                 cancel_event=None) -> UnitResult:
     """Download ONE (feed, exchange, symbol, day) partition via an injected `reader`.
 
     `reader(feed, exchange, symbol, day_iso)` returns an iterable of pyarrow batches / pandas frames
@@ -287,7 +340,8 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
       * transient errors retry with capped exponential backoff + jitter; a QuotaError is re-raised
         immediately (hard stop, never retried); a fatal error / exhausted retries record `status:
         error` and return (the run continues, then exits 3);
-      * every processed unit appends one manifest record (ok/skip/missing/error) to the resume ledger.
+      * completed units append one manifest record (ok/skip/missing/error) to the resume ledger;
+        cooperative hard-stop cancellations never mutate the deterministic resume ledger.
     Returns a UnitResult; raises QuotaError on a vendor quota/credit hard stop."""
     schema_version = schema_version or lb.RAW_SCHEMA_VERSION
     manifest_root = manifest_root or out_root
@@ -297,10 +351,16 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
     final = lb.raw_parquet_path(out_root, feed, exchange, symbol, day_iso)
     base = {"feed": feed, "exchange": exchange, "symbol": symbol, "dt": day_iso}
 
+    def _raise_if_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledByHardStop("run hard-stopped before this unit could complete")
+
     def _append(rec: dict) -> None:
         with lock:
+            _raise_if_cancelled()
             lb.manifest_append(manifest_root, rec)
 
+    _raise_if_cancelled()
     if not overwrite and lb.is_done(out_root, feed, exchange, symbol, day_iso):
         rec = {**base, "status": "skip", "ts": now_iso()}
         _append(rec)
@@ -309,23 +369,28 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
     tmp = final + ".tmp"
     attempt = 0
     while True:
+        _raise_if_cancelled()
         attempt += 1
         _rm(tmp)
         t0 = time.monotonic()
         try:
             stream = reader(feed, exchange, symbol, day_iso)
+            _raise_if_cancelled()
             if stream is None:                       # no vendor file (sparse liquidations, gap, …)
                 # `sparse_ok` (liquidations) → an expected quiet-day gap; otherwise a REQUIRED feed's
                 # miss is a real hole the run must surface (main exits 3), never a silent success.
                 # On --overwrite, drop any STALE published parquet so is_done doesn't keep obsolete
                 # raw data for a partition the vendor now reports as absent (manifest says missing).
-                _rm(final)
                 rec = {**base, "status": "missing", "sparse_ok": bool(sparse_ok), "ts": now_iso()}
-                _append(rec)
+                with lock:
+                    _raise_if_cancelled()
+                    _rm(final)
+                    lb.manifest_append(manifest_root, rec)
                 return UnitResult("missing", 0, None, rec)
             os.makedirs(os.path.dirname(final), exist_ok=True)   # partition dir must exist for the .tmp
             rows = _stream_to_parquet(stream, tmp, schema_version=schema_version, feed=feed,
-                                      exchange=exchange, symbol=symbol, day_iso=day_iso)
+                                      exchange=exchange, symbol=symbol, day_iso=day_iso,
+                                      cancel_event=cancel_event)
             if rows == 0:
                 # present-but-empty partition — whether the stream had no batches OR only zero-row
                 # batches (a schema-only empty parquet may sit in tmp; discard it, never publish a
@@ -333,31 +398,49 @@ def process_unit(reader, out_root: str, feed: str, exchange: str, symbol: str, d
                 # policy: a quiet-day liquidations file is non-fatal; a required feed's emptiness is
                 # a real gap (main → exit 3). Drop any stale published parquet too (see above).
                 _rm(tmp)
-                _rm(final)
                 rec = {**base, "status": "missing", "sparse_ok": bool(sparse_ok),
                        "empty": True, "ts": now_iso()}
-                _append(rec)
+                with lock:
+                    _raise_if_cancelled()
+                    _rm(final)
+                    lb.manifest_append(manifest_root, rec)
                 return UnitResult("missing", 0, None, rec)
+            _raise_if_cancelled()
             import pyarrow.parquet as pq
             schema = pq.read_schema(tmp)             # cheap local footer read
             validate_raw_schema(feed, schema.names)  # fail loud on drift BEFORE publishing `ok`
             out_bytes = os.path.getsize(tmp)
-            sha = _sha256_file(tmp)
-            os.replace(tmp, final)                   # atomic publish
+            sha = _sha256_file(tmp, cancel_event=cancel_event)
             rec = {**base, "status": "ok", "rows": rows, "sha256": sha, "out_bytes": out_bytes,
                    "schema_version": schema_version, "schema_fingerprint": schema_fingerprint(schema),
                    "schema_cols": list(schema.names), "secs": round(time.monotonic() - t0, 3),
                    "ts": now_iso()}
-            _append(rec)
+            # Serialize the final cancellation check, atomic publication, and manifest append with
+            # hard-stop signaling. A completed unit is therefore ordered either wholly before the
+            # stop or wholly after it (and cancelled); no post-stop partial publication can win.
+            with lock:
+                _raise_if_cancelled()
+                os.replace(tmp, final)
+                lb.manifest_append(manifest_root, rec)
             return UnitResult("ok", rows, final, rec)
+        except CancelledByHardStop:
+            _rm(tmp)
+            raise
         except Exception as exc:                     # noqa: BLE001 — classified below; never swallow SystemExit
             _rm(tmp)                                  # never leave a partial parquet behind
             kind = classify_error(exc)
             if kind == "quota":
+                if cancel_event is not None:
+                    with lock:
+                        cancel_event.set()
                 raise QuotaError(str(exc)) from exc
             if kind == "auth":                       # wrong keys/account → every unit fails the same
+                if cancel_event is not None:
+                    with lock:
+                        cancel_event.set()
                 raise AuthError(str(exc)) from exc
             if kind == "transient" and attempt < retries:
+                _raise_if_cancelled()
                 sleep(_backoff_seconds(attempt, backoff_base, backoff_cap, rng))
                 continue
             rec = {**base, "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500],
@@ -374,6 +457,36 @@ class Unit:
     symbol: str
     feed: str            # a scoped output feed OR the `book` SEED_PRODUCT
     day: str
+
+
+def runtime_projection(units: list[Unit], jobs: int) -> dict:
+    """Caveated arithmetic runtime reference from the certified serial smoke, never a live bound."""
+    validate_download_jobs(jobs)
+    unknown_feeds = sorted({u.feed for u in units if u.feed not in CERTIFIED_SERIAL_SECS_BY_FEED})
+    caveat = (
+        "Certified serial timings are an arithmetic reference only. Object layout, latency, "
+        "contention, retries, and quota can put actual runtime outside this range. It is not a "
+        "bound and does not guarantee 4x live scaling."
+    )
+    basis = {
+        "day": CERTIFIED_SERIAL_DAY,
+        "seconds_by_feed": dict(CERTIFIED_SERIAL_SECS_BY_FEED),
+        "minutes_per_three_product_day": round(
+            sum(CERTIFIED_SERIAL_SECS_BY_FEED.values()) / 60, 3),
+    }
+    if unknown_feeds:
+        return {"available": False, "basis": basis, "unknown_feeds": unknown_feeds,
+                "caveat": caveat}
+
+    serial_seconds = sum(CERTIFIED_SERIAL_SECS_BY_FEED[u.feed] for u in units)
+    return {
+        "available": True,
+        "basis": basis,
+        "serial_reference_seconds": round(serial_seconds, 3),
+        "idealized_jobs_floor_seconds": round(serial_seconds / jobs, 3),
+        "jobs": jobs,
+        "caveat": caveat,
+    }
 
 
 def resolve_feeds(instrument_key: str, feeds_arg: str | None) -> list[str]:
@@ -536,12 +649,17 @@ def stream_parquet_batches(filesystem, paths, *, batch_size=READ_BATCH_ROWS):
     This is the whole point of Stage 1's memory contract (Requirement 3 / repo perf rule): a
     book_delta_v2 day is ~109 M rows, so we open each partition object and `iter_batches` it —
     never materializing the day as a DataFrame/Table. Pulled out as a pure generator so it is
-    unit-testable offline against a LocalFileSystem, with no live Lake."""
+    unit-testable offline against a LocalFileSystem, with no live Lake.
+
+    PyArrow 24's ``pre_buffer=True`` coalesces high-latency filesystem reads. Selecting one row
+    group per ``iter_batches`` call bounds that read-ahead cache to one row group instead of a
+    109 M-row day; yielded batches remain capped at ``batch_size``."""
     import pyarrow.parquet as pq
     for path in sorted(paths):
         with filesystem.open_input_file(path) as handle:
-            for batch in pq.ParquetFile(handle).iter_batches(batch_size=batch_size):
-                yield batch
+            parquet = pq.ParquetFile(handle, pre_buffer=True)
+            for row_group in range(parquet.num_row_groups):
+                yield from parquet.iter_batches(batch_size=batch_size, row_groups=[row_group])
 
 
 def present_days_from_list_records(records) -> list[str]:
@@ -660,7 +778,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                          f"(default {lb.DEFAULT_MAX_GB})")
     ap.add_argument("--allow-broad", action="store_true",
                     help="permit a broad pull (still capped by the 300 GB/month headroom gate)")
-    ap.add_argument("--jobs", type=int, default=1, help="parallel by (instrument,day) only (default 1)")
+    ap.add_argument("--jobs", type=int, default=1, help=f"parallel independent units, 1-{MAX_DOWNLOAD_JOBS} "
+                                                        "(default 1; approved G0-BN Stage 1 uses 4)")
     ap.add_argument("--retries", type=int, default=DEFAULT_RETRIES,
                     help=f"per-unit transient-error retries (default {DEFAULT_RETRIES})")
     ap.add_argument("--engine", choices=("auto", "native", "python"), default="auto",
@@ -675,6 +794,7 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
 
     # ---- resolve request (all setup errors → exit 2, before any vendor touch) -------------------
     try:
+        args.jobs = validate_download_jobs(args.jobs)
         instrument_keys = list(dict.fromkeys(              # de-dup, order-preserving
             k.strip() for k in args.instrument.split(",") if k.strip()))
         if not instrument_keys:
@@ -698,10 +818,15 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         pending = pending_units(units, args.out, overwrite=args.overwrite,
                                 manifest_root=manifest_root)
         est_gb = sum(unit_gb(u) for u in pending)     # gate/estimate ONLY the not-yet-done units
+        projection = runtime_projection(pending, args.jobs)
     except (ValueError, KeyError, FileNotFoundError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
 
+    # A SIGINT may leave a closed but incomplete .tmp. It is never complete and every inert/local
+    # resume removes it before either a no-op decision or a restarted unit.
+    if not args.dry_run:
+        lb.cleanup_tmp(args.out)
     # ---- no-op fast path: a resume whose range is already complete (nothing pending, incl.
     # sparse-accepted quiet days) needs NO Lake session, NO used_data probe, and NO gate. Short-circuit
     # before any vendor touch so an idempotent resume never makes a live call or exits 2 on absent
@@ -712,8 +837,16 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
                            "overwrite": args.overwrite, "jobs": args.jobs},
                   "n_units": len(units), "n_pending": 0, "est_gb": 0.0, "dry_run": False,
                   "transferred_gb": 0, "used_data_before": None, "used_data_after": None,
-                  "counts": {"ok": 0, "skip": 0, "missing": 0, "error": 0, "missing_required": 0},
-                  "total_rows": 0, "per_unit": [], "note": "nothing pending — range already complete"}
+                  "counts": {"ok": 0, "skip": 0, "missing": 0, "error": 0,
+                             "hard_stop": 0, "cancelled": 0, "missing_required": 0},
+                  "total_rows": 0, "total_out_bytes": 0, "per_unit": [],
+                  "runtime_projection": projection,
+                  "progress": {"completed": 0, "total": 0, "elapsed_seconds": 0,
+                               "rows_per_second": None, "output_bytes_per_second": None,
+                               "observed_eta_seconds": 0, "terminal_state": "complete",
+                               "eta_caveat": "Observed-rate ETA is a projection, not a bound or "
+                                             "live speedup guarantee."},
+                  "note": "nothing pending — range already complete"}
         path = _write_report(args.report_dir, report)
         print(f"Nothing to do: all {len(units)} unit(s) already complete (no vendor call). "
               f"report: {path}")
@@ -743,7 +876,8 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
                        "days": [days[0], days[-1]] if days else [], "n_days": len(days),
                        "out": args.out, "overwrite": args.overwrite, "jobs": args.jobs},
               "n_units": len(units), "n_pending": len(pending), "est_gb": round(est_gb, 4),
-              "used_data_before": round(used_gb, 4)}
+              "used_data_before": round(used_gb, 4),
+              "runtime_projection": projection}
 
     # ---- dry-run: metadata + plan only, zero parquet transfer -----------------------------------
     if args.dry_run:
@@ -785,65 +919,179 @@ def main(argv=None, *, reader=None, lister=None, used_data_fn=None, sleep=time.s
         print(f"ERROR: could not build the live Lake reader (fail-safe, exit 2; is `.[lake]` "
               f"installed?): {e}", file=sys.stderr)
         return SETUP_ERROR_EXIT
-    lb.cleanup_tmp(args.out)
 
-    counts = {"ok": 0, "skip": 0, "missing": 0, "error": 0, "missing_required": 0}
+    counts = {"ok": 0, "skip": 0, "missing": 0, "error": 0, "hard_stop": 0,
+              "cancelled": 0, "missing_required": 0}
     total_rows = 0
+    total_out_bytes = 0
     per_unit = []
     hard_stop = False
+    hard_stop_errors = []
     lock = Lock()
+    cancel_event = Event()
+    run_started = time.monotonic()
+    completed = 0
+
+    if projection["available"]:
+        print(f"Starting {len(pending)} unit(s) with jobs={args.jobs}. Certified "
+              f"{projection['basis']['day']} arithmetic runtime reference: "
+              f"{_format_duration(projection['idealized_jobs_floor_seconds'])} to "
+              f"{_format_duration(projection['serial_reference_seconds'])}. "
+              f"{projection['caveat']}")
+    else:
+        print(f"Starting {len(pending)} unit(s) with jobs={args.jobs}. Runtime reference unavailable "
+              f"for feeds {projection['unknown_feeds']}. {projection['caveat']}")
 
     def _do(u: Unit) -> UnitResult:
         return process_unit(reader, args.out, u.feed, u.exchange, u.symbol, u.day,
                             overwrite=args.overwrite, retries=args.retries, sleep=sleep,
                             manifest_root=manifest_root, lock=lock,
-                            sparse_ok=not feed_miss_is_fatal(u.feed))
+                            sparse_ok=not feed_miss_is_fatal(u.feed),
+                            cancel_event=cancel_event)
 
-    def _record(u: Unit, res: UnitResult) -> None:
-        nonlocal total_rows
-        counts[res.status] = counts.get(res.status, 0) + 1
-        if res.status == "missing" and feed_miss_is_fatal(u.feed):
-            counts["missing_required"] += 1        # a required-feed hole → run exits 3, never success
-        total_rows += res.rows
-        per_unit.append({"feed": u.feed, "symbol": u.symbol, "dt": u.day, "status": res.status,
-                         "rows": res.rows})
+    def _print_progress(entry: dict) -> None:
+        elapsed = max(time.monotonic() - run_started, 1e-9)
+        eta = None
+        if completed and not cancel_event.is_set():
+            eta = elapsed * (len(pending) - completed) / completed
+        fields = [
+            f"[{completed}/{len(pending)}]",
+            f"{entry['feed']} {entry['exchange']} {entry['symbol']} {entry['dt']}",
+            f"status={entry['status']} rows={entry['rows']:,}",
+        ]
+        if entry.get("out_bytes") is not None:
+            fields.append(f"bytes={_format_bytes(entry['out_bytes'])}")
+        if entry.get("secs") is not None:
+            fields.append(f"unit={_format_duration(entry['secs'])}")
+        fields.append(
+            f"aggregate elapsed={_format_duration(elapsed)} rows/s={total_rows / elapsed:,.0f} "
+            f"output/s={_format_bytes(int(total_out_bytes / elapsed))}"
+        )
+        if eta is not None:
+            fields.append(f"ETA~{_format_duration(eta)} (observed-rate projection; not a bound)")
+        elif cancel_event.is_set():
+            fields.append("ETA unavailable after hard stop")
+        print(" | ".join(fields))
 
-    try:
-        if args.jobs and args.jobs > 1:
-            # NOTE: the live path shares one boto3 session across worker threads; downloader --jobs is
-            # I/O-bound (bounded by S3 throughput, not RAM — plan Requirement 7). A per-thread session
-            # is a follow-up if concurrent lakeapi client creation proves unsafe in the live pull.
-            with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-                futures = {ex.submit(_do, u): u for u in pending}
-                try:
-                    for fut in as_completed(futures):
-                        _record(futures[fut], fut.result())   # HardStop (quota/auth) re-raised here
-                except HardStop:
-                    # HARD STOP (quota/auth): cancel every not-yet-started unit so a quota wall or a
-                    # wrong-keys AccessDenied cannot keep hammering Lake for the remaining budget —
-                    # only the ≤jobs already-in-flight units finish. cancel_futures needs Py3.9+.
-                    ex.shutdown(wait=False, cancel_futures=True)
-                    raise
+    def _account(u: Unit, status: str, *, started: float | None,
+                 res: UnitResult | None = None, error: str | None = None) -> None:
+        nonlocal total_rows, total_out_bytes, completed
+        record = (res.record or {}) if res is not None else {}
+        rows = res.rows if res is not None else 0
+        out_bytes = record.get("out_bytes")
+        unit_secs = round(time.monotonic() - started, 3) if started is not None else None
+        counts[status] += 1
+        if status == "missing" and feed_miss_is_fatal(u.feed):
+            counts["missing_required"] += 1
+        total_rows += rows
+        total_out_bytes += int(out_bytes or 0)
+        entry = {"feed": u.feed, "exchange": u.exchange, "symbol": u.symbol, "dt": u.day,
+                 "status": status, "rows": rows}
+        if out_bytes is not None:
+            entry["out_bytes"] = int(out_bytes)
+        if unit_secs is not None:
+            entry["secs"] = unit_secs
+        if error is not None:
+            entry["error"] = error[:500]
+        elif record.get("error"):
+            entry["error"] = record["error"]
+        per_unit.append(entry)
+        completed += 1
+        _print_progress(entry)
+
+    def _finish(u: Unit, started: float, get_result) -> None:
+        nonlocal hard_stop
+        try:
+            res = get_result()
+        except CancelledByHardStop as exc:
+            _account(u, "cancelled", started=started, error=str(exc))
+        except HardStop as exc:
+            # process_unit sets the event while holding the publication lock. Keep this defensive set
+            # for injected workers and preserve the same ordering against any final publication.
+            with lock:
+                cancel_event.set()
+            hard_stop = True
+            detail = f"{type(exc).__name__}: {exc}"
+            hard_stop_errors.append(detail)
+            _account(u, "hard_stop", started=started, error=detail)
         else:
-            for u in pending:
-                _record(u, _do(u))
-    except HardStop as e:
-        print(f"*** Lake hard stop ({type(e).__name__}): {e} — exiting 2 (fail-safe). ***",
-              file=sys.stderr)
-        hard_stop = True
+            _account(u, res.status, started=started, res=res)
 
-    try:
-        used_after = float(used_data_fn())
-    except Exception:                                # noqa: BLE001 — post-run telemetry is best-effort
-        used_after = None
+    next_index = 0
+    if args.jobs > 1:
+        # Keep at most jobs independent units in flight. Each unit pre-buffers only one row group, so
+        # the outer fan-out remains bounded and no queued work starts after a quota/auth hard stop.
+        with ThreadPoolExecutor(max_workers=args.jobs) as ex:
+            inflight = {}
+            while next_index < len(pending) and len(inflight) < args.jobs:
+                u = pending[next_index]
+                started = time.monotonic()
+                inflight[ex.submit(_do, u)] = (u, started)
+                next_index += 1
 
+            while inflight:
+                done, _ = wait(tuple(inflight), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    u, started = inflight.pop(fut)
+                    _finish(u, started, fut.result)
+                while (not cancel_event.is_set() and next_index < len(pending)
+                       and len(inflight) < args.jobs):
+                    u = pending[next_index]
+                    started = time.monotonic()
+                    inflight[ex.submit(_do, u)] = (u, started)
+                    next_index += 1
+    else:
+        while next_index < len(pending):
+            u = pending[next_index]
+            started = time.monotonic()
+            _finish(u, started, lambda u=u: _do(u))
+            next_index += 1
+            if cancel_event.is_set():
+                break
+
+    # These units were never submitted after a hard stop. Report them, but do not append synthetic
+    # manifest records: only actual unit attempts belong in the resume ledger.
+    if cancel_event.is_set():
+        for u in pending[next_index:]:
+            _account(u, "cancelled", started=None, error="not started after run hard stop")
+
+    if hard_stop:
+        print(f"*** Lake hard stop ({'; '.join(hard_stop_errors)}) — exiting 2 (fail-safe); "
+              "post-stop quota telemetry was not called. ***", file=sys.stderr)
+
+    used_after = None
+    if not hard_stop:
+        try:
+            used_after = float(used_data_fn())
+        except Exception:                            # noqa: BLE001 — post-run telemetry is best-effort
+            pass
+
+    terminal_state = (
+        "hard_stop" if hard_stop
+        else "partial" if counts["error"] or counts["missing_required"]
+        else "complete"
+    )
+    elapsed = max(time.monotonic() - run_started, 0.0)
+    progress = {
+        "completed": completed,
+        "total": len(pending),
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_second": round(total_rows / elapsed, 3) if elapsed else None,
+        "output_bytes_per_second": round(total_out_bytes / elapsed, 3) if elapsed else None,
+        "observed_eta_seconds": None if hard_stop else 0,
+        "terminal_state": terminal_state,
+        "eta_caveat": "Observed-rate ETA is a projection, not a bound or live speedup guarantee.",
+    }
     report.update(dry_run=False, transferred_gb=None, counts=counts, total_rows=total_rows,
+                  total_out_bytes=total_out_bytes,
                   used_data_after=(round(used_after, 4) if used_after is not None else None),
-                  per_unit=per_unit)
+                  per_unit=per_unit, progress=progress, hard_stop_errors=hard_stop_errors)
     path = _write_report(args.report_dir, report)
-    print(f"Done. ok={counts['ok']} skip={counts['skip']} missing={counts['missing']} "
+    finish = "Stopped" if hard_stop else "Finished partial" if terminal_state == "partial" else "Done"
+    print(f"{finish}. ok={counts['ok']} skip={counts['skip']} missing={counts['missing']} "
           f"(required-missing={counts['missing_required']}) error={counts['error']} "
-          f"| rows={total_rows:,} | report: {path}")
+          f"hard-stop={counts['hard_stop']} cancelled={counts['cancelled']} "
+          f"| rows={total_rows:,} output={_format_bytes(total_out_bytes)} | report: {path}")
 
     if hard_stop:                                      # quota/credit exhaustion OR auth/permission
         return SETUP_ERROR_EXIT

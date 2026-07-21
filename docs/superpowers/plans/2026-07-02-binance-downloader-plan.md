@@ -144,11 +144,20 @@ Stage 1 is the only quota-consuming stage. Behaviors:
 - **Dry-run (`--dry-run`):** metadata-only. Calls `lakeapi.list_data(...)` per `(feed, E, S)` (no parquet download), prints the resolved day set, per-feed presence/gaps, and the **estimated GB** from measured per-day sizes (Requirement 7). Writes the plan to the run report but performs **zero** parquet transfer. Note: `list_data` is still a **live Lake metadata call** (subscriber credentials), so `--dry-run` is **approval-gated** like all vendor I/O — it just transfers no parquet and consumes ~no quota. The only fully offline planning entry point is `scripts/plan_lake_binance_batches.py`.
 - **Manifest planning:** the day list × feeds × estimated GB is the plan. `--manifest PATH` overrides the default `_manifest.jsonl` location (per-day/feed state lives here). The separate `scripts/plan_lake_binance_batches.py` stages a long range into quota-window batches (deterministic, planning-only, mirrors the Coinbase batch planner).
 - **Quota-budgeted batches:** each run estimates its request; refuses a broad pull (> `--max-gb`, default 5 GB) unless `--allow-broad`, and **always** refuses a pull that would breach the 300 GB/month headroom regardless of `--allow-broad` (mirrors `run_coinbase_quality_map.py`). Run at most one batch per monthly quota window.
-- **Resumability / idempotency:** a `(feed, E, S, dt)` whose final `data.parquet` exists is skipped (unless `--overwrite`). Writes are atomic: stream to `data.parquet.tmp`, `os.replace()` on success. `--resume` (default on for a range) reruns only missing/errored units. Stale `*.tmp` from an interrupted run are cleaned at startup (mirrors `download_coinapi.py:cleanup_tmp`).
+- **Resumability / idempotency:** a `(feed, E, S, dt)` whose final `data.parquet` exists is skipped (unless `--overwrite`). Writes are atomic: stream to `data.parquet.tmp`, `os.replace()` on success. `--resume` (default on for a range) reruns only missing/errored units. SIGINT may leave a closed partial `*.tmp`, but it never counts as complete; startup removes it before a no-op decision or safely restarts that unit.
 - **Per-day / per-instrument state:** every completed or failed unit appends a manifest record (`status ∈ {ok, skip, missing, error}`), so a rerun reads the manifest + on-disk parquet to know exactly what remains.
 - **Retry / backoff:** transient S3/botocore errors (`SlowDown`, `RequestTimeout`, connection resets) retry with capped exponential backoff + jitter (e.g. 5 tries, base 1 s, cap 60 s). A **quota/credit** error is a hard stop (exit 2), never retried. Retries are per-unit so one bad partition never re-pulls a completed one.
 - **Partial failure handling:** a unit that errors after retries is logged (`status: "error"`, exception summary), the run continues to the next unit, and the process exits **3** (partial) so orchestration can rerun with `--resume`. A `missing` partition (no vendor file) is not an error for `liquidations` (sparse; Risk Q2) but *is* recorded.
-- **No decompressed raw intermediates:** read the vendor parquet as compressed row-group batches (`pyarrow.parquet.ParquetFile(...).iter_batches(...)` over an `S3FileSystem` handle, or over the lakeapi-cached object) and write our ZSTD Parquet via `pyarrow.parquet.ParquetWriter` a batch at a time — the CoinAPI streaming shape (`download_coinapi.py:write_parquet`). Never `to_csv`, never materialize a whole `book_delta_v2` day (109 M rows) in RAM.
+- **No decompressed raw intermediates:** direct-S3 reads use PyArrow's `pre_buffer=True` to coalesce high-latency ranges, but call `iter_batches(row_groups=[i], batch_size=1_000_000)` one row group at a time so read-ahead remains bounded. Write ZSTD Parquet via `ParquetWriter` one batch at a time. Never `to_csv`, use `lakeapi.load_data`, or materialize a whole 109 M-row `book_delta_v2` day.
+- **Bounded hard-stop cancellation:** Stage 1 keeps at most four independent units in flight. Quota/auth sets a cooperative cancellation event ordered against atomic publication and manifest append; no later unit starts, in-flight temporaries are removed, and cancelled/not-started units appear in the run report but not the deterministic resume manifest.
+- **Observable progress:** serial and parallel paths print completed/total, unit identity/status, rows/output bytes/time where available, aggregate rows/output throughput, and an observed-rate ETA explicitly labeled as a projection rather than a bound. Reports preserve hard-stop, cancelled, partial, and complete terminal states.
+
+> **#105 approval reset:** this implementation authorizes no vendor I/O. The v1
+> plan `62cca478f1c47ce3981c246d6e928b62709bbcc6c75259a1e16d9aa2bcd80f86`,
+> packet `c0e8b6e46ab65cb9231c732e0bf7653f94baf83e147c86ebd49eff3c451a9a12`,
+> and approval are superseded operational
+> evidence only. After merge, regenerate the v2 packet and obtain fresh explicit
+> human approval on #68 before any retry; never reuse the prior approval.
 
 ---
 
@@ -158,9 +167,20 @@ Stage 1 is the only quota-consuming stage. Behaviors:
 - **`origin_time` first, documented `received_time` fallback.** `recon.ingest.shared_engine_time_col(*dfs)` / `is_populated` (>99%) is only a **coarse selector**; the hard per-day gate before recon is **100% populated**, because `recon` then calls `_require_populated`, which raises on *any* ≤0/NaT row (`recon/ingest.py:83-87`). So a day where `origin_time` is 99.x%-but-not-100% populated must **not** be fed to recon on `origin_time` — it would pass the >99% selector and then crash. Policy: use `origin_time` only when it is **fully populated** for the day; otherwise either (a) fall back to `received_time` for the whole day when *it* is fully populated (Binance Tokyo capture → 4.4 ms median lag, a tight proxy), or (b) drop the few invalid-timestamp rows before reconstruction/passthrough and record the dropped count — either way **record `engine_time_col` (and any dropped-row count) in the manifest**, never silent. `origin_time` is measured 100%-populated for Binance `book_delta_v2` and `trades` (docs §5/§5b), so both normally run on exchange time; population for `funding`/`open_interest`/`liquidations` is **not yet measured** (Risk Q9) — the Phase-1 probe measures it, and the same fallback applies to those passthrough tables too. **The resolver is joint, not per-frame:** for seeded reconstruction the delta frame and the `book` seed frame must resolve to the **same** engine-time column (via `recon.ingest.shared_engine_time_col(*dfs)` across all frames handed to recon) — selecting per-frame could put deltas on `received_time` and the seed on `origin_time`, mixing exchange and capture clocks, which reorders seed/reseed events relative to deltas and can inject lookahead or delay reseeds. `recon.reseed.snapshots_from_lake_book_df` itself `_require_populated`s that shared column on the `book` frame, so both frames must be fully populated on it.
 - **Metadata/schema probe before broad pulls.** Phase 1 uses `lakeapi.list_data(...)` (metadata, no download) for coverage/gaps and a **bounded** schema probe: fetch one small slice per feed (a ≤2-minute window like `scripts/verify_book_delta_v2.py`, or `list_data` + a single-row-group read) to record the exact columns/dtypes of `funding`/`open_interest`/`liquidations` (whose schemas are not yet measured — Risk Q6) into `tests/fixtures/` schema snapshots. The probe is never a broad scan.
 - **Avoid broad CI scans.** Tests never call `lakeapi`/`boto3`/`pyarrow.fs` — all vendor entry points are behind `if __name__ == "__main__"` or injected clients, and unit tests inject a fake lister/reader (AGENTS.md "Avoid broad scans over raw data in CI"). `ingest/lake_binance.py` must import with no vendor dependency.
-- **Usage telemetry, not a hard stop.** Print `lakeapi.used_data(sess)` before and after each run and record it in the report. The counter **lags** (docs §5a-QualityMap measured it stale for >60 min), so it is *not* the gate: the gate is our own estimate from measured per-day sizes vs the 300 GB cap − headroom. If `used_data` is unreadable, fail safe (exit 2) rather than proceed blind.
+- **Usage telemetry, not a hard stop.** Print `lakeapi.used_data(sess)` before each run and after complete/partial runs, and record it in the report. Never make a post-stop vendor call after quota/auth hard-stops. The counter **lags** (docs §5a-QualityMap measured it stale for >60 min), so it is *not* the gate: the gate is our own estimate from measured per-day sizes vs the 300 GB cap − headroom. If initial `used_data` is unreadable, fail safe (exit 2) rather than proceed blind.
 
 > **Wire-bytes caveat (load-bearing).** lakeapi 0.22.3 `_download_one` GETs each partition object **whole**; a `columns=` projection is applied *after* download (docs §5a-QualityMap). So column projection saves RAM, **not** quota. Quota estimates must use whole-object sizes; the direct `pyarrow.fs` path has the same property unless we push down row-group/column selection at read (a Phase-5 optimization, not assumed here).
+
+> **#105 high-latency read evidence (offline, 2026-07-21).** Installed PyArrow
+> 24.0.0 documents `pre_buffer=True` as coalescing and parallelizing reads for
+> high-latency filesystems; its pre-buffer cache can live until the next
+> pre-buffer/read or reader destruction, so the implementation selects one row
+> group per call to retain bounded memory. A local 120,000-row/eight-row-group
+> Parquet test with 3 ms injected latency reduced reads from 65 to 9 for the same
+> 5,596,304 bytes and rows (0.210s to 0.034s in one run). This is synthetic
+> evidence, not a guaranteed 4x live result. The prior Coinbase path used
+> threaded `lakeapi` plus its cache; this Binance downloader writes its own
+> persistent normalized raw store, so the timing paths are not like-for-like.
 
 ---
 
@@ -213,16 +233,23 @@ Per-day sizes (docs §6 rows are **measured**, BTC 2026-04-01; the `book` seed p
 | **Binance-only, output feeds + `book` seed** | **~1.23 GB/day** (derived: all-feeds 1.17 §6 − Coinbase 0.30 + ~0.36 seed) | — |
 
 - **109 M rows/day (perp `book_delta_v2`) is the binding row count.** Stage 1 streams row-groups (never materializes the day). Stage 2 recon needs columnar arrays (`ts:int64, seq:int64, price:f64, size:f64, side:bool` ≈ 3.6 GB for 109 M rows) — acceptable within 32 GB for **one** day at a time; a streaming Arrow row-group reader into the native core is the documented follow-on (`docs/superpowers/plans/2026-07-01-native-recon-engine.md` §Follow-on architecture: "streaming Arrow/parquet read is the next bottleneck after replay") and is the required path before high perp `--jobs`.
-- **32 GB RAM is the binding constraint.** Bound `--jobs`: perp `book_delta_v2` days peak ~4–6 GB each → keep `N ≤ 4` for perp book recon; lighter feeds (trades/funding/OI/liq, spot) can use higher `N`. The downloader (stage 1) is I/O-bound and streams, so its `--jobs` is bounded by S3 throughput, not RAM.
+- **32 GB RAM is the binding constraint.** The immutable G0-BN v2 contract pins Stage-1 `download_jobs=4` with a hard maximum of 4: each independent worker streams and pre-buffers at most one row group. It separately pins Stage-2 `recon_jobs=1` with a hard maximum of 1 because a 109 M-row perpetual reconstruction is memory-heavy and the native engine already parallelizes internally. These are operational bounds, not a guaranteed speedup.
 - **2 TB SSD:** Binance-only raw ≈ 1.23 GB/day (output feeds + `book` seed) → ~671 GB for 18 mo (547 d); processed top-K collapses to GB-scale (docs §7: "≤60 GB processed"). Comfortable on 2 TB. Keep raw compressed; **never** decompress `book_delta_v2` to disk (docs §7).
 - **Stream/chunk per day; avoid multi-day raw loads.** Both stages operate one `(instrument, day)` at a time. Never `load_data` a multi-day range into one DataFrame.
 - **Parallelism by day/instrument only.** A single book stream is sequential; `(instrument, day)` jobs are the only parallel axis. Quota-aware: parallel *download* still shares the one monthly budget — the gate estimates the whole batch, not per-job.
+
+**Certified Stage-1 runtime reference (#105):** the completed 2026-04-01
+perpetual serial units measured `book_delta_v2=1441.344s`, `book=242.671s`,
+and `trades=24.936s`: about 28.5 minutes/day and about 29 serial hours for 61
+development days. At four workers, 7.2-29.0 hours is an arithmetic reference
+range only; actual runtime may fall outside it and 4x live scaling is not
+guaranteed.
 
 **Quota / storage budget (derived from docs §6):** Binance-only (output feeds + `book` seed) 18 mo ≈ **~671 GB** (≈ 1.23 GB/day × 547 d) > two 300 GB/month windows → stage across **~3** quota windows (matching docs §6's all-feed staging), or use a higher plan. The batch planner enforces this.
 
 ---
 
-## Requirement 8 — CLI / API shape (for the future implementation)
+## Requirement 8 — CLI / API shape (implemented; #105 amendment)
 
 ```
 ingest/download_lake_binance.py                              # Stage 1
@@ -239,10 +266,10 @@ ingest/download_lake_binance.py                              # Stage 1
   --max-gb   5.0              refuse an estimated pull above this unless --allow-broad
   --allow-broad               permit a broad pull (still capped by the 300 GB/mo headroom gate)
   --engine   auto|native|python   reserved; download is engine-agnostic (recon uses it)
-  --jobs     N                parallel by (instrument,day) only
+  --jobs     N                1..4 independent streaming units; G0-BN v2 pins 4
 
 scripts/run_binance_recon.py                                 # Stage 2 (local, quota-free)
-  --start/--end/--instrument/--feeds/--k 10/--grid-s 1.0/--engine auto|native|python/--jobs N
+  --start/--end/--instrument/--feeds/--k 10/--grid-s 1.0/--engine auto|native|python/--jobs 1  # G0-BN v2 pin
   --raw  data/raw/lake        --out data/processed
 
 scripts/plan_lake_binance_batches.py                         # staging (planning only, no vendor I/O)
@@ -259,11 +286,11 @@ scripts/plan_lake_binance_batches.py                         # staging (planning
 | 3 | completed with ≥1 errored unit (partial) — rerun with `--resume` |
 | 4 | broad-pull gate — estimated GB over `--max-gb` without `--allow-broad`; **or over the 300 GB/month quota headroom, which exits 4 regardless of `--allow-broad`** (matches Requirement 3 and the `check_broad_gate` test) |
 
-**Logging / report artifacts:** human-readable per-unit lines to stdout (`{dt}  OK  {rows:,} rows  {src}MB→{out}MB  {secs}s`, like `download_coinapi.py`); a machine report `data/reports/binance_download/<run-id>.json` with `{args, days, feeds, est_gb, used_data_before/after, counts{ok,skip,missing,error}, total_rows, s3_requests, per_unit[]}`. `--dry-run` writes the same report with `transferred=0`.
+**Logging / report artifacts:** human-readable per-unit lines include `[completed/total]`, identity/status, rows, output bytes, unit time, aggregate elapsed/throughput, and a caveated observed-rate ETA. The machine report `data/reports/binance_download/<run-id>.json` records `counts{ok,skip,missing,error,hard_stop,cancelled,missing_required}`, `total_rows`, `total_out_bytes`, `per_unit[]`, `runtime_projection`, and `progress{completed,total,elapsed_seconds,rows_per_second,output_bytes_per_second,observed_eta_seconds,terminal_state,eta_caveat}`. Hard-stop/cancelled states never enter `_manifest.jsonl`; `--dry-run` records zero transfer.
 
 ---
 
-## Requirement 9 — Tests (for the future implementation)
+## Requirement 9 — Tests (implemented; #105 additions)
 
 All synthetic; **no live vendor calls in tests** (inject fakes for any lister/reader). Follow TDD: write the failing test first, run it red, implement minimally, run it green, commit.
 
@@ -276,6 +303,11 @@ All synthetic; **no live vendor calls in tests** (inject fakes for any lister/re
 7. **Native/Python conformance on tiny synthetic fixtures** (`test_binance_recon_conformance.py`): Binance-shaped `book_delta_v2` (`price_scale=10`) — native `(frame,meta)` equals Python on valid-seed / stranded→reseed / same-ts-order / no-seed / `frame_out=False`; **skipped** when `recon_native` is absent (`native_available()` is False), so `pytest -q` passes without Rust.
 8. **Engine-time selection + `origin_time` fallback** (`test_lake_binance_engine_time.py`): exercises the Requirement 4 policy so an implementation cannot satisfy the plan while Stage 2 still crashes on a partial day — (a) 100% `origin_time` → selected, recon-ready; (b) **99.x%-but-not-100%** `origin_time` with fully-populated `received_time` → falls back to `received_time` for the whole day and stamps `engine_time_col`; (c) neither clock fully populated → the invalid-timestamp rows are dropped from the returned frame and the drop count is recorded; **(d) joint clock** — a delta frame and the `book` seed frame resolve to the **same** column (a partial-`origin_time` delta frame forces the seed frame to `received_time` too, never a mixed exchange/capture axis). In every case, assert every returned cleaned frame (the exact frames handed to recon) passes `recon.ingest._require_populated` on the **one** shared column — recon never receives a partially-populated or mixed-clock engine-time axis.
 9. **Seed-source crossed-rate gate** (`test_lake_binance_seed_source.py`): a synthetic `book` seed frame with **>5%** crossed candidates → the day classifies `inconclusive` and **no** certified top-K frame is emitted, even when one individually-valid snapshot exists; a clean (**<5%**) source certifies normally. Asserts `seed_source_crossed_frac` is recorded and drives the gate (mirrors the Coinbase `run_coinbase_quality_map.py` contract; no vendor access).
+
+10. **Concurrency contract** (`test_g0bn_acquisition_preflight.py`, `test_download_lake_binance_pure.py`): reject missing, bool-as-int, zero/negative, excessive, and within-bound drift for Stage-1/Stage-2 jobs before any vendor/quota call; exact packet commands bind matching stage/jobs in both the offline gate and work command.
+11. **Parallel cancellation and progress** (`test_download_lake_binance.py`): a quota race starts no more than the bounded initial wave, publishes no partial, leaves a valid deterministic manifest, accounts every hard-stop/cancelled unit in the report, skips post-stop vendor telemetry, and emits serial/parallel/error terminal progress.
+12. **SIGINT resume** (`test_download_lake_binance.py`): an interrupted stream may leave only `.tmp`; it is not complete or manifested, and `--resume` removes/restarts it into one valid final record.
+13. **Bounded high-latency read** (`test_download_lake_binance.py`): local synthetic Parquet proves one-row-group pre-buffering preserves rows/bytes and batch bounds while materially reducing modeled high-latency range calls, with no network or vendor access.
 
 ---
 
