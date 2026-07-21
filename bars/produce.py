@@ -1375,6 +1375,17 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
                   "aliasing path template would otherwise fail only mid-write, "
                   "after the raw burn, stranding an unattested artifact)")
         resolved_outputs[real] = p
+        parent = os.path.dirname(real) or os.curdir
+        if not os.path.isdir(parent):
+            _fail("output paths",
+                  f"parent directory {parent!r} of output path {p!r} is not an "
+                  "existing directory; a mistyped output location must fail "
+                  "before the raw burn, not mid-write after it")
+        if not os.access(parent, os.W_OK | os.X_OK):
+            _fail("output paths",
+                  f"parent directory {parent!r} of output path {p!r} is not "
+                  "writable; the one-shot publication would fail only after "
+                  "the raw burn")
     existing = [p for p in fresh if os.path.exists(p)]
     if existing:
         raise FileExistsError(

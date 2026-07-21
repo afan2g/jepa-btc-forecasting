@@ -348,6 +348,38 @@ def test_aliasing_output_paths_reject_before_any_source_open(custody, tmp_path,
         assert not (tmp_path / name).exists()
 
 
+def test_missing_output_parent_rejects_before_any_source_open(custody, tmp_path,
+                                                              monkeypatch):
+    """A mistyped output location (missing parent directory, or a parent that is
+    a file) must fail before the raw claim/source reads — not mid-write after
+    the burn, which would strand a matrix without a manifest/attestation."""
+    parent_file = tmp_path / "not_a_dir"
+    parent_file.write_text("occupied", encoding="utf-8")
+
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    cases = [
+        {"manifest_path": tmp_path / "missing" / "oos_manifest.json"},
+        {"attestation_path": tmp_path / "absent" / "attestation.json"},
+        {"matrix_path": parent_file / "oos_matrix.parquet"},
+    ]
+    for over in cases:
+        with pytest.raises(ValueError, match="parent directory"):
+            _materialize(custody, tmp_path, **over)
+    object_files = {str(p) for p in custody["object_paths"].values()}
+    assert not (set(opened) & object_files)
+    for name in ("oos_matrix.parquet", "oos_manifest.json",
+                 "g0bn-materialization-attestation-v1.json",
+                 "g0bn-materialization-attestation-v1.json.tmp"):
+        assert not (tmp_path / name).exists()
+
+
 # ------------------------------------------------------------------- read spies
 
 
