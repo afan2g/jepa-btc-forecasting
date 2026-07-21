@@ -956,6 +956,16 @@ def _build_frame(config: dict, runtime: RuntimeParams, *, partition: str,
             "is never published (fail closed)")
     frame = _finalize_frame(rows, tags, extra_cols)
     row_counts = {tag: int((frame["horizon"] == tag).sum()) for tag in tags}
+    min_rows = int(config["cv"]["n_groups"])
+    thin = {tag: n for tag, n in row_counts.items() if n < min_rows}
+    if thin:
+        raise ValueError(
+            f"the {partition} build left declared horizon(s) below the CPCV "
+            f"minimum cv.n_groups={min_rows}: {thin}; every declared horizon "
+            "must survive masking with at least n_groups rows (plan section on "
+            "horizon survival) — a manifest declaring an unusable horizon is "
+            "never published (the consumer would reject the empty slice or "
+            "raise n_groups > n_samples after the fact)")
     return _FrameBuild(frame=frame, row_counts=row_counts,
                        drop_counts=counter.counts,
                        realized_schedule=realized_schedule, history=history,

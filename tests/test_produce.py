@@ -307,6 +307,24 @@ def test_gap_between_days_drops_first_post_gap_bar_via_lookback_cap(tmp_path):
     assert all(n >= 1 for n in result.drop_counts["lookback_cap"].values())
 
 
+def test_thin_horizon_below_n_groups_fails_closed(tmp_path):
+    """A non-empty build that leaves any declared horizon with fewer than
+    cv.n_groups surviving rows must fail at production time: the manifest would
+    declare every horizon, but the artifact is rejected downstream (empty-slice
+    check / CPCV n_groups > n_samples) — successful-but-unusable."""
+    target = 4  # two synthetic days yield 3 surviving rows per horizon (< 6)
+    config = produce_config(clock=make_clock(target_bars_per_day=target,
+                                             time_cap_ns=TIME_CAP_NS))
+    runtime = make_runtime(threshold=ThresholdConfig(
+        target_bars_per_day=target, window_days=3, warmup_days=1,
+        seed_threshold=SEED_THRESHOLD, min_covered_fraction=0.0))
+    with pytest.raises(ValueError, match="n_groups"):
+        _build(tmp_path, [("2025-11-01", {}), ("2025-11-02", {})],
+               config=config, runtime=runtime)
+    assert not (tmp_path / "matrix.parquet").exists()
+    assert not (tmp_path / "manifest.json").exists()
+
+
 def test_partition_end_prefilter_is_per_horizon(tmp_path):
     # the default dev fixture scope stops at Nov 24; the December partition-end
     # days need the full-window exclusions block
