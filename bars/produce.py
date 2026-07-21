@@ -1353,19 +1353,19 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
     _validate_clock_state(clock_state, runtime=runtime, config=config,
                           before_ns=holdout_start_ns)
 
-    # the durable claim is the FIRST file this materializer reads
-    claim = _load_raw_access_claim(raw_access_claim_path, config=config,
-                                   plan=plan, freeze=freeze)
-
-    normalized = [o for o in plan["object_allowlist"] if o["layer"] == "normalized"]
-    paths_by_id = _validate_object_paths(object_paths, normalized)
-
-    # fresh-output preflight (path existence is an allowed preflight input,
-    # spec section 5.1); write_holdout re-checks matrix/manifest with O_EXCL
+    # fresh-output preflight — pure path metadata (an allowed preflight input,
+    # spec section 5.1), so it runs BEFORE the claim read: a predictable
+    # output-path failure must never consume the claim or touch any source.
+    # write_holdout re-checks matrix/manifest with O_EXCL.
     fresh = [os.fspath(matrix_path), os.fspath(manifest_path),
              os.fspath(attestation_path), os.fspath(attestation_path) + ".tmp"]
     resolved_outputs: dict[str, str] = {}
     for p in fresh:
+        if os.path.islink(p):
+            _fail("output paths",
+                  f"{p!r} is a symlink; one-shot outputs are created fresh at "
+                  "real paths only (a dangling link defeats the existence "
+                  "preflight and would fail O_EXCL only after the raw burn)")
         real = os.path.realpath(p)
         if real in resolved_outputs:
             _fail("output paths",
@@ -1391,6 +1391,13 @@ def materialize_holdout(*, config: dict, plan: dict, freeze: dict,
         raise FileExistsError(
             f"refusing blind materialization onto existing output path(s): "
             f"{existing}; the one-shot write requires fresh derived artifacts")
+
+    # the durable claim is the FIRST file this materializer reads
+    claim = _load_raw_access_claim(raw_access_claim_path, config=config,
+                                   plan=plan, freeze=freeze)
+
+    normalized = [o for o in plan["object_allowlist"] if o["layer"] == "normalized"]
+    paths_by_id = _validate_object_paths(object_paths, normalized)
 
     # pin every sealed object to ONE held descriptor (the first source opens —
     # strictly after the claim read above), hash-verify the COMPLETE scope over

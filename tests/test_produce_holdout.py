@@ -342,6 +342,8 @@ def test_aliasing_output_paths_reject_before_any_source_open(custody, tmp_path,
             _materialize(custody, tmp_path, **over)
     object_files = {str(p) for p in custody["object_paths"].values()}
     assert not (set(opened) & object_files)
+    # the output preflight is pure path metadata and precedes the claim read
+    assert str(custody["claim_path"]) not in opened
     for name in ("oos_matrix.parquet", "oos_manifest.json",
                  "g0bn-materialization-attestation-v1.json",
                  "g0bn-materialization-attestation-v1.json.tmp"):
@@ -374,6 +376,40 @@ def test_missing_output_parent_rejects_before_any_source_open(custody, tmp_path,
             _materialize(custody, tmp_path, **over)
     object_files = {str(p) for p in custody["object_paths"].values()}
     assert not (set(opened) & object_files)
+    # the output preflight is pure path metadata and precedes the claim read
+    assert str(custody["claim_path"]) not in opened
+    for name in ("oos_matrix.parquet", "oos_manifest.json",
+                 "g0bn-materialization-attestation-v1.json",
+                 "g0bn-materialization-attestation-v1.json.tmp"):
+        assert not (tmp_path / name).exists()
+
+
+def test_dangling_output_symlink_rejects_before_any_source_open(custody, tmp_path,
+                                                                monkeypatch):
+    """A dangling symlink at an output path passes an existence check (exists()
+    follows the link) but makes the later O_EXCL create fail with FileExistsError
+    — after the burn. Output paths must not be symlinks at all."""
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    for name in ("dangling_manifest.json", "dangling_attestation.json"):
+        link = tmp_path / name
+        link.symlink_to(tmp_path / f"missing-target-{name}")
+    cases = [
+        {"manifest_path": tmp_path / "dangling_manifest.json"},
+        {"attestation_path": tmp_path / "dangling_attestation.json"},
+    ]
+    for over in cases:
+        with pytest.raises(ValueError, match="symlink"):
+            _materialize(custody, tmp_path, **over)
+    object_files = {str(p) for p in custody["object_paths"].values()}
+    assert not (set(opened) & object_files)
+    assert str(custody["claim_path"]) not in opened
     for name in ("oos_matrix.parquet", "oos_manifest.json",
                  "g0bn-materialization-attestation-v1.json",
                  "g0bn-materialization-attestation-v1.json.tmp"):
