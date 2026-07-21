@@ -311,9 +311,12 @@ def make_clock(**over) -> dict:
         "target_bars_per_day": 5000,
         "time_cap_ns": 60_000_000_000,
         "warmup_bars": 50,
-        "coverage_normalization": "coverage_normalized_threshold_v1",
+        # The rule identities the T9 producer actually implements and reconciles
+        # (bars/produce.py _ADAPTIVE_THRESHOLD_RULE/_COVERAGE_NORMALIZATION_RULE);
+        # a foreign spelling here fails _validate_runtime, never a silent re-pin.
+        "coverage_normalization": "full_day_coverage_v1",
         "monotone_watermark": True,
-        "adaptive_threshold_update_rule": "causal_daily_ewma_threshold_v1",
+        "adaptive_threshold_update_rule": "trailing_window_mean_threshold_v1",
         "development_end_state_sha256": sha_hex("clock-dev-end-state"),
     }
     d.update(over)
@@ -357,7 +360,10 @@ def make_costs(**over) -> dict:
         "cost_assumption": {
             "venue": "binance",
             "product": "BTC-USDT-PERP",
-            "source": "binance-futures/normalized_v1",
+            # must equal source_certification.normalized_schema_version: the
+            # T9 producer binds the assumption to the certified normalized
+            # contract identity the cost inputs derive from
+            "source": "g0bn_normalized_v1",
             "version": "g0bn-cost-v1",
             "taker_fee_bps": 4.5,
             "base_slippage_bps": 0.5,
@@ -413,8 +419,13 @@ def make_partition(**over) -> dict:
         "partition_guard_ns": 120_000_000_000,
         "prefilter_rule": "t_event + horizons[horizon] + partition_guard_ns < partition_end_ns",
         "development_drop_counts": {"2s": 180, "10s": 240, "60s": 900},
+        # The T9 producer's pinned drop taxonomy (bars/produce.py
+        # DROP_COUNT_CATEGORIES), spelled literally so a drift in the
+        # implementation fails these fixtures instead of silently re-pinning.
         "holdout_drop_count_categories": [
-            "before_start", "prefilter", "actual_span", "staleness", "lookback_cap",
+            "warmup", "day_end_truncation", "book_rejection", "staleness",
+            "feature_rejection", "before_start", "lookback_cap", "prefilter",
+            "coverage_gap", "label_rejection", "actual_span",
         ],
         "sufficiency_thresholds": {"min_valid_days": 20, "min_uniqueness_sum": 100},
     }

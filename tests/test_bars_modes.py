@@ -1,11 +1,13 @@
 """Source-mode contract (issue #61 / plan §Staged dataset modes): the producer runs in
-exactly two modes — `coinbase_only` must never open a Binance input, `cross_venue` may
-open both. T1 ships only the minimal contract later tasks (T2/T4/T9) build on; the
-enforcement here is fail-closed so a mode typo or an unauthorized venue open raises
-instead of silently building the wrong arm."""
+exactly the staged modes — `coinbase_only` must never open a Binance input,
+`cross_venue` may open both, and `binance_single_venue` (the G0-BN arm added by
+#67/T9) must never open a Coinbase input. The enforcement is fail-closed so a mode
+typo or an unauthorized venue open raises instead of silently building the wrong
+arm."""
 import pytest
 
 from bars.modes import (
+    BINANCE_SINGLE_VENUE,
     COINBASE_ONLY,
     CROSS_VENUE,
     SOURCE_MODES,
@@ -17,10 +19,11 @@ from bars.modes import (
 )
 
 
-def test_source_modes_are_exactly_the_two_staged_modes():
-    assert SOURCE_MODES == (COINBASE_ONLY, CROSS_VENUE)
+def test_source_modes_are_exactly_the_staged_modes():
+    assert SOURCE_MODES == (COINBASE_ONLY, CROSS_VENUE, BINANCE_SINGLE_VENUE)
     assert COINBASE_ONLY == "coinbase_only"
     assert CROSS_VENUE == "cross_venue"
+    assert BINANCE_SINGLE_VENUE == "binance_single_venue"
 
 
 def test_resolve_source_mode_accepts_known_and_rejects_unknown():
