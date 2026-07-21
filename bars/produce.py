@@ -1014,7 +1014,15 @@ def _assemble_row(rec: _Candidate, tag: str, label: LabelRow,
         # simple mid-ratio in bps of P0; log(P/P0) == log1p(simple/1e4) converts
         # the SAME physical move exactly into the pinned representation. The
         # barrier decision (label/t_barrier) is T5's touch event either way —
-        # only the published magnitude changes space.
+        # only the published magnitude changes space. That split is itself the
+        # pinned design, not an accident: the config carries TWO separate label
+        # identities — labels.barrier_estimator == trailing_ewma_vol_v1 (T5's
+        # merged estimator: trailing EWMA vol of simple-bps mid returns, with
+        # the #69-evidenced TP/SL multipliers and vol floor calibrated in that
+        # space, deciding label/t_barrier) and labels.return_formula (the
+        # published y_fwd_bps target's formula). Re-deriving barriers in log
+        # space would rewrite T5's estimator identity, not this producer;
+        # identity-naming reconciliation is tracked on #93.
         "y_fwd_bps": 1e4 * math.log1p(float(label.y_fwd_bps) / 1e4),
         "label": int(label.label),
         "t_event": int(rec.t_event),
